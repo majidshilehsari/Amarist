@@ -75,7 +75,7 @@ export default function ResearchModes() {
   return (
     <section
       id="modes"
-      className="scroll-mt-20 border-y border-stone-200 bg-white py-20 lg:py-24"
+      className="scroll-mt-20 bg-white py-16 lg:py-24"
     >
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <SectionHeading

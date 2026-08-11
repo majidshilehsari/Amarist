@@ -1,11 +1,6 @@
 import { Sigma } from "lucide-react";
 
-const links = [
-  { href: "#services", label: "خدمات" },
-  { href: "#modes", label: "حالت‌های پژوهشی" },
-  { href: "#how", label: "نحوه کار" },
-  { href: "#features", label: "ویژگی‌ها" },
-];
+const links = [{ href: "#modes", label: "حالت‌های پژوهشی" }];
 
 export default function Navbar() {
   return (
@@ -36,7 +31,7 @@ export default function Navbar() {
         </div>
 
         <a
-          href="#cta"
+          href="#modes"
           className="rounded-full bg-stone-900 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-indigo-600"
         >
           شروع کنید

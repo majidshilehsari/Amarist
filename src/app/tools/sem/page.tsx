@@ -2,10 +2,14 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronLeft,
+  ChevronRight,
   Copy,
+  Database,
   Download,
   FileSpreadsheet,
   FileText,
+  FolderPlus,
   Play,
   Plus,
   RefreshCw,
@@ -14,7 +18,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { Document, Packer, Paragraph, TextRun } from "docx";
-import { fmt, fmtP } from "@/lib/statistics";
+import { fmt, fmtP, mean, sampleStd } from "@/lib/statistics";
 import {
   cronbachAlpha,
   estimateSem,
@@ -40,10 +44,9 @@ import {
   type VariableSpec,
 } from "@/lib/sem-generator";
 import ErrorBoundary from "@/components/error-boundary";
-import ExpandableSection from "@/components/expandable-section";
 import PathDiagram from "@/components/path-diagram";
+import ProgressStepper from "@/components/progress-stepper";
 import ResultModal from "@/components/result-modal";
-import SectionNav from "@/components/section-nav";
 import ToolHeader from "@/components/tool-header";
 
 // ------------------------------------------------------------
@@ -69,6 +72,7 @@ const sectionTones = [
   "border-emerald-300 bg-emerald-50/50 dark:border-emerald-900 dark:bg-slate-900",
   "border-rose-300 bg-rose-50/50 dark:border-rose-900 dark:bg-slate-900",
   "border-sky-300 bg-sky-50/50 dark:border-sky-900 dark:bg-slate-900",
+  "border-teal-300 bg-teal-50/50 dark:border-teal-900 dark:bg-slate-900",
 ];
 
 function badge(ok: boolean, text: string): string {
@@ -101,10 +105,6 @@ function AssumptionNote({ condition, pass }: { condition: string; pass: boolean 
   );
 }
 
-// ------------------------------------------------------------
-// سلول قابل ویرایش
-// ------------------------------------------------------------
-
 function Cell({ value, onCommit }: { value: number | null; onCommit: (v: number | null) => void }) {
   const [txt, setTxt] = useState(value == null ? "" : String(value));
   const [lastValue, setLastValue] = useState(value);
@@ -134,7 +134,7 @@ function Cell({ value, onCommit }: { value: number | null; onCommit: (v: number 
 }
 
 // ------------------------------------------------------------
-// ابزارها
+// ابزارهای عمومی
 // ------------------------------------------------------------
 
 function normName(s: string): string {
@@ -201,6 +201,173 @@ function computeNodeCols(
     }
   });
   return { nodeCols, indicatorCols };
+}
+
+function varNameOf(vars: VariableSpec[], id: number): string {
+  return vars.find((v) => v.id === id)?.name ?? `متغیر ${id}`;
+}
+
+// ------------------------------------------------------------
+// تایپ‌ها
+// ------------------------------------------------------------
+
+type BootResult = {
+  fromVar: number;
+  toVar: number;
+  viaVar: number | null;
+  direct: number;
+  indirect: number;
+  lo: number;
+  hi: number;
+  p: number;
+  total: number;
+};
+
+type Analysis = {
+  nodeIds: number[];
+  nodeCols: number[][];
+  sem: SemResults;
+  corr: { r: number[][]; p: number[][] };
+  maha: ReturnType<typeof mahalanobisDistances>;
+  mardia: ReturnType<typeof mardiaTest>;
+  missing: { col: string; count: number }[];
+  normals: { name: string; skew: number; kurt: number }[];
+  meas: { varId: number; name: string; alpha: number; loadings: number[]; subNames: string[] }[];
+};
+
+type ModalState = { ok: boolean; lines: string[] } | null;
+
+// ------------------------------------------------------------
+// پروژه‌ها (ذخیره در مرورگر)
+// ------------------------------------------------------------
+
+type ProjectData = {
+  source: "generate" | "real";
+  vars: VariableSpec[];
+  inactiveArrowIds: string[];
+  constraints: GenConstraints;
+  n: string;
+  columns: string[];
+  rows: (number | null)[][];
+  colMap: Record<number, (number | null)[]>;
+};
+
+type Project = {
+  id: string;
+  name: string;
+  updatedAt: string;
+  data: ProjectData;
+};
+
+const PROJECTS_KEY = "amarist-projects";
+
+function loadProjects(): Project[] {
+  try {
+    const raw = localStorage.getItem(PROJECTS_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw) as Project[];
+      if (Array.isArray(arr)) return arr.filter((p) => p && p.data);
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+function saveProjects(projects: Project[]) {
+  try {
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+  } catch {
+    // ignore
+  }
+}
+
+function uid(): string {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+}
+
+function defaultConstraints(): GenConstraints {
+  return {
+    pathTargets: {},
+    indirectTargets: {},
+    r2Range: { min: 0.3, max: 0.6 },
+    cfiMin: 0.9,
+    rmseaMax: 0.08,
+    chi2dfMax: 3,
+    srmrMax: 0.08,
+    missingPct: 0,
+    outlierPct: 0,
+    enforceNormality: true,
+    enforceLinearity: true,
+    enforceVif: true,
+    enforceDw: true,
+    bootSamples: 5000,
+  };
+}
+
+const initialVars: VariableSpec[] = [
+  {
+    id: 0,
+    name: "طرحواره‌های ناسازگار اولیه",
+    role: "exogenous",
+    hasTotal: true,
+    totalMin: 5,
+    totalMax: 25,
+    subscales: [
+      { name: "حوزه اول: بریدگی و طرد", min: 1, max: 5 },
+      { name: "حوزه دوم: خودگردانی و عملکرد مختل", min: 1, max: 5 },
+      { name: "حوزه سوم: محدودیت‌های مختل", min: 1, max: 5 },
+      { name: "حوزه چهارم: دیگرجهت‌مندی", min: 1, max: 5 },
+      { name: "حوزه پنجم: گوش‌به‌زنگی بیش از حد و بازداری", min: 1, max: 5 },
+    ],
+  },
+  {
+    id: 1,
+    name: "اعتیاد به اینستاگرام",
+    role: "mediator",
+    hasTotal: true,
+    totalMin: 2,
+    totalMax: 10,
+    subscales: [
+      { name: "اثر اجتماعی", min: 1, max: 5 },
+      { name: "اجبار", min: 1, max: 5 },
+    ],
+  },
+  {
+    id: 2,
+    name: "نشخوار فکری",
+    role: "mediator",
+    hasTotal: true,
+    totalMin: 3,
+    totalMax: 15,
+    subscales: [
+      { name: "تأمل", min: 1, max: 5 },
+      { name: "درون‌نگری", min: 1, max: 5 },
+      { name: "در فکر فرو رفتن", min: 1, max: 5 },
+    ],
+  },
+  {
+    id: 3,
+    name: "احساس تنهایی",
+    role: "outcome",
+    hasTotal: true,
+    totalMin: 1,
+    totalMax: 5,
+    subscales: [{ name: "احساس تنهایی", min: 1, max: 5 }],
+  },
+];
+
+function defaultProjectData(): ProjectData {
+  return {
+    source: "generate",
+    vars: initialVars,
+    inactiveArrowIds: [],
+    constraints: defaultConstraints(),
+    n: "250",
+    columns: [],
+    rows: [],
+    colMap: {},
+  };
 }
 
 // ------------------------------------------------------------
@@ -337,148 +504,33 @@ function buildReportText(
   return L.join("\n");
 }
 
-function varNameOf(vars: VariableSpec[], id: number): string {
-  return vars.find((v) => v.id === id)?.name ?? `متغیر ${id}`;
-}
-
-// ------------------------------------------------------------
-// تایپ‌ها
-// ------------------------------------------------------------
-
-type BootResult = {
-  fromVar: number;
-  toVar: number;
-  viaVar: number | null;
-  direct: number;
-  indirect: number;
-  lo: number;
-  hi: number;
-  p: number;
-  total: number;
-};
-
-type Analysis = {
-  nodeIds: number[];
-  nodeCols: number[][];
-  sem: SemResults;
-  corr: { r: number[][]; p: number[][] };
-  maha: ReturnType<typeof mahalanobisDistances>;
-  mardia: ReturnType<typeof mardiaTest>;
-  missing: { col: string; count: number }[];
-  normals: { name: string; skew: number; kurt: number }[];
-  meas: { varId: number; name: string; alpha: number; loadings: number[]; subNames: string[] }[];
-};
-
-type ModalState = { ok: boolean; lines: string[] } | null;
 
 // ------------------------------------------------------------
 // کامپوننت اصلی
 // ------------------------------------------------------------
 
-const initialVars: VariableSpec[] = [
-  {
-    id: 0,
-    name: "طرحواره‌های ناسازگار اولیه",
-    role: "exogenous",
-    hasTotal: true,
-    totalMin: 5,
-    totalMax: 25,
-    subscales: [
-      { name: "حوزه اول: بریدگی و طرد", min: 1, max: 5 },
-      { name: "حوزه دوم: خودگردانی و عملکرد مختل", min: 1, max: 5 },
-      { name: "حوزه سوم: محدودیت‌های مختل", min: 1, max: 5 },
-      { name: "حوزه چهارم: دیگرجهت‌مندی", min: 1, max: 5 },
-      { name: "حوزه پنجم: گوش‌به‌زنگی بیش از حد و بازداری", min: 1, max: 5 },
-    ],
-  },
-  {
-    id: 1,
-    name: "اعتیاد به اینستاگرام",
-    role: "mediator",
-    hasTotal: true,
-    totalMin: 2,
-    totalMax: 10,
-    subscales: [
-      { name: "اثر اجتماعی", min: 1, max: 5 },
-      { name: "اجبار", min: 1, max: 5 },
-    ],
-  },
-  {
-    id: 2,
-    name: "نشخوار فکری",
-    role: "mediator",
-    hasTotal: true,
-    totalMin: 3,
-    totalMax: 15,
-    subscales: [
-      { name: "تأمل", min: 1, max: 5 },
-      { name: "درون‌نگری", min: 1, max: 5 },
-      { name: "در فکر فرو رفتن", min: 1, max: 5 },
-    ],
-  },
-  {
-    id: 3,
-    name: "احساس تنهایی",
-    role: "outcome",
-    hasTotal: true,
-    totalMin: 1,
-    totalMax: 5,
-    subscales: [{ name: "احساس تنهایی", min: 1, max: 5 }],
-  },
-];
-
 function SemTool() {
+  // ---------- پروژه‌ها ----------
+  const [projects, setProjects] = useState<Project[]>(() => {
+    const existing = loadProjects();
+    if (existing.length) return existing;
+    const seed: Project = {
+      id: uid(),
+      name: "پروژه پیش‌فرض",
+      updatedAt: new Date().toISOString(),
+      data: defaultProjectData(),
+    };
+    saveProjects([seed]);
+    return [seed];
+  });
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const currentProject = projects.find((p) => p.id === projectId) ?? null;
+
+  // ---------- state های کاری ----------
   const [source, setSource] = useState<"generate" | "real">("generate");
   const [vars, setVars] = useState<VariableSpec[]>(initialVars);
   const [inactiveArrowIds, setInactiveArrowIds] = useState<Set<string>>(() => new Set());
-
-  // همگام‌سازی متغیرها با localStorage تا صفحه آلفای کرونباخ از آن استفاده کند
-  useEffect(() => {
-    try {
-      localStorage.setItem("amarist-sem-vars", JSON.stringify(vars));
-    } catch {
-      // ignore
-    }
-  }, [vars]);
-  const nodes = useMemo(() => buildModelNodes(vars), [vars]);
-  const allArrows = useMemo(() => buildModelArrows(nodes), [nodes]);
-  const arrows = useMemo(
-    () => allArrows.filter((a) => !inactiveArrowIds.has(a.id)),
-    [allArrows, inactiveArrowIds]
-  );
-
-  // متغیرهایی که هیچ فلش فعالی ندارند از مدل حذف می‌شوند (ایزوله)
-  const connectedVarIds = useMemo(() => {
-    const s = new Set<number>();
-    arrows.forEach((a) => {
-      s.add(a.fromVar);
-      s.add(a.toVar);
-    });
-    return s;
-  }, [arrows]);
-  const modelVars = useMemo(
-    () => vars.filter((v) => connectedVarIds.has(v.id)),
-    [vars, connectedVarIds]
-  );
-  const modelNodes = useMemo(() => buildModelNodes(modelVars), [modelVars]);
-  const modelArrows = arrows;
-  const isolatedVars = vars.filter((v) => !connectedVarIds.has(v.id));
-  const [constraints, setConstraints] = useState<GenConstraints>({
-    pathTargets: {},
-    indirectTargets: {},
-    r2Range: { min: 0.3, max: 0.6 },
-    cfiMin: 0.9,
-    rmseaMax: 0.08,
-    chi2dfMax: 3,
-    srmrMax: 0.08,
-    missingPct: 0,
-    outlierPct: 0,
-    enforceNormality: true,
-    enforceLinearity: true,
-    enforceVif: true,
-    enforceDw: true,
-    bootSamples: 5000,
-  });
+  const [constraints, setConstraints] = useState<GenConstraints>(defaultConstraints);
   const [n, setN] = useState("250");
   const [columns, setColumns] = useState<string[]>([]);
   const [rows, setRows] = useState<(number | null)[][]>([]);
@@ -488,22 +540,187 @@ function SemTool() {
   const [bootResults, setBootResults] = useState<BootResult[] | null>(null);
   const [bootBusy, setBootBusy] = useState(false);
   const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({
-    text: "هنوز تحلیلی اجرا نشده است.",
+    text: "",
     kind: "",
   });
   const [footerMsg, setFooterMsg] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>(null);
   const [showBigDiagram, setShowBigDiagram] = useState(false);
-  const [viewMode, setViewMode] = useState<"both" | "inputs" | "outputs">("both");
+  const [activeStep, setActiveStep] = useState(0);
+  const [wantAlpha, setWantAlpha] = useState(true);
   const [backupModal, setBackupModal] = useState(false);
   const [backupName, setBackupName] = useState("");
+  const [backupScope, setBackupScope] = useState<"all" | "one">("all");
+  const [projectModal, setProjectModal] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
 
+  // ---------- گره‌ها و فلش‌ها ----------
+  const nodes = useMemo(() => buildModelNodes(vars), [vars]);
+  const allArrows = useMemo(() => buildModelArrows(nodes), [nodes]);
+  const arrows = useMemo(
+    () => allArrows.filter((a) => !inactiveArrowIds.has(a.id)),
+    [allArrows, inactiveArrowIds]
+  );
+  const connectedVarIds = useMemo(() => {
+    const s = new Set<number>();
+    arrows.forEach((a) => {
+      s.add(a.fromVar);
+      s.add(a.toVar);
+    });
+    return s;
+  }, [arrows]);
+  const modelVars = useMemo(() => vars.filter((v) => connectedVarIds.has(v.id)), [vars, connectedVarIds]);
+  const modelNodes = useMemo(() => buildModelNodes(modelVars), [modelVars]);
+  const modelArrows = arrows;
+  const isolatedVars = vars.filter((v) => !connectedVarIds.has(v.id));
   const nodeLabel = useCallback(
     (id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`,
     [nodes]
   );
+
+  const analysisValid =
+    !!analysis &&
+    analysis.nodeIds.length === modelNodes.length &&
+    analysis.nodeIds.every((id, i) => id === modelNodes[i].nodeId);
+
+  const hasLatent = vars.some((v) => v.subscales.length > 0);
+  const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان (مکنون)" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
+  const varName = (id: number) => varNameOf(vars, id);
+
+  // ---------- مراحل استپر ----------
+  const steps = useMemo(() => {
+    const list: { id: string; label: string; short?: string }[] = [
+      { id: "project", label: "پروژه و منبع داده", short: "پروژه" },
+      { id: "variables", label: "مشخصات متغیرها", short: "متغیرها" },
+      { id: "draw", label: "ترسیم مدل", short: "مدل" },
+    ];
+    if (source === "generate") list.push({ id: "constraints", label: "قیود تولید داده", short: "قیود" });
+    list.push(
+      { id: "data", label: "جدول داده‌ها", short: "داده" },
+      { id: "assumptions", label: "بررسی پیش‌فرض‌ها", short: "پیش‌فرض" },
+      { id: "descriptive", label: "یافته‌های توصیفی", short: "توصیفی" },
+      { id: "diagram", label: "دیاگرام مدل", short: "دیاگرام" },
+      { id: "inferential", label: "یافته‌های استنباطی", short: "استنباطی" }
+    );
+    if (wantAlpha) list.push({ id: "alpha", label: "آلفای کرونباخ", short: "آلفا" });
+    list.push({ id: "report", label: "نگارش گزارش", short: "گزارش" });
+    return list;
+  }, [source, wantAlpha]);
+
+  const stepIdx = (id: string) => steps.findIndex((s) => s.id === id);
+
+
+  // ---------- اعمال/ذخیره پروژه ----------
+  const applyProjectData = useCallback((data: ProjectData) => {
+    setSource(data.source);
+    setVars(data.vars);
+    setInactiveArrowIds(new Set(data.inactiveArrowIds ?? []));
+    setConstraints(data.constraints);
+    setN(data.n ?? "250");
+    setColumns(data.columns ?? []);
+    setRows(data.rows ?? []);
+    setColMap(data.colMap ?? {});
+    setAnalysis(null);
+    setAnswerKey(null);
+    setBootResults(null);
+  }, []);
+
+  // بارگذاری اولین پروژه هنگام شروع
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (!projectId && projects.length) {
+        const first = projects[0];
+        setProjectId(first.id);
+        applyProjectData(first.data);
+      }
+    }, 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ذخیره خودکار پروژه فعلی
+  useEffect(() => {
+    if (!projectId) return;
+    const t = setTimeout(() => {
+      setProjects((prev) => {
+        const next = prev.map((p) =>
+          p.id === projectId
+            ? {
+                ...p,
+                updatedAt: new Date().toISOString(),
+                data: {
+                  source,
+                  vars,
+                  inactiveArrowIds: [...inactiveArrowIds],
+                  constraints,
+                  n,
+                  columns,
+                  rows,
+                  colMap,
+                },
+              }
+            : p
+        );
+        saveProjects(next);
+        return next;
+      });
+    }, 100);
+    return () => clearTimeout(t);
+  }, [projectId, source, vars, inactiveArrowIds, constraints, n, columns, rows, colMap]);
+
+  // همگام‌سازی متغیرها با localStorage برای صفحه آلفا
+  useEffect(() => {
+    try {
+      localStorage.setItem("amarist-sem-vars", JSON.stringify(vars));
+    } catch {
+      // ignore
+    }
+  }, [vars]);
+
+  const switchProject = (id: string) => {
+    const p = projects.find((x) => x.id === id);
+    if (!p) return;
+    setProjectId(id);
+    applyProjectData(p.data);
+    setActiveStep(0);
+    setStatus({ text: `پروژه «${p.name}» بارگذاری شد.`, kind: "ok" });
+  };
+
+  const createProject = () => {
+    const name = newProjectName.trim() || `پروژه ${projects.length + 1}`;
+    const p: Project = {
+      id: uid(),
+      name,
+      updatedAt: new Date().toISOString(),
+      data: defaultProjectData(),
+    };
+    setProjects((prev) => {
+      const next = [...prev, p];
+      saveProjects(next);
+      return next;
+    });
+    setProjectModal(false);
+    setNewProjectName("");
+    switchProject(p.id);
+  };
+
+  const deleteProject = (id: string) => {
+    if (projects.length <= 1) {
+      setStatus({ text: "حداقل یک پروژه باید وجود داشته باشد.", kind: "err" });
+      return;
+    }
+    const remaining = projects.filter((p) => p.id !== id);
+    setProjects(remaining);
+    saveProjects(remaining);
+    if (projectId === id) {
+      const next = remaining[0];
+      setProjectId(next.id);
+      applyProjectData(next.data);
+      setActiveStep(0);
+    }
+  };
 
   // ---------- تغییر متغیرها ----------
   const updateVar = (id: number, patch: Partial<VariableSpec>) => {
@@ -522,11 +739,10 @@ function SemTool() {
       subscales: [],
     };
     setVars((prev) => [...prev, newVar]);
-    setStatus({ text: `متغیر «${newVar.name}» اضافه شد؛ نقش و زیرمقیاس‌هایش را تنظیم کنید.`, kind: "ok" });
+    setStatus({ text: `متغیر «${newVar.name}» اضافه شد.`, kind: "ok" });
   };
 
   const removeVar = (id: number) => {
-    const removed = vars.find((v) => v.id === id);
     setVars((prev) => prev.filter((v) => v.id !== id));
     setColMap((prev) => {
       const next = { ...prev };
@@ -550,7 +766,6 @@ function SemTool() {
     setAnalysis(null);
     setAnswerKey(null);
     setBootResults(null);
-    setStatus({ text: removed ? `متغیر «${removed.name}» حذف شد.` : "متغیر حذف شد.", kind: "ok" });
   };
 
   const addSubscale = (id: number) => {
@@ -738,61 +953,63 @@ function SemTool() {
       setStatus({ text: (err as Error).message, kind: "err" });
       setModal({ ok: false, lines: [(err as Error).message] });
     }
-  }, [n, modelVars, modelArrows, constraints, analyze, vars, setModal]);
+  }, [n, modelVars, modelArrows, constraints, analyze, vars]);
 
   const generateRef = useRef(generate);
-
   useEffect(() => {
     generateRef.current = generate;
   });
-
   useEffect(() => {
-    const timer = setTimeout(() => generateRef.current(), 80);
-    return () => clearTimeout(timer);
+    const t = setTimeout(() => {
+      // فقط اگر هنوز داده‌ای تولید نشده
+      if (typeof window !== "undefined" && !loadProjects()[0]?.data.rows.length) {
+        generateRef.current();
+      }
+    }, 150);
+    return () => clearTimeout(t);
   }, []);
 
   // ---------- ایمپورت اکسل ----------
   const handleImport = async (file: File) => {
-      try {
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(buf, { type: "array" });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        if (!ws) throw new Error("فایل اکسل خالی است.");
-        const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null }) as unknown[][];
-        if (!aoa.length) throw new Error("فایل اکسل خالی است.");
-        const first = aoa[0] ?? [];
-        const hasHeader = first.some((v) => typeof v === "string" && !/^-?\d+(\.\d+)?$/.test(v.trim()));
-        const headers: string[] = [];
-        let dataRows = aoa;
-        if (hasHeader) {
-          headers.push(...first.map((v, i) => String(v ?? `ستون ${i + 1}`)));
-          dataRows = aoa.slice(1);
-        } else {
-          headers.push(...first.map((_, i) => `ستون ${i + 1}`));
-        }
-        const parsed = dataRows.map((r) =>
-          Array.from({ length: headers.length }, (_, j) => {
-            const v = (r as unknown[])[j];
-            if (v == null || v === "") return null;
-            const num = Number(String(v).replace(/[،]/g, "").trim());
-            return Number.isFinite(num) ? num : null;
-          })
-        );
-        const cm = autoMap(headers, vars);
-        setSource("real");
-        setColumns(headers);
-        setRows(parsed);
-        setColMap(cm);
-        setStatus({ text: `داده وارد شد: ${parsed.length} مورد × ${headers.length} ستون.`, kind: "ok" });
-        analyze(parsed, cm, headers, true, true);
-      } catch (err) {
-        setStatus({ text: (err as Error).message, kind: "err" });
-        setModal({ ok: false, lines: [(err as Error).message] });
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      if (!ws) throw new Error("فایل اکسل خالی است.");
+      const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null }) as unknown[][];
+      if (!aoa.length) throw new Error("فایل اکسل خالی است.");
+      const first = aoa[0] ?? [];
+      const hasHeader = first.some((v) => typeof v === "string" && !/^-?\d+(\.\d+)?$/.test(v.trim()));
+      const headers: string[] = [];
+      let dataRows = aoa;
+      if (hasHeader) {
+        headers.push(...first.map((v, i) => String(v ?? `ستون ${i + 1}`)));
+        dataRows = aoa.slice(1);
+      } else {
+        headers.push(...first.map((_, i) => `ستون ${i + 1}`));
       }
+      const parsed = dataRows.map((r) =>
+        Array.from({ length: headers.length }, (_, j) => {
+          const v = (r as unknown[])[j];
+          if (v == null || v === "") return null;
+          const num = Number(String(v).replace(/[،]/g, "").trim());
+          return Number.isFinite(num) ? num : null;
+        })
+      );
+      setSource("real");
+      setColumns(headers);
+      setRows(parsed);
+      setColMap(autoMap(headers, vars));
+      setStatus({ text: `داده وارد شد: ${parsed.length} مورد × ${headers.length} ستون.`, kind: "ok" });
+      analyze(parsed, autoMap(headers, vars), headers, true, true);
+    } catch (err) {
+      setStatus({ text: (err as Error).message, kind: "err" });
+      setModal({ ok: false, lines: [(err as Error).message] });
+    }
   };
 
   // ---------- خروجی‌ها ----------
-  const exportExcel = useCallback(() => {
+  const exportExcel = () => {
     try {
       if (!rows.length) throw new Error("داده‌ای برای خروجی وجود ندارد.");
       const wb = XLSX.utils.book_new();
@@ -805,8 +1022,8 @@ function SemTool() {
         XLSX.utils.book_append_sheet(
           wb,
           XLSX.utils.aoa_to_sheet([
-            nodes.map((nd) => nd.label),
-            ...Array.from({ length: rows.length }, (_, i) => nodes.map((nd) => analysis.nodeCols[nd.nodeId][i])),
+            modelNodes.map((nd) => nd.label),
+            ...Array.from({ length: rows.length }, (_, i) => modelNodes.map((nd) => analysis.nodeCols[nd.nodeId][i])),
           ]),
           "نمرات کل / گره‌ها"
         );
@@ -814,7 +1031,7 @@ function SemTool() {
       XLSX.utils.book_append_sheet(
         wb,
         XLSX.utils.aoa_to_sheet(
-          buildReportText(vars, nodes, analysis, answerKey, bootResults, rows.length)
+          buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length)
             .split("\n")
             .map((l) => [l])
         ),
@@ -825,9 +1042,9 @@ function SemTool() {
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [rows, columns, analysis, vars, nodes, answerKey, bootResults]);
+  };
 
-  const downloadTemplate = useCallback(() => {
+  const downloadTemplate = () => {
     try {
       const headers: string[] = [];
       const sample1: (number | null)[] = [];
@@ -860,15 +1077,15 @@ function SemTool() {
       ];
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(guide), "راهنمای دامنه");
       XLSX.writeFile(wb, "amarist-sem-template.xlsx");
-      setStatus({ text: "قالب داده دانلود شد؛ آن را پر کنید و دوباره ایمپورت کنید.", kind: "ok" });
+      setStatus({ text: "قالب داده دانلود شد.", kind: "ok" });
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [vars]);
+  };
 
-  const exportDocx = useCallback(async () => {
+  const exportDocx = async () => {
     try {
-      const lines = buildReportText(vars, nodes, analysis, answerKey, bootResults, rows.length).split("\n");
+      const lines = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length).split("\n");
       const doc = new Document({
         sections: [
           {
@@ -893,11 +1110,11 @@ function SemTool() {
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [vars, nodes, analysis, answerKey, bootResults, rows.length]);
+  };
 
-  const exportTxt = useCallback(() => {
+  const exportTxt = () => {
     try {
-      const text = buildReportText(vars, nodes, analysis, answerKey, bootResults, rows.length);
+      const text = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length);
       const blob = new Blob(["\uFEFF" + text], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -909,18 +1126,16 @@ function SemTool() {
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [vars, nodes, analysis, answerKey, bootResults, rows.length]);
+  };
 
-  const copyReport = useCallback(async () => {
+  const copyReport = async () => {
     try {
-      const text = buildReportText(vars, nodes, analysis, answerKey, bootResults, rows.length);
+      const text = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length);
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
       } else {
         const ta = document.createElement("textarea");
         ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
         document.body.appendChild(ta);
         ta.select();
         document.execCommand("copy");
@@ -932,74 +1147,73 @@ function SemTool() {
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [vars, nodes, analysis, answerKey, bootResults, rows.length]);
+  };
 
-  // ---------- بکاپ و بازیابی ----------
-  const doBackup = useCallback(
-    (fileName: string) => {
-      try {
-        const safeName =
-          fileName.trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\.json$/i, "") || "بکاپ-آماریست";
-        const data = {
-          version: 1,
-          source,
-          vars,
-          inactiveArrowIds: [...inactiveArrowIds],
-          constraints,
-          n,
-          columns,
-          rows,
-          colMap,
-        };
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `${safeName}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        setStatus({ text: "بکاپ تنظیمات و داده دانلود شد.", kind: "ok" });
-        setFooterMsg("بکاپ دانلود شد ✓");
-        setTimeout(() => setFooterMsg(null), 4000);
-      } catch (err) {
-        setStatus({ text: (err as Error).message, kind: "err" });
-      }
-    },
-    [source, vars, inactiveArrowIds, constraints, n, columns, rows, colMap]
-  );
-
+  // ---------- بکاپ پروژه‌ها ----------
   const openBackupModal = () => {
     const now = new Date();
     const pad = (x: number) => String(x).padStart(2, "0");
     const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
-    setBackupName(`بکاپ-آماریست-${stamp}`);
+    setBackupName(`بکاپ-پروژه‌ها-${stamp}`);
+    setBackupScope("all");
     setBackupModal(true);
   };
 
-  const restore = async (file: File) => {
-      try {
-        const text = await file.text();
-        const data = JSON.parse(text);
-        if (!data || data.version !== 1 || !Array.isArray(data.vars)) {
-          throw new Error("فایل بکاپ معتبر نیست.");
-        }
-        setSource(data.source === "real" ? "real" : "generate");
-        setVars(data.vars);
-        setInactiveArrowIds(new Set(data.inactiveArrowIds ?? []));
-        setConstraints(data.constraints);
-        setN(String(data.n ?? 250));
-        setColumns(data.columns ?? []);
-        setRows(data.rows ?? []);
-        setColMap(data.colMap ?? {});
-        setAnalysis(null);
-        setAnswerKey(null);
-        setBootResults(null);
-        setStatus({ text: "بکاپ با موفقیت بازیابی شد.", kind: "ok" });
-        setFooterMsg("بازیابی انجام شد ✓");
-        setTimeout(() => setFooterMsg(null), 4000);
-      } catch (err) {
-        setStatus({ text: (err as Error).message, kind: "err" });
+  const doBackup = () => {
+    try {
+      const safeName = backupName.trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\.json$/i, "") || "بکاپ-پروژه‌ها";
+      const data =
+        backupScope === "all"
+          ? { version: 2, type: "projects", projects }
+          : { version: 2, type: "project", project: currentProject };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${safeName}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setBackupModal(false);
+      setStatus({ text: "بکاپ دانلود شد.", kind: "ok" });
+      setFooterMsg("بکاپ دانلود شد ✓");
+      setTimeout(() => setFooterMsg(null), 4000);
+    } catch (err) {
+      setStatus({ text: (err as Error).message, kind: "err" });
+    }
+  };
+
+  const restoreBackup = async (file: File) => {
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (data?.version === 2 && data.type === "projects" && Array.isArray(data.projects)) {
+        const restored: Project[] = data.projects.filter((p: Project) => p && p.data);
+        if (!restored.length) throw new Error("بکاپ معتبر نیست.");
+        setProjects(restored);
+        saveProjects(restored);
+        setProjectId(restored[0].id);
+        applyProjectData(restored[0].data);
+        setActiveStep(0);
+        setStatus({ text: `${restored.length} پروژه بازیابی شد.`, kind: "ok" });
+      } else if (data?.version === 2 && data.type === "project" && data.project) {
+        const p = data.project as Project;
+        setProjects((prev) => {
+          const idx = prev.findIndex((x) => x.id === p.id);
+          const next = idx >= 0 ? prev.map((x, i) => (i === idx ? p : x)) : [...prev, p];
+          saveProjects(next);
+          return next;
+        });
+        setProjectId(p.id);
+        applyProjectData(p.data);
+        setActiveStep(0);
+        setStatus({ text: `پروژه «${p.name}» بازیابی شد.`, kind: "ok" });
+      } else {
+        throw new Error("فایل بکاپ معتبر نیست.");
       }
+    } catch (err) {
+      setStatus({ text: (err as Error).message, kind: "err" });
+      setModal({ ok: false, lines: [(err as Error).message] });
+    }
   };
 
   // ---------- ویرایش سلول ----------
@@ -1015,20 +1229,10 @@ function SemTool() {
     });
   };
 
-  // اگر گره‌های مدل با تحلیل ذخیره‌شده یکی نباشند، تحلیل قدیمی است
-  const analysisValid =
-    !!analysis &&
-    analysis.nodeIds.length === modelNodes.length &&
-    analysis.nodeIds.every((id, i) => id === modelNodes[i].nodeId);
-
-  const hasLatent = vars.some((v) => v.subscales.length > 0);
-  const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان (مکنون)" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
-  const varName = (id: number) => varNameOf(vars, id);
-
-  // جفت‌های اثر غیرمستقیم (کل + هر میانجی)
+  // ---------- جفت‌های اثر غیرمستقیم ----------
   const indirectRows = useMemo(() => {
     const medVars = vars.filter((v) => v.role === "mediator").map((v) => v.id);
-    const rowsList: { key: string; label: string; isTotal: boolean; fromVar: number; toVar: number; viaVar: number | null }[] = [];
+    const rowsList: { key: string; label: string; isTotal: boolean }[] = [];
     vars
       .filter((v) => v.role === "exogenous")
       .forEach((e) =>
@@ -1046,9 +1250,6 @@ function SemTool() {
                 key: `${e.id}:${m}:${o.id}`,
                 label: `${varNameOf(vars, e.id)} ← ${varNameOf(vars, m)} ← ${varNameOf(vars, o.id)}`,
                 isTotal: false,
-                fromVar: e.id,
-                toVar: o.id,
-                viaVar: m,
               });
             });
             if (meds.length > 1) {
@@ -1056,9 +1257,6 @@ function SemTool() {
                 key: `${e.id}:${o.id}`,
                 label: `کل: ${varNameOf(vars, e.id)} ← ${varNameOf(vars, o.id)} (${meds.map((m) => varNameOf(vars, m)).join(" + ")})`,
                 isTotal: true,
-                fromVar: e.id,
-                toVar: o.id,
-                viaVar: null,
               });
             }
           })
@@ -1066,29 +1264,54 @@ function SemTool() {
     return rowsList;
   }, [vars, modelArrows]);
 
+  // ---------- یافته‌های توصیفی ----------
+  const descriptive = useMemo(() => {
+    if (!analysis) return null;
+    return modelNodes.map((nd) => {
+      const col = analysis.nodeCols[nd.nodeId];
+      const vals = col.filter(Number.isFinite);
+      return {
+        label: nd.label,
+        n: vals.length,
+        mean: mean(vals),
+        sd: sampleStd(vals),
+        min: vals.length ? Math.min(...vals) : NaN,
+        max: vals.length ? Math.max(...vals) : NaN,
+        skew: skewness(col),
+        kurt: kurtosis(col),
+      };
+    });
+  }, [analysis, modelNodes]);
+
+  const currentStep = Math.min(activeStep, steps.length - 1);
+
+  const goNext = () => {
+    // اگر از مرحله جدول داده جلو می‌رویم و تحلیلی نیست، خودکار تحلیل کن
+    if (steps[currentStep]?.id === "data" && !analysisValid && rows.length) {
+      analyze(undefined, undefined, undefined, true, false);
+    }
+    if (steps[currentStep]?.id === "project" && !currentProject) return;
+    setActiveStep((s) => Math.min(s + 1, steps.length - 1));
+  };
+
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-44 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900">
+    <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-40 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900">
       <ToolHeader
         title="تحلیل مسیر و مدل معادلات ساختاری (SEM)"
         subtitle={modeLabel}
         actions={
           <div className="flex items-center gap-2">
-            <a
-              href="/tools/alpha"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[12px] font-extrabold text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-              title="ابزار جداگانه اندازه‌گیری و تحلیل آلفای کرونباخ"
-            >
-              <FileText className="h-3.5 w-3.5" />
-              آلفای کرونباخ
-            </a>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-[12px] font-extrabold text-white shadow-sm transition hover:bg-indigo-500"
-              onClick={generate}
-            >
-              <Play className="h-3.5 w-3.5" />
-              تولید داده و تحلیل
-            </button>
+            {source === "generate" && (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-[12px] font-extrabold text-white shadow-sm transition hover:bg-indigo-500"
+                onClick={generate}
+              >
+                <Play className="h-3.5 w-3.5" />
+                تولید داده و تحلیل
+              </button>
+            )}
             <button
               type="button"
               className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-1.5 text-[12px] font-extrabold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
@@ -1097,433 +1320,392 @@ function SemTool() {
               <RefreshCw className="h-3.5 w-3.5" />
               اجرای تحلیل
             </button>
+            <a
+              href="/tools/alpha"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[12px] font-extrabold text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+              title="ابزار جداگانه اندازه‌گیری و تحلیل آلفای کرونباخ"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              آلفای کرونباخ
+            </a>
           </div>
         }
       />
 
-      {/* ناوبری سمت راست: بخش‌های ورودی */}
-      <SectionNav
-        side="right"
-        sections={[
-          { id: "source", label: "منبع داده", short: "منبع" },
-          { id: "variables", label: "مشخصات متغیرها", short: "متغیرها" },
-          { id: "draw-model", label: "ترسیم مدل", short: "مدل" },
-          { id: "constraints", label: "قیود تولید", short: "قیود" },
-          { id: "data-table", label: "جدول داده", short: "داده" },
-        ]}
-      />
-      {/* ناوبری سمت چپ: بخش‌های خروجی */}
-      <SectionNav
-        side="left"
-        sections={[
-          { id: "assumptions", label: "بررسی پیش‌فرض‌ها", short: "پیش‌فرض" },
-          { id: "results", label: "نتایج", short: "نتایج" },
-        ]}
-      />
-
       <div className="mx-auto max-w-[1280px] px-4">
-        {/* ---------- تب‌های نمای صفحه ---------- */}
-        <div className="mt-5 flex justify-center">
-          <div className="inline-flex rounded-2xl border border-stone-200 bg-white p-1 shadow-sm dark:border-stone-700 dark:bg-slate-800" role="tablist" aria-label="نمای صفحه">
-            {[
-              { key: "inputs" as const, label: "ورودی‌ها" },
-              { key: "outputs" as const, label: "خروجی‌ها" },
-              { key: "both" as const, label: "هر دو (ساید‌بای‌ساید)" },
-            ].map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                role="tab"
-                aria-selected={viewMode === t.key}
-                onClick={() => setViewMode(t.key)}
-                className={`rounded-xl px-5 py-2 text-sm font-extrabold transition ${
-                  viewMode === t.key
-                    ? "bg-indigo-600 text-white shadow"
-                    : "text-stone-500 hover:text-indigo-600 dark:text-stone-400"
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
+        {/* ---------- استپر پیشرفت ---------- */}
+        <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-3 shadow-sm dark:border-stone-700 dark:bg-slate-800">
+          <ProgressStepper steps={steps} active={currentStep} onSelect={(i) => i <= currentStep && setActiveStep(i)} />
         </div>
-        <div className={viewMode === "both" ? "lg:grid lg:grid-cols-2 lg:items-start lg:gap-5" : ""}>
-        {/* ===== ستون ورودی‌ها ===== */}
-        {viewMode !== "outputs" && (
-        <div className={viewMode === "both" ? "lg:max-h-[calc(100vh-9.5rem)] lg:overflow-y-auto lg:pe-2 lg:pb-6" : ""}>
-        {/* ---------- ۱) منبع داده ---------- */}
-        <ExpandableSection
-          id="source"
-          tone={sectionTones[0]}
-          title="۱) منبع داده"
-          desc="انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود."
-        >
-          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-            <button
-              type="button"
-              onClick={() => setSource("generate")}
-              className={`rounded-2xl border-2 p-4 text-start transition ${
-                source === "generate"
-                  ? "border-blue-600 bg-blue-100/60 dark:border-blue-500 dark:bg-blue-950/40"
-                  : "border-stone-200 bg-white hover:border-blue-300 dark:border-stone-700 dark:bg-slate-800"
-              }`}
-            >
-              <p className="font-extrabold text-stone-900 dark:text-stone-100">تولید داده تمرینی</p>
-              <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
-                با رعایت قیود انتخابی شما (معنی‌داری مسیرها، اثر میانجی، R² و...) داده شبیه‌سازی‌شده ساخته می‌شود.
+
+        {/* ============ مرحله ۰: پروژه و منبع داده ============ */}
+        {currentStep === stepIdx("project") && (
+          <div className="mt-4 space-y-4">
+            <section className={`rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">پروژه‌ها</h2>
+              <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                همه داده‌ها در مرورگر شما ذخیره می‌شوند. یک پروژه انتخاب کنید یا پروژه جدید بسازید؛ با «بکاپ پروژه‌ها»
+                می‌توانید همه پروژه‌ها یا فقط همین پروژه را ذخیره کنید.
               </p>
-            </button>
-            <button
-              type="button"
-              onClick={() => setSource("real")}
-              className={`rounded-2xl border-2 p-4 text-start transition ${
-                source === "real"
-                  ? "border-blue-600 bg-blue-100/60 dark:border-blue-500 dark:bg-blue-950/40"
-                  : "border-stone-200 bg-white hover:border-blue-300 dark:border-stone-700 dark:bg-slate-800"
-              }`}
-            >
-              <p className="font-extrabold text-stone-900 dark:text-stone-100">داده واقعی خودم</p>
-              <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
-                فایل اکسل را در قدم ۵ وارد کنید؛ ستون‌ها را به متغیرها نسبت دهید.
-              </p>
-            </button>
-          </div>
-        </ExpandableSection>
 
-        {/* ---------- ۲) مشخصات متغیرها ---------- */}
-        <ExpandableSection
-          id="variables"
-          tone={sectionTones[1]}
-          title="۲) مشخصات متغیرها"
-          desc="نقش ← نام ← جمع‌پذیری (نمره کل) ← زیرمقیاس‌ها. متغیر جمع‌پذیر با نمره کل وارد مدل می‌شود؛ متغیر غیرجمع‌پذیر به‌صورت زیرمقیاس‌های مستقل با فلش‌های جداگانه وارد می‌شود."
-        >
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <button type="button" className={btnLight} onClick={addVar}>
-              <Plus className="h-4 w-4" />
-              افزودن متغیر
-            </button>
-          </div>
-
-          <div className="mt-4 grid gap-4">
-            {vars.map((v) => {
-              const sumMin = v.subscales.reduce((s, x) => s + x.min, 0);
-              const sumMax = v.subscales.reduce((s, x) => s + x.max, 0);
-              const totalMatches =
-                v.hasTotal && v.subscales.length > 0 && sumMin === v.totalMin && sumMax === v.totalMax;
-              return (
-                <div key={v.id} className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-                  {/* ردیف ۱: نقش و نام */}
-                  <div className="flex flex-wrap items-end gap-3">
-                    <div className="w-44">
-                      <label className={labelCls}>نقش متغیر</label>
-                      <select
-                        className={inputCls}
-                        value={v.role}
-                        onChange={(e) => updateVar(v.id, { role: e.target.value as Role })}
-                      >
-                        <option value="exogenous">برون‌زا (X)</option>
-                        <option value="mediator">میانجی (M)</option>
-                        <option value="outcome">درون‌زا (Y)</option>
-                      </select>
-                    </div>
-                    <div className="min-w-52 flex-1">
-                      <label className={labelCls}>نام متغیر</label>
-                      <input
-                        className={inputCls}
-                        value={v.name}
-                        onChange={(e) => updateVar(v.id, { name: e.target.value })}
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removeVar(v.id)}
-                      className="flex h-10 w-10 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400"
-                      title="حذف متغیر"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-
-                  {/* ردیف ۲: جمع‌پذیری (نمره کل دارد؟) */}
-                  <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-slate-900/60">
-                    <div className="flex flex-wrap items-center gap-6">
-                      <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">
-                        جمع‌پذیر است؟ (نمره کل دارد؟)
-                      </span>
-                      <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                        <input
-                          type="radio"
-                          name={`hasTotal-${v.id}`}
-                          checked={v.hasTotal}
-                          onChange={() => updateVar(v.id, { hasTotal: true })}
-                          className="h-4 w-4 accent-indigo-600"
-                        />
-                        بله — نمره کل دارد
-                      </label>
-                      <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                        <input
-                          type="radio"
-                          name={`hasTotal-${v.id}`}
-                          checked={!v.hasTotal}
-                          onChange={() => updateVar(v.id, { hasTotal: false })}
-                          className="h-4 w-4 accent-indigo-600"
-                        />
-                        خیر — زیرمقیاس‌ها مستقل‌اند
-                      </label>
-                    </div>
-                    <div className="mt-2 grid max-w-md grid-cols-2 gap-3">
-                      <div>
-                        <label className={labelCls}>حداقل نمره کل</label>
-                        <input
-                          type="number"
-                          className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`}
-                          value={v.totalMin}
-                          disabled={!v.hasTotal}
-                          onChange={(e) => updateVar(v.id, { totalMin: Number(e.target.value) })}
-                        />
-                      </div>
-                      <div>
-                        <label className={labelCls}>حداکثر نمره کل</label>
-                        <input
-                          type="number"
-                          className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`}
-                          value={v.totalMax}
-                          disabled={!v.hasTotal}
-                          onChange={(e) => updateVar(v.id, { totalMax: Number(e.target.value) })}
-                        />
-                      </div>
-                    </div>
-                    {!v.hasTotal && v.subscales.length > 0 && (
-                      <p className={`${tinyCls} mt-1`}>
-                        غیرجمع‌پذیر: هر زیرمقیاس یک متغیر مستقل در مدل می‌شود و فلش‌های جداگانه می‌گیرد.
-                      </p>
-                    )}
-                  </div>
-
-                  {/* ردیف ۳: زیرمقیاس‌ها */}
-                  <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-slate-900/60">
-                    <div className="flex flex-wrap items-center gap-6">
-                      <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">زیرمقیاس دارد؟</span>
-                      <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                        <input
-                          type="radio"
-                          name={`hasSub-${v.id}`}
-                          checked={v.subscales.length > 0}
-                          onChange={() => {
-                            if (v.subscales.length === 0) addSubscale(v.id);
-                          }}
-                          className="h-4 w-4 accent-indigo-600"
-                        />
-                        بله
-                      </label>
-                      <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                        <input
-                          type="radio"
-                          name={`hasSub-${v.id}`}
-                          checked={v.subscales.length === 0}
-                          onChange={() => updateVar(v.id, { subscales: [] })}
-                          className="h-4 w-4 accent-indigo-600"
-                        />
-                        خیر
-                      </label>
-                    </div>
-
-                    {v.subscales.length > 0 ? (
-                      <>
-                        <div className="mt-3 space-y-2">
-                          <div className="grid grid-cols-[1fr_110px_110px_40px] items-center gap-2 px-1 text-[11px] font-bold text-stone-500 dark:text-stone-400">
-                            <span>نام زیرمقیاس</span>
-                            <span className="text-center">حداقل نمره</span>
-                            <span className="text-center">حداکثر نمره</span>
-                            <span />
-                          </div>
-                          {v.subscales.map((s, si) => (
-                            <div key={si} className="grid grid-cols-[1fr_110px_110px_40px] items-center gap-2">
-                              <input
-                                className={inputCls}
-                                value={s.name}
-                                placeholder="نام زیرمقیاس"
-                                onChange={(e) => setSubscaleName(v.id, si, e.target.value)}
-                              />
-                              <input
-                                type="number"
-                                dir="ltr"
-                                className={inputCls}
-                                value={s.min}
-                                onChange={(e) => setSubscaleRange(v.id, si, "min", Number(e.target.value))}
-                              />
-                              <input
-                                type="number"
-                                dir="ltr"
-                                className={inputCls}
-                                value={s.max}
-                                onChange={(e) => setSubscaleRange(v.id, si, "max", Number(e.target.value))}
-                              />
-                              <button
-                                type="button"
-                                onClick={() => removeSubscale(v.id, si)}
-                                className="flex h-9 w-9 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-400"
-                                title="حذف زیرمقیاس"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div className="mt-3 grid grid-cols-[1fr_110px_110px] items-center gap-2 rounded-xl border-2 border-violet-300 bg-violet-100/60 px-2 py-2 dark:border-violet-800 dark:bg-violet-950/40">
-                          <span className="text-[13px] font-black text-violet-800 dark:text-violet-200">جمع کل زیرمقیاس‌ها</span>
-                          <span className="text-center text-[13px] font-black text-violet-800 dark:text-violet-200">{sumMin}</span>
-                          <span className="text-center text-[13px] font-black text-violet-800 dark:text-violet-200">{sumMax}</span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap items-center gap-3 text-[12px]">
-                          {v.hasTotal &&
-                            (totalMatches ? (
-                              <span className="rounded-full bg-emerald-100 px-3 py-1 font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-                                ✓ نمره کل با جمع زیرمقیاس‌ها برابر است
-                              </span>
-                            ) : (
-                              <span className="rounded-full bg-amber-100 px-3 py-1 font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                                ⚠ نمره کل ({v.totalMin} تا {v.totalMax}) با جمع زیرمقیاس‌ها ({sumMin} تا {sumMax}) برابر نیست
-                              </span>
-                            ))}
-                        </div>
-
-                        <button type="button" className={`${btnLight} mt-3`} onClick={() => addSubscale(v.id)}>
-                          <Plus className="h-4 w-4" />
-                          افزودن زیرمقیاس
-                        </button>
-                      </>
-                    ) : (
-                      <p className={`${tinyCls} mt-2`}>
-                        بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) در نظر گرفته می‌شود.
-                      </p>
-                    )}
-                  </div>
-
-                  {/* نگاشت ستون‌ها در حالت واقعی */}
-                  {source === "real" && (
-                    <div className="mt-3 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/50 p-3 dark:border-indigo-800 dark:bg-indigo-950/30">
-                      <p className="text-[12px] font-bold text-indigo-700 dark:text-indigo-300">
-                        نگاشت ستون‌های فایل به متغیر «{v.name}»
-                      </p>
-                      {v.subscales.length === 0 ? (
-                        <div className="mt-2 max-w-xs">
-                          <label className={labelCls}>ستون نمره / متغیر</label>
-                          <select
-                            className={inputCls}
-                            value={colMap[v.id]?.[0] ?? -1}
-                            onChange={(e) => updateColMap(v.id, 0, e.target.value === "-1" ? null : Number(e.target.value))}
-                          >
-                            <option value={-1}>— انتخاب نشده —</option>
-                            {columns.map((c, i) => (
-                              <option key={i} value={i}>{c}</option>
-                            ))}
-                          </select>
-                        </div>
-                      ) : (
-                        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                          {v.subscales.map((s, si) => (
-                            <div key={si}>
-                              <label className={labelCls}>{s.name}</label>
-                              <select
-                                className={inputCls}
-                                value={colMap[v.id]?.[si] ?? -1}
-                                onChange={(e) => updateColMap(v.id, si, e.target.value === "-1" ? null : Number(e.target.value))}
-                              >
-                                <option value={-1}>— انتخاب نشده —</option>
-                                {columns.map((c, i) => (
-                                  <option key={i} value={i}>{c}</option>
-                                ))}
-                              </select>
-                            </div>
-                          ))}
-                        </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {projects.map((p) => (
+                  <div
+                    key={p.id}
+                    className={`rounded-2xl border-2 p-4 transition ${
+                      p.id === projectId
+                        ? "border-indigo-500 bg-indigo-50 dark:border-indigo-400 dark:bg-indigo-950/40"
+                        : "border-stone-200 bg-white hover:border-indigo-300 dark:border-stone-700 dark:bg-slate-800"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Database className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                      <p className="font-extrabold text-stone-900 dark:text-stone-100">{p.name}</p>
+                      {p.id === projectId && (
+                        <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-bold text-white">فعال</span>
                       )}
                     </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </ExpandableSection>
+                    <p className="mt-1 text-[11px] text-stone-400 dark:text-stone-500">
+                      {p.data.vars.length} متغیر · {p.data.rows.length} ردیف داده · به‌روزرسانی:{" "}
+                      {new Date(p.updatedAt).toLocaleDateString("fa-IR")}
+                    </p>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        className={`${p.id === projectId ? "opacity-60" : ""} ${btnLight} flex-1`}
+                        disabled={p.id === projectId}
+                        onClick={() => switchProject(p.id)}
+                      >
+                        {p.id === projectId ? "پروژه فعلی" : "باز کردن"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteProject(p.id)}
+                        className="flex h-9 w-9 items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400"
+                        title="حذف پروژه"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
 
-        {/* ---------- ۳) ترسیم مدل ---------- */}
-        <ExpandableSection
-          id="draw-model"
-          tone={sectionTones[2]}
-          title="۳) ترسیم مدل"
-          desc="هر فلش در یک خط جداگانه قابل فعال/غیرفعال کردن است. در متغیرهای غیرجمع‌پذیر، هر زیرمقیاس فلش مستقل خودش را دارد. غیرفعال‌کردن فلش = صفر فرض‌شدن آن مسیر."
-        >
-          <div className="flex flex-wrap items-center justify-end gap-3">
-            <button type="button" className={btnSecondary} onClick={() => setShowBigDiagram(true)}>
-              <RefreshCw className="h-4 w-4" />
-              مشاهده بزرگ مدل
-            </button>
-          </div>
-
-          <div className="mt-4 space-y-4">
-            {/* لیست فلش‌ها — هر کدام در یک خط */}
-            <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-              <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">
-                فلش‌های مدل ({arrows.length} فعال از {allArrows.length})
-              </p>
-              <div className="mt-2 max-h-[520px] space-y-1.5 overflow-y-auto pe-1">
-                {allArrows.map((a) => {
-                  const active = !inactiveArrowIds.has(a.id);
-                  const f = nodeLabel(a.fromNode);
-                  const t = nodeLabel(a.toNode);
-                  return (
-                    <label
-                      key={a.id}
-                      className={`flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11.5px] font-bold transition ${
-                        active
-                          ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
-                          : "border-stone-200 bg-stone-50 text-stone-400 line-through dark:border-stone-700 dark:bg-slate-900 dark:text-stone-500"
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={active}
-                        onChange={() => toggleArrow(a.id)}
-                        className="h-3.5 w-3.5 shrink-0 accent-emerald-600"
-                      />
-                      <span className="truncate">
-                        {f} ← {t}
-                      </span>
-                    </label>
-                  );
-                })}
+                <button
+                  type="button"
+                  onClick={() => setProjectModal(true)}
+                  className="flex min-h-28 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-stone-300 text-stone-400 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-stone-600 dark:text-stone-500"
+                >
+                  <FolderPlus className="h-8 w-8" />
+                  <span className="text-sm font-extrabold">پروژه جدید</span>
+                </button>
               </div>
-              <p className={`${tinyCls} mt-2`}>
-                نکته: وقتی همه فلش‌ها فعال‌اند مدل اشباع است (CFI=1، RMSEA=0)؛ با غیرفعال‌کردن یک فلش، برازش معنادار و
-                قابل آزمون می‌شود.
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button type="button" className={btnSecondary} onClick={openBackupModal}>
+                  <Download className="h-4 w-4" />
+                  بکاپ پروژه‌ها
+                </button>
+                <input
+                  ref={restoreRef}
+                  type="file"
+                  accept=".json"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) restoreBackup(f);
+                    e.target.value = "";
+                  }}
+                />
+                <button type="button" className={btnLight} onClick={() => restoreRef.current?.click()}>
+                  <Upload className="h-4 w-4" />
+                  بازیابی از بکاپ
+                </button>
+              </div>
+            </section>
+
+            <section className={`rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">منبع داده</h2>
+              <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود.
               </p>
-              {isolatedVars.length > 0 && (
-                <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-[12px] font-bold text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
-                  ⚠ متغیرهای زیر هیچ فلش فعالی ندارند و از مدل حذف شده‌اند: {isolatedVars.map((v) => v.name).join("، ")}
-                </div>
-              )}
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setSource("generate")}
+                  className={`rounded-2xl border-2 p-4 text-start transition ${
+                    source === "generate"
+                      ? "border-blue-600 bg-blue-100/60 dark:border-blue-500 dark:bg-blue-950/40"
+                      : "border-stone-200 bg-white hover:border-blue-300 dark:border-stone-700 dark:bg-slate-800"
+                  }`}
+                >
+                  <p className="font-extrabold text-stone-900 dark:text-stone-100">تولید داده تمرینی</p>
+                  <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
+                    با رعایت قیود انتخابی شما (معنی‌داری مسیرها، اثر میانجی، R² و...) داده شبیه‌سازی‌شده ساخته می‌شود.
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSource("real")}
+                  className={`rounded-2xl border-2 p-4 text-start transition ${
+                    source === "real"
+                      ? "border-blue-600 bg-blue-100/60 dark:border-blue-500 dark:bg-blue-950/40"
+                      : "border-stone-200 bg-white hover:border-blue-300 dark:border-stone-700 dark:bg-slate-800"
+                  }`}
+                >
+                  <p className="font-extrabold text-stone-900 dark:text-stone-100">داده واقعی خودم</p>
+                  <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
+                    فایل اکسل را در مرحله «جدول داده‌ها» وارد کنید؛ ستون‌ها را به متغیرها نسبت دهید.
+                  </p>
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+
+
+        {/* ============ مرحله ۱: متغیرها ============ */}
+        {currentStep === stepIdx("variables") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">مشخصات متغیرها</h2>
+                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                  نقش ← نام ← جمع‌پذیری (نمره کل) ← زیرمقیاس‌ها. متغیر جمع‌پذیر با نمره کل وارد مدل می‌شود؛ متغیر
+                  غیرجمع‌پذیر به‌صورت زیرمقیاس‌های مستقل با فلش‌های جداگانه وارد می‌شود.
+                </p>
+              </div>
+              <button type="button" className={btnLight} onClick={addVar}>
+                <Plus className="h-4 w-4" />
+                افزودن متغیر
+              </button>
             </div>
 
-            {/* پیش‌نمایش بزرگ */}
-            <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-              <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">پیش‌نمایش مدل</p>
-              <div className="mt-2">
-                <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} />
+            <div className="mt-4 grid gap-4">
+              {vars.map((v) => {
+                const sumMin = v.subscales.reduce((s, x) => s + x.min, 0);
+                const sumMax = v.subscales.reduce((s, x) => s + x.max, 0);
+                const totalMatches =
+                  v.hasTotal && v.subscales.length > 0 && sumMin === v.totalMin && sumMax === v.totalMax;
+                return (
+                  <div key={v.id} className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                    <div className="flex flex-wrap items-end gap-3">
+                      <div className="w-44">
+                        <label className={labelCls}>نقش متغیر</label>
+                        <select
+                          className={inputCls}
+                          value={v.role}
+                          onChange={(e) => updateVar(v.id, { role: e.target.value as Role })}
+                        >
+                          <option value="exogenous">برون‌زا (X)</option>
+                          <option value="mediator">میانجی (M)</option>
+                          <option value="outcome">درون‌زا (Y)</option>
+                        </select>
+                      </div>
+                      <div className="min-w-52 flex-1">
+                        <label className={labelCls}>نام متغیر</label>
+                        <input className={inputCls} value={v.name} onChange={(e) => updateVar(v.id, { name: e.target.value })} />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeVar(v.id)}
+                        className="flex h-10 w-10 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400"
+                        title="حذف متغیر"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+
+                    <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-slate-900/60">
+                      <div className="flex flex-wrap items-center gap-6">
+                        <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">جمع‌پذیر است؟ (نمره کل دارد؟)</span>
+                        <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
+                          <input type="radio" name={`hasTotal-${v.id}`} checked={v.hasTotal} onChange={() => updateVar(v.id, { hasTotal: true })} className="h-4 w-4 accent-indigo-600" />
+                          بله — نمره کل دارد
+                        </label>
+                        <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
+                          <input type="radio" name={`hasTotal-${v.id}`} checked={!v.hasTotal} onChange={() => updateVar(v.id, { hasTotal: false })} className="h-4 w-4 accent-indigo-600" />
+                          خیر — زیرمقیاس‌ها مستقل‌اند
+                        </label>
+                      </div>
+                      <div className="mt-2 grid max-w-md grid-cols-2 gap-3">
+                        <div>
+                          <label className={labelCls}>حداقل نمره کل</label>
+                          <input type="number" className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`} value={v.totalMin} disabled={!v.hasTotal} onChange={(e) => updateVar(v.id, { totalMin: Number(e.target.value) })} />
+                        </div>
+                        <div>
+                          <label className={labelCls}>حداکثر نمره کل</label>
+                          <input type="number" className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`} value={v.totalMax} disabled={!v.hasTotal} onChange={(e) => updateVar(v.id, { totalMax: Number(e.target.value) })} />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-slate-900/60">
+                      <div className="flex flex-wrap items-center gap-6">
+                        <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">زیرمقیاس دارد؟</span>
+                        <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
+                          <input type="radio" name={`hasSub-${v.id}`} checked={v.subscales.length > 0} onChange={() => { if (v.subscales.length === 0) addSubscale(v.id); }} className="h-4 w-4 accent-indigo-600" />
+                          بله
+                        </label>
+                        <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
+                          <input type="radio" name={`hasSub-${v.id}`} checked={v.subscales.length === 0} onChange={() => updateVar(v.id, { subscales: [] })} className="h-4 w-4 accent-indigo-600" />
+                          خیر
+                        </label>
+                      </div>
+
+                      {v.subscales.length > 0 ? (
+                        <>
+                          <div className="mt-3 space-y-2">
+                            <div className="grid grid-cols-[1fr_110px_110px_40px] items-center gap-2 px-1 text-[11px] font-bold text-stone-500 dark:text-stone-400">
+                              <span>نام زیرمقیاس</span>
+                              <span className="text-center">حداقل نمره</span>
+                              <span className="text-center">حداکثر نمره</span>
+                              <span />
+                            </div>
+                            {v.subscales.map((s, si) => (
+                              <div key={si} className="grid grid-cols-[1fr_110px_110px_40px] items-center gap-2">
+                                <input className={inputCls} value={s.name} placeholder="نام زیرمقیاس" onChange={(e) => setSubscaleName(v.id, si, e.target.value)} />
+                                <input type="number" dir="ltr" className={inputCls} value={s.min} onChange={(e) => setSubscaleRange(v.id, si, "min", Number(e.target.value))} />
+                                <input type="number" dir="ltr" className={inputCls} value={s.max} onChange={(e) => setSubscaleRange(v.id, si, "max", Number(e.target.value))} />
+                                <button type="button" onClick={() => removeSubscale(v.id, si)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-400" title="حذف زیرمقیاس">
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="mt-3 grid grid-cols-[1fr_110px_110px] items-center gap-2 rounded-xl border-2 border-violet-300 bg-violet-100/60 px-2 py-2 dark:border-violet-800 dark:bg-violet-950/40">
+                            <span className="text-[13px] font-black text-violet-800 dark:text-violet-200">جمع کل زیرمقیاس‌ها</span>
+                            <span className="text-center text-[13px] font-black text-violet-800 dark:text-violet-200">{sumMin}</span>
+                            <span className="text-center text-[13px] font-black text-violet-800 dark:text-violet-200">{sumMax}</span>
+                          </div>
+                          {v.hasTotal &&
+                            (totalMatches ? (
+                              <span className="mt-2 inline-block rounded-full bg-emerald-100 px-3 py-1 text-[12px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">✓ نمره کل با جمع زیرمقیاس‌ها برابر است</span>
+                            ) : (
+                              <span className="mt-2 inline-block rounded-full bg-amber-100 px-3 py-1 text-[12px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">⚠ نمره کل ({v.totalMin} تا {v.totalMax}) با جمع زیرمقیاس‌ها ({sumMin} تا {sumMax}) برابر نیست</span>
+                            ))}
+
+                          <button type="button" className={`${btnLight} mt-3`} onClick={() => addSubscale(v.id)}>
+                            <Plus className="h-4 w-4" />
+                            افزودن زیرمقیاس
+                          </button>
+                        </>
+                      ) : (
+                        <p className={`${tinyCls} mt-2`}>بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) در نظر گرفته می‌شود.</p>
+                      )}
+                    </div>
+
+                    {source === "real" && (
+                      <div className="mt-3 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/50 p-3 dark:border-indigo-800 dark:bg-indigo-950/30">
+                        <p className="text-[12px] font-bold text-indigo-700 dark:text-indigo-300">نگاشت ستون‌های فایل به متغیر «{v.name}»</p>
+                        {v.subscales.length === 0 ? (
+                          <div className="mt-2 max-w-xs">
+                            <label className={labelCls}>ستون نمره / متغیر</label>
+                            <select className={inputCls} value={colMap[v.id]?.[0] ?? -1} onChange={(e) => updateColMap(v.id, 0, e.target.value === "-1" ? null : Number(e.target.value))}>
+                              <option value={-1}>— انتخاب نشده —</option>
+                              {columns.map((c, i) => (
+                                <option key={i} value={i}>{c}</option>
+                              ))}
+                            </select>
+                          </div>
+                        ) : (
+                          <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                            {v.subscales.map((s, si) => (
+                              <div key={si}>
+                                <label className={labelCls}>{s.name}</label>
+                                <select className={inputCls} value={colMap[v.id]?.[si] ?? -1} onChange={(e) => updateColMap(v.id, si, e.target.value === "-1" ? null : Number(e.target.value))}>
+                                  <option value={-1}>— انتخاب نشده —</option>
+                                  {columns.map((c, i) => (
+                                    <option key={i} value={i}>{c}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* ============ مرحله ۲: ترسیم مدل ============ */}
+        {currentStep === stepIdx("draw") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[2]}`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">ترسیم مدل</h2>
+                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                  هر فلش در یک خط جداگانه قابل فعال/غیرفعال کردن است. غیرفعال‌کردن فلش = صفر فرض‌شدن آن مسیر.
+                </p>
+              </div>
+              <button type="button" className={btnSecondary} onClick={() => setShowBigDiagram(true)}>
+                <RefreshCw className="h-4 w-4" />
+                مشاهده بزرگ مدل
+              </button>
+            </div>
+
+            {isolatedVars.length > 0 && (
+              <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-[12px] font-bold text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                ⚠ متغیرهای زیر هیچ فلش فعالی ندارند و از مدل حذف شده‌اند: {isolatedVars.map((v) => v.name).join("، ")}
+              </div>
+            )}
+
+            <div className="mt-4 space-y-4">
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">
+                  فلش‌های مدل ({arrows.length} فعال از {allArrows.length})
+                </p>
+                <div className="mt-2 max-h-80 space-y-1.5 overflow-y-auto pe-1">
+                  {allArrows.map((a) => {
+                    const active = !inactiveArrowIds.has(a.id);
+                    const f = nodeLabel(a.fromNode);
+                    const t = nodeLabel(a.toNode);
+                    return (
+                      <label
+                        key={a.id}
+                        className={`flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11.5px] font-bold transition ${
+                          active
+                            ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                            : "border-stone-200 bg-stone-50 text-stone-400 line-through dark:border-stone-700 dark:bg-slate-900 dark:text-stone-500"
+                        }`}
+                      >
+                        <input type="checkbox" checked={active} onChange={() => toggleArrow(a.id)} className="h-3.5 w-3.5 shrink-0 accent-emerald-600" />
+                        <span className="truncate">
+                          {f} ← {t}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className={`${tinyCls} mt-2`}>
+                  وقتی همه فلش‌ها فعال‌اند مدل اشباع است (CFI=1، RMSEA=0)؛ با غیرفعال‌کردن یک فلش، برازش معنادار و قابل
+                  آزمون می‌شود.
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">پیش‌نمایش مدل</p>
+                <div className="mt-2">
+                  <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} />
+                </div>
               </div>
             </div>
-          </div>
-        </ExpandableSection>
+          </section>
+        )}
 
-        {/* ---------- ۴) قیود تولید ---------- */}
-        {source === "generate" && (
-          <ExpandableSection
-            id="constraints"
-            tone={sectionTones[3]}
-            title="۴) قیود تولید داده"
-            desc="مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار باشد."
-          >
+
+        {/* ============ مرحله ۳: قیود تولید ============ */}
+        {currentStep === stepIdx("constraints") && source === "generate" && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[3]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">قیود تولید داده</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار
+              باشد.
+            </p>
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div>
@@ -1532,39 +1714,19 @@ function SemTool() {
               </div>
               <div>
                 <label className={labelCls}>تعداد نمونه‌های بوت‌استرپ</label>
-                <input
-                  type="number"
-                  className={inputCls}
-                  value={constraints.bootSamples}
-                  onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })}
-                />
+                <input type="number" className={inputCls} value={constraints.bootSamples} onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })} />
                 <p className={tinyCls}>پیش‌فرض: 5000</p>
               </div>
               <div>
                 <label className={labelCls}>درصد داده گمشده</label>
-                <input
-                  type="number"
-                  min={0}
-                  max={20}
-                  className={inputCls}
-                  value={constraints.missingPct}
-                  onChange={(e) => setConstraints({ ...constraints, missingPct: Number(e.target.value) })}
-                />
+                <input type="number" min={0} max={20} className={inputCls} value={constraints.missingPct} onChange={(e) => setConstraints({ ...constraints, missingPct: Number(e.target.value) })} />
               </div>
               <div>
                 <label className={labelCls}>درصد داده پرت</label>
-                <input
-                  type="number"
-                  min={0}
-                  max={10}
-                  className={inputCls}
-                  value={constraints.outlierPct}
-                  onChange={(e) => setConstraints({ ...constraints, outlierPct: Number(e.target.value) })}
-                />
+                <input type="number" min={0} max={10} className={inputCls} value={constraints.outlierPct} onChange={(e) => setConstraints({ ...constraints, outlierPct: Number(e.target.value) })} />
               </div>
             </div>
 
-            {/* قید مسیرها (سطح متغیر) */}
             <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">قیود مسیرهای مستقیم</h3>
             <p className={tinyCls}>
               برای هر جفت متغیر (شامل همه فلش‌های بین گره‌هایشان) مشخص کنید معنی‌دار باشد، نباشد یا مهم نباشد؛ بازه β
@@ -1588,37 +1750,17 @@ function SemTool() {
                       <tr key={key}>
                         <td style={{ fontWeight: 900 }}>{varName(fv)} ← {varName(tv)}</td>
                         <td>
-                          <select
-                            className={`${inputCls} !py-1.5`}
-                            value={t.sig}
-                            onChange={(e) => setPathTarget(key, { sig: e.target.value as PathTarget["sig"] })}
-                          >
+                          <select className={`${inputCls} !py-1.5`} value={t.sig} onChange={(e) => setPathTarget(key, { sig: e.target.value as PathTarget["sig"] })}>
                             <option value="sig">معنی‌دار باشد</option>
                             <option value="ns">معنی‌دار نباشد</option>
                             <option value="any">مهم نیست</option>
                           </select>
                         </td>
                         <td>
-                          <input
-                            type="number"
-                            step={0.05}
-                            dir="ltr"
-                            className={`${inputCls} !py-1.5`}
-                            placeholder="—"
-                            value={t.betaMin ?? ""}
-                            onChange={(e) => setPathTarget(key, { betaMin: e.target.value === "" ? null : Number(e.target.value) })}
-                          />
+                          <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1.5`} placeholder="—" value={t.betaMin ?? ""} onChange={(e) => setPathTarget(key, { betaMin: e.target.value === "" ? null : Number(e.target.value) })} />
                         </td>
                         <td>
-                          <input
-                            type="number"
-                            step={0.05}
-                            dir="ltr"
-                            className={`${inputCls} !py-1.5`}
-                            placeholder="—"
-                            value={t.betaMax ?? ""}
-                            onChange={(e) => setPathTarget(key, { betaMax: e.target.value === "" ? null : Number(e.target.value) })}
-                          />
+                          <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1.5`} placeholder="—" value={t.betaMax ?? ""} onChange={(e) => setPathTarget(key, { betaMax: e.target.value === "" ? null : Number(e.target.value) })} />
                         </td>
                       </tr>
                     );
@@ -1627,15 +1769,10 @@ function SemTool() {
               </table>
             </div>
 
-            {/* قید اثر غیرمستقیم — هر مسیر + کل */}
             {indirectRows.length > 0 && (
               <>
-                <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">
-                  قیود اثرات غیرمستقیم (میانجی‌گری — با بوت‌استرپ)
-                </h3>
-                <p className={tinyCls}>
-                  برای هر مسیر میانجی جداگانه و برای «کل» اثر غیرمستقیم، معناداری با بوت‌استرپ تعیین می‌شود.
-                </p>
+                <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">قیود اثرات غیرمستقیم (میانجی‌گری — با بوت‌استرپ)</h3>
+                <p className={tinyCls}>برای هر مسیر میانجی جداگانه و برای «کل» اثر غیرمستقیم، معناداری با بوت‌استرپ تعیین می‌شود.</p>
                 <div className="tool-table-wrap mt-3">
                   <table className="tool-table" style={{ minWidth: 560 }}>
                     <thead>
@@ -1651,11 +1788,7 @@ function SemTool() {
                           <tr key={row.key} className={row.isTotal ? "bg-stone-50 font-bold dark:bg-slate-900" : ""}>
                             <td>{row.label}</td>
                             <td>
-                              <select
-                                className={`${inputCls} !py-1.5`}
-                                value={val}
-                                onChange={(e) => setIndirectTarget(row.key, e.target.value as IndirectTarget)}
-                              >
+                              <select className={`${inputCls} !py-1.5`} value={val} onChange={(e) => setIndirectTarget(row.key, e.target.value as IndirectTarget)}>
                                 <option value="sig">معنی‌دار باشد</option>
                                 <option value="ns">معنی‌دار نباشد</option>
                                 <option value="any">مهم نیست</option>
@@ -1670,7 +1803,6 @@ function SemTool() {
               </>
             )}
 
-            {/* پیش‌فرض‌ها */}
             <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">پیش‌فرض‌های آماری (همگی قابل تنظیم)</h3>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               {[
@@ -1695,9 +1827,7 @@ function SemTool() {
                   <span>
                     <span className="block text-sm font-extrabold text-stone-800 dark:text-stone-200">{item.title}</span>
                     <span className={tinyCls}>
-                      {item.conflict
-                        ? "با وجود داده پرت عمدی، این قید خودکار غیرفعال است (سازگار نیستند)."
-                        : item.desc}
+                      {item.conflict ? "با وجود داده پرت عمدی، این قید خودکار غیرفعال است (سازگار نیستند)." : item.desc}
                     </span>
                   </span>
                 </label>
@@ -1715,76 +1845,30 @@ function SemTool() {
                 <span className="w-full">
                   <span className="block text-sm font-extrabold text-stone-800 dark:text-stone-200">بازه R² متغیرهای نتیجه (Y)</span>
                   <span className="mt-1 flex gap-2">
-                    <input
-                      type="number"
-                      step={0.05}
-                      dir="ltr"
-                      className={`${inputCls} !py-1`}
-                      disabled={constraints.r2Range == null}
-                      value={constraints.r2Range?.min ?? 0.3}
-                      onChange={(e) => setConstraints({ ...constraints, r2Range: { min: Number(e.target.value), max: constraints.r2Range?.max ?? 0.6 } })}
-                    />
-                    <input
-                      type="number"
-                      step={0.05}
-                      dir="ltr"
-                      className={`${inputCls} !py-1`}
-                      disabled={constraints.r2Range == null}
-                      value={constraints.r2Range?.max ?? 0.6}
-                      onChange={(e) => setConstraints({ ...constraints, r2Range: { min: constraints.r2Range?.min ?? 0.3, max: Number(e.target.value) } })}
-                    />
+                    <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1`} disabled={constraints.r2Range == null} value={constraints.r2Range?.min ?? 0.3} onChange={(e) => setConstraints({ ...constraints, r2Range: { min: Number(e.target.value), max: constraints.r2Range?.max ?? 0.6 } })} />
+                    <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1`} disabled={constraints.r2Range == null} value={constraints.r2Range?.max ?? 0.6} onChange={(e) => setConstraints({ ...constraints, r2Range: { min: constraints.r2Range?.min ?? 0.3, max: Number(e.target.value) } })} />
                   </span>
                 </span>
               </label>
 
               <div className="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
-                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">
-                  شاخص‌های برازش (قابل تنظیم — پیش‌فرض‌های داوری)
-                </p>
+                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">شاخص‌های برازش (پیش‌فرض‌های داوری)</p>
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
                     CFI ≥
-                    <input
-                      type="number"
-                      step={0.01}
-                      dir="ltr"
-                      className={`${inputCls} !w-20 !py-1`}
-                      value={constraints.cfiMin}
-                      onChange={(e) => setConstraints({ ...constraints, cfiMin: Number(e.target.value) })}
-                    />
+                    <input type="number" step={0.01} dir="ltr" className={`${inputCls} !w-20 !py-1`} value={constraints.cfiMin} onChange={(e) => setConstraints({ ...constraints, cfiMin: Number(e.target.value) })} />
                   </label>
                   <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
                     RMSEA ≤
-                    <input
-                      type="number"
-                      step={0.01}
-                      dir="ltr"
-                      className={`${inputCls} !w-20 !py-1`}
-                      value={constraints.rmseaMax}
-                      onChange={(e) => setConstraints({ ...constraints, rmseaMax: Number(e.target.value) })}
-                    />
+                    <input type="number" step={0.01} dir="ltr" className={`${inputCls} !w-20 !py-1`} value={constraints.rmseaMax} onChange={(e) => setConstraints({ ...constraints, rmseaMax: Number(e.target.value) })} />
                   </label>
                   <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
                     χ²/df ≤
-                    <input
-                      type="number"
-                      step={0.1}
-                      dir="ltr"
-                      className={`${inputCls} !w-20 !py-1`}
-                      value={constraints.chi2dfMax}
-                      onChange={(e) => setConstraints({ ...constraints, chi2dfMax: Number(e.target.value) })}
-                    />
+                    <input type="number" step={0.1} dir="ltr" className={`${inputCls} !w-20 !py-1`} value={constraints.chi2dfMax} onChange={(e) => setConstraints({ ...constraints, chi2dfMax: Number(e.target.value) })} />
                   </label>
                   <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
                     SRMR ≤
-                    <input
-                      type="number"
-                      step={0.01}
-                      dir="ltr"
-                      className={`${inputCls} !w-20 !py-1`}
-                      value={constraints.srmrMax}
-                      onChange={(e) => setConstraints({ ...constraints, srmrMax: Number(e.target.value) })}
-                    />
+                    <input type="number" step={0.01} dir="ltr" className={`${inputCls} !w-20 !py-1`} value={constraints.srmrMax} onChange={(e) => setConstraints({ ...constraints, srmrMax: Number(e.target.value) })} />
                   </label>
                 </div>
                 <p className={`${tinyCls} mt-1`}>پیش‌فرض معقول: CFI ≥ 0.90 ، RMSEA ≤ 0.08 ، χ²/df ≤ 3 ، SRMR ≤ 0.08</p>
@@ -1794,572 +1878,768 @@ function SemTool() {
                 <p className="text-sm font-extrabold text-emerald-800 dark:text-emerald-300">پیش‌فرض‌های واقع‌گرایانه</p>
                 <p className={`${tinyCls} mt-1 text-emerald-700 dark:text-emerald-400`}>
                   ضرایب مسیر، بارهای عاملی (0.6 تا 0.85) و R² در محدوده‌های متعارف پژوهش‌های واقعی ساخته می‌شوند تا خروجی
-                  برای داوری و آموزش قابل قبول باشد و همه فرضیه‌های فعال معنادار شوند.
+                  برای داوری و آموزش قابل قبول باشد.
                 </p>
               </div>
             </div>
-          </ExpandableSection>
+          </section>
         )}
 
-        {/* ---------- ۵) جدول داده ---------- */}
-        <ExpandableSection
-          id="data-table"
-          tone={sectionTones[4]}
-          title="۵) جدول داده"
-          desc="داده‌ها قابل ویرایش‌اند؛ ایمپورت و اکسپورت با اکسل انجام می‌شود."
-        >
-          <div className="flex flex-wrap items-center justify-end gap-3">
-            <div className="flex flex-wrap gap-2">
-              <input
-                ref={fileRef}
-                type="file"
-                accept=".xlsx,.xls"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleImport(f);
-                  e.target.value = "";
-                }}
-              />
-              <button type="button" className={btnSecondary} onClick={() => fileRef.current?.click()}>
-                <Upload className="h-4 w-4" />
-                ایمپورت اکسل
-              </button>
-              <button type="button" className={btnSecondary} onClick={downloadTemplate}>
-                <FileSpreadsheet className="h-4 w-4" />
-                دانلود قالب داده
-              </button>
-              <button type="button" className={btnSecondary} onClick={exportExcel}>
-                <Download className="h-4 w-4" />
-                اکسپورت اکسل
-              </button>
+        {/* ============ مرحله ۴: جدول داده‌ها ============ */}
+        {currentStep === stepIdx("data") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">جدول داده‌ها</h2>
+                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                  {source === "generate"
+                    ? "داده تولیدشده را می‌توانید ویرایش کنید؛ ایمپورت و اکسپورت با اکسل انجام می‌شود."
+                    : "فایل اکسل داده‌های واقعی را وارد کنید یا از قالب داده استفاده کنید."}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleImport(f);
+                    e.target.value = "";
+                  }}
+                />
+                <button type="button" className={btnSecondary} onClick={() => fileRef.current?.click()}>
+                  <Upload className="h-4 w-4" />
+                  ایمپورت اکسل
+                </button>
+                <button type="button" className={btnSecondary} onClick={downloadTemplate}>
+                  <FileSpreadsheet className="h-4 w-4" />
+                  دانلود قالب داده
+                </button>
+                <button type="button" className={btnSecondary} onClick={exportExcel}>
+                  <Download className="h-4 w-4" />
+                  اکسپورت اکسل
+                </button>
+              </div>
             </div>
-          </div>
 
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <span
-              className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
-                status.kind === "ok"
-                  ? "font-bold text-emerald-700 dark:text-emerald-400"
-                  : status.kind === "err"
-                    ? "font-bold text-red-700 dark:text-red-400"
-                    : "text-stone-400 dark:text-stone-500"
-              }`}
-            >
-              {status.kind === "ok" ? "✓" : status.kind === "err" ? "✗" : "•"} {status.text}
-            </span>
-          </div>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              {source === "generate" && (
+                <button type="button" className={btnPrimary} onClick={generate}>
+                  <Play className="h-4 w-4" />
+                  تولید داده و تحلیل
+                </button>
+              )}
+              <button type="button" className={btnSecondary} onClick={() => analyze(undefined, undefined, undefined, true, true)}>
+                <RefreshCw className="h-4 w-4" />
+                اجرای تحلیل روی داده فعلی
+              </button>
+              <span
+                className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
+                  status.kind === "ok"
+                    ? "font-bold text-emerald-700 dark:text-emerald-400"
+                    : status.kind === "err"
+                      ? "font-bold text-red-700 dark:text-red-400"
+                      : "text-stone-400 dark:text-stone-500"
+                }`}
+              >
+                {status.kind === "ok" ? "✓" : status.kind === "err" ? "✗" : "•"} {status.text}
+              </span>
+            </div>
 
-          {rows.length > 0 ? (
-            <div className="tool-table-wrap tool-table-scroll mt-4">
-              <table className="tool-table" style={{ minWidth: Math.max(720, columns.length * 90) }}>
-                <thead>
-                  <tr>
-                    <th>ردیف</th>
-                    {columns.map((c, i) => (
-                      <th key={i}>{c}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r, i) => (
-                    <tr key={i}>
-                      <td className="row-index">{i + 1}</td>
-                      {r.map((v, j) => (
-                        <td key={j}>
-                          <Cell value={v} onCommit={(nv) => updateCell(i, j, nv)} />
-                        </td>
+            {rows.length > 0 ? (
+              <div className="tool-table-wrap tool-table-scroll mt-4">
+                <table className="tool-table" style={{ minWidth: Math.max(720, columns.length * 90) }}>
+                  <thead>
+                    <tr>
+                      <th>ردیف</th>
+                      {columns.map((c, i) => (
+                        <th key={i}>{c}</th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-              هنوز داده‌ای وجود ندارد. دکمه «تولید داده و تحلیل» (بالای صفحه) را بزنید یا فایل اکسل وارد کنید.
-            </div>
-          )}
-        </ExpandableSection>
-        </div>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={i}>
+                        <td className="row-index">{i + 1}</td>
+                        {r.map((v, j) => (
+                          <td key={j}>
+                            <Cell value={v} onCommit={(nv) => updateCell(i, j, nv)} />
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
+                هنوز داده‌ای وجود ندارد. «تولید داده و تحلیل» را بزنید یا فایل اکسل وارد کنید.
+              </div>
+            )}
+          </section>
         )}
 
-        {/* ===== ستون خروجی‌ها ===== */}
-        {viewMode !== "inputs" && (
-        <div className={viewMode === "both" ? "lg:max-h-[calc(100vh-9.5rem)] lg:overflow-y-auto lg:ps-2 lg:pb-6" : ""}>
-        {/* ---------- ۶) بررسی پیش‌فرض‌ها ---------- */}
-        <ExpandableSection
-          id="assumptions"
-          tone={sectionTones[5]}
-          title="۶) بررسی پیش‌فرض‌های تحلیل"
-          desc="شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود."
-        >
 
-          {!analysisValid ? (
-            <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-              {analysis
-                ? "مدل تغییر کرده است؛ برای به‌روزرسانی نتایج، دوباره «اجرای تحلیل» را بزنید."
-                : "بعد از تولید یا ورود داده، نتایج این بخش نمایش داده می‌شود."}
-            </div>
-          ) : (
-            <div className="mt-4 space-y-6">
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۱) داده‌های گمشده</h3>
-                <p className={tinyCls}>در مدل معادلات ساختاری داده‌ها باید کامل باشند؛ تحلیل با حذف لیستی موارد ناقص انجام می‌شود.</p>
-                <div className="tool-table-wrap mt-2">
-                  <table className="tool-table">
-                    <thead>
-                      <tr><th>ستون</th><th>تعداد گمشده</th><th>نتیجه</th></tr>
-                    </thead>
-                    <tbody>
-                      {analysis.missing.map((m, i) => (
-                        <tr key={i}>
-                          <td>{m.col}</td>
-                          <td className="number-cell">{m.count}</td>
-                          <td dangerouslySetInnerHTML={{ __html: m.count === 0 ? badge(true, "کامل") : badge(false, `${m.count} گمشده`) }} />
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+        {/* ============ مرحله ۵: بررسی پیش‌فرض‌ها ============ */}
+        {currentStep === stepIdx("assumptions") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">بررسی پیش‌فرض‌های تحلیل</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود.
+            </p>
+            {!analysisValid ? (
+              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
+                {analysis
+                  ? "مدل تغییر کرده است؛ برای به‌روزرسانی نتایج، دوباره «اجرای تحلیل» را بزنید."
+                  : "بعد از تولید یا ورود داده، نتایج این بخش نمایش داده می‌شود."}
+              </div>
+            ) : (
+              <div className="mt-4 space-y-6">
+                <div>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۱) داده‌های گمشده</h3>
+                  <p className={tinyCls}>داده‌ها باید کامل باشند؛ تحلیل با حذف لیستی موارد ناقص انجام می‌شود.</p>
+                  <div className="tool-table-wrap mt-2">
+                    <table className="tool-table">
+                      <thead>
+                        <tr><th>ستون</th><th>تعداد گمشده</th><th>نتیجه</th></tr>
+                      </thead>
+                      <tbody>
+                        {analysis.missing.map((m, i) => (
+                          <tr key={i}>
+                            <td>{m.col}</td>
+                            <td className="number-cell">{m.count}</td>
+                            <td dangerouslySetInnerHTML={{ __html: m.count === 0 ? badge(true, "کامل") : badge(false, `${m.count} گمشده`) }} />
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <AssumptionNote condition="هیچ سلولی از داده‌ها خالی نباشد" pass={analysis.missing.every((m) => m.count === 0)} />
                 </div>
-                <AssumptionNote
-                  condition="هیچ سلولی از داده‌ها خالی نباشد"
-                  pass={analysis.missing.every((m) => m.count === 0)}
-                />
-              </div>
 
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۲) داده پرت چندمتغیری (فاصله ماهالانوبیس)</h3>
-                <p className={tinyCls}>فاصله ماهالانوبیس برای هر مورد با توزیع کای‌دو مقایسه می‌شود؛ p کمتر از ۰/۰۵ نشانه داده پرت است.</p>
-                {analysis.maha.valid ? (
-                  <>
-                    <div className="tool-table-wrap mt-2">
-                      <table className="tool-table">
-                        <thead>
-                          <tr><th>ردیف</th><th>فاصله ماهالانوبیس</th><th>p مقدار</th><th>وضعیت</th></tr>
-                        </thead>
-                        <tbody>
-                          {analysis.maha.originalIdx.slice(0, 15).map((oi, i) => (
-                            <tr key={oi}>
-                              <td className="row-index">{oi + 1}</td>
-                              <td className="number-cell">{fmt(analysis.maha.d2[i])}</td>
-                              <td className="number-cell">{fmtP(analysis.maha.p[i])}</td>
-                              <td dangerouslySetInnerHTML={{ __html: analysis.maha.p[i] < 0.05 ? badge(false, "داده پرت") : badge(true, "عادی") }} />
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <p className={`${tinyCls} mt-2`}>
-                      تعداد کل داده‌های پرت: {analysis.maha.outliers.length}
-                      {analysis.maha.outliers.length === 0 ? " — داده پرت شناسایی نشد." : ""}
-                    </p>
-                  </>
-                ) : (
-                  <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.maha.message}</p>
-                )}
-                <AssumptionNote
-                  condition="هیچ داده پرتی با p کمتر از ۰/۰۵ در فاصله ماهالانوبیس وجود نداشته باشد"
-                  pass={analysis.maha.valid && analysis.maha.outliers.length === 0}
-                />
-              </div>
+                <div>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۲) داده پرت چندمتغیری (فاصله ماهالانوبیس)</h3>
+                  <p className={tinyCls}>فاصله ماهالانوبیس برای هر مورد با توزیع کای‌دو مقایسه می‌شود؛ p کمتر از ۰/۰۵ نشانه داده پرت است.</p>
+                  {analysis.maha.valid ? (
+                    <>
+                      <div className="tool-table-wrap mt-2">
+                        <table className="tool-table">
+                          <thead>
+                            <tr><th>ردیف</th><th>فاصله ماهالانوبیس</th><th>p مقدار</th><th>وضعیت</th></tr>
+                          </thead>
+                          <tbody>
+                            {analysis.maha.originalIdx.slice(0, 15).map((oi, i) => (
+                              <tr key={oi}>
+                                <td className="row-index">{oi + 1}</td>
+                                <td className="number-cell">{fmt(analysis.maha.d2[i])}</td>
+                                <td className="number-cell">{fmtP(analysis.maha.p[i])}</td>
+                                <td dangerouslySetInnerHTML={{ __html: analysis.maha.p[i] < 0.05 ? badge(false, "داده پرت") : badge(true, "عادی") }} />
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className={`${tinyCls} mt-2`}>
+                        تعداد کل داده‌های پرت: {analysis.maha.outliers.length}
+                        {analysis.maha.outliers.length === 0 ? " — داده پرت شناسایی نشد." : ""}
+                      </p>
+                    </>
+                  ) : (
+                    <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.maha.message}</p>
+                  )}
+                  <AssumptionNote
+                    condition="هیچ داده پرتی با p کمتر از ۰/۰۵ در فاصله ماهالانوبیس وجود نداشته باشد"
+                    pass={analysis.maha.valid && analysis.maha.outliers.length === 0}
+                  />
+                </div>
 
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۳) نرمال بودن تک‌متغیری (کجی و کشیدگی)</h3>
-                <p className={tinyCls}>بر اساس نظر کلاین (۲۰۲۳): قدرمطلق کجی کوچک‌تر از ۳ و قدرمطلق کشیدگی کوچک‌تر از ۱۰.</p>
-                <div className="tool-table-wrap mt-2">
-                  <table className="tool-table">
-                    <thead>
-                      <tr><th>گره</th><th>دامنه نمره</th><th>کجی</th><th>کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
-                    </thead>
-                    <tbody>
-                      {analysis.normals.map((x, i) => {
-                        const nd = nodes[i];
-                        const v = vars.find((vv) => vv.id === nd.varId);
-                        const rangeText = nd.kind === "total"
-                          ? `${v?.totalMin}-${v?.totalMax} (کل)`
-                          : nd.kind === "sub"
-                            ? `${v?.subscales.find((s) => `${v?.name} — ${s.name}` === nd.label)?.min}-${v?.subscales.find((s) => `${v?.name} — ${s.name}` === nd.label)?.max}`
-                            : `${v?.totalMin}-${v?.totalMax}`;
-                        return (
+                <div>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۳) نرمال بودن تک‌متغیری (کجی و کشیدگی)</h3>
+                  <p className={tinyCls}>بر اساس کلاین (۲۰۲۳): قدرمطلق کجی کمتر از ۳ و قدرمطلق کشیدگی کمتر از ۱۰.</p>
+                  <div className="tool-table-wrap mt-2">
+                    <table className="tool-table">
+                      <thead>
+                        <tr><th>گره</th><th>کجی</th><th>کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
+                      </thead>
+                      <tbody>
+                        {analysis.normals.map((x, i) => (
                           <tr key={i}>
                             <td>{x.name}</td>
-                            <td className="text-start text-[11px]">{rangeText}</td>
                             <td className="number-cell">{fmt(x.skew)}</td>
                             <td className="number-cell">{fmt(x.kurt)}</td>
                             <td dangerouslySetInnerHTML={{ __html: Math.abs(x.skew) < 3 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
                             <td dangerouslySetInnerHTML={{ __html: Math.abs(x.kurt) < 10 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <AssumptionNote
-                  condition="قدرمطلق کجی هر گره کمتر از ۳ و قدرمطلق کشیدگی کمتر از ۱۰ باشد (کلاین، ۲۰۲۳)"
-                  pass={analysis.normals.every((x) => Math.abs(x.skew) < 3 && Math.abs(x.kurt) < 10)}
-                />
-              </div>
-
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۴) نرمال بودن چندمتغیری (ضریب مردیا)</h3>
-                <p className={tinyCls}>بر اساس پیشنهاد بلانچ (۲۰۱۲): نسبت بحرانی ضریب کشیدگی استانداردشده مردیا کوچک‌تر از ۵.</p>
-                {analysis.mardia.valid ? (
-                  <div className="tool-table-wrap mt-2">
-                    <table className="tool-table">
-                      <thead>
-                        <tr><th>ضریب کشیدگی مردیا</th><th>نسبت بحرانی (CR)</th><th>نتیجه</th></tr>
-                      </thead>
-                      <tbody>
-                        <tr>
-                          <td className="number-cell">{fmt(analysis.mardia.kurtosis)}</td>
-                          <td className="number-cell">{fmt(analysis.mardia.cr)}</td>
-                          <td dangerouslySetInnerHTML={{ __html: analysis.mardia.cr < 5 ? badge(true, "نرمال چندمتغیره") : badge(false, "تخطی") }} />
-                        </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
-                ) : (
-                  <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.mardia.message}</p>
-                )}
-                <AssumptionNote
-                  condition="نسبت بحرانی ضریب کشیدگی مردیا کمتر از ۵ باشد (بلانچ، ۲۰۱۲)"
-                  pass={analysis.mardia.valid && analysis.mardia.cr < 5}
-                />
-              </div>
-
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۵) خطی بودن روابط (ماتریس همبستگی پیرسون)</h3>
-                <p className={tinyCls}>اعداد زیر قطر ماتریس قرار دارند؛ ** معناداری در سطح ۰/۰۱ و * معناداری در سطح ۰/۰۵.</p>
-                <div className="tool-table-wrap mt-2">
-                  <table className="tool-table">
-                    <thead>
-                      <tr>
-                        <th>گره</th>
-                        {nodes.map((nd, i) => (
-                          <th key={i}>{nd.label}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {nodes.map((nd, i) => (
-                        <tr key={i}>
-                          <td style={{ fontWeight: 900 }}>{nd.label}</td>
-                          {nodes.map((_, j) => {
-                            if (i === j) return <td key={j} className="number-cell">1</td>;
-                            if (i < j) return <td key={j} />;
-                            const r = analysis.corr.r?.[i]?.[j] ?? NaN;
-                            const p = analysis.corr.p?.[i]?.[j] ?? 1;
-                            return (
-                              <td key={j} className="number-cell">
-                                {fmt(r)}
-                                {p < 0.01 ? "**" : p < 0.05 ? "*" : ""}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <AssumptionNote
+                    condition="قدرمطلق کجی هر گره کمتر از ۳ و قدرمطلق کشیدگی کمتر از ۱۰ باشد"
+                    pass={analysis.normals.every((x) => Math.abs(x.skew) < 3 && Math.abs(x.kurt) < 10)}
+                  />
                 </div>
-                <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>** p &lt; 0.01 ، * p &lt; 0.05 (دوطرفه)</p>
-                <AssumptionNote
-                  condition="همبستگی همه فلش‌های فعال مدل در سطح ۰/۰۵ معنادار باشد"
-                  pass={arrows.every((a) => (analysis.corr.p[a.fromNode]?.[a.toNode] ?? 1) < 0.05)}
-                />
-              </div>
 
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۶) عدم هم‌خطی چندگانه و استقلال خطاها</h3>
-                <p className={tinyCls}>معیار: VIF کمتر از ۵ و آماره دوربین-واتسون بین ۱/۵ تا ۲/۵ (تلورانس = 1/VIF).</p>
-                <div className="tool-table-wrap mt-2">
-                  <table className="tool-table">
-                    <thead>
-                      <tr><th>گره وابسته</th><th>پیش‌بین‌ها</th><th>VIF</th><th>تلورانس</th><th>دوربین-واتسون</th><th>نتیجه</th></tr>
-                    </thead>
-                    <tbody>
-                      {nodes.map((nd) => {
-                        if (nd.role === "exogenous") return null;
-                        const vifs = analysis.sem.vifs[nd.nodeId] ?? [];
-                        const dw = analysis.sem.dw[nd.nodeId] ?? NaN;
-                        const preds = arrows.filter((a) => a.active && a.toNode === nd.nodeId).map((a) => nodeLabel(a.fromNode));
-                        const vifOk = vifs.every((x) => x < 5);
-                        const dwOk = !Number.isFinite(dw) || (dw >= 1.5 && dw <= 2.5);
-                        return (
-                          <tr key={nd.nodeId}>
-                            <td style={{ fontWeight: 900 }}>{nd.label}</td>
-                            <td>{preds.length ? preds.join("، ") : "—"}</td>
-                            <td className="number-cell">{vifs.length ? vifs.map((x) => fmt(x)).join("، ") : "—"}</td>
-                            <td className="number-cell">{vifs.length ? vifs.map((x) => fmt(1 / x)).join("، ") : "—"}</td>
-                            <td className="number-cell">{Number.isFinite(dw) ? fmt(dw) : "—"}</td>
-                            <td dangerouslySetInnerHTML={{ __html: vifOk && dwOk ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <AssumptionNote
-                  condition="VIF همه پیش‌بین‌ها کمتر از ۵ و دوربین-واتسون بین ۱/۵ تا ۲/۵ باشد"
-                  pass={nodes
-                    .filter((nd) => nd.role !== "exogenous")
-                    .every((nd) => {
-                      const vifs = analysis.sem.vifs[nd.nodeId] ?? [];
-                      const dw = analysis.sem.dw[nd.nodeId] ?? NaN;
-                      return vifs.every((x) => x < 5) && (!Number.isFinite(dw) || (dw >= 1.5 && dw <= 2.5));
-                    })}
-                />
-              </div>
-            </div>
-          )}
-        </ExpandableSection>
-
-        {/* ---------- ۷) نتایج ---------- */}
-        <ExpandableSection
-          id="results"
-          tone={sectionTones[6]}
-          title="۷) نتایج"
-          desc="دیاگرام مدل، ضرایب مسیر، اثرات، R² و شاخص‌های برازش"
-        >
-          {!analysisValid ? (
-            <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-              {analysis
-                ? "مدل تغییر کرده است؛ برای به‌روزرسانی نتایج، دوباره «اجرای تحلیل» را بزنید."
-                : "بعد از تحلیل، دیاگرام مدل، ضرایب مسیر، اثرات، R² و شاخص‌های برازش اینجا نمایش داده می‌شود."}
-            </div>
-          ) : (
-            <div className="mt-4 space-y-6">
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">دیاگرام مدل</h3>
-                <div className="mt-2">
-                  <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysis.sem} />
-                </div>
-                <button type="button" className={`${btnSecondary} mt-2`} onClick={() => setShowBigDiagram(true)}>
-                  <RefreshCw className="h-4 w-4" />
-                  مشاهده بزرگ
-                </button>
-              </div>
-
-              {analysis.meas.length > 0 && (
                 <div>
-                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">
-                    مدل اندازه‌گیری (آلفای کرونباخ نمره کل و بارهای عاملی)
-                  </h3>
-                  <div className="tool-table-wrap mt-2">
-                    <table className="tool-table">
-                      <thead>
-                        <tr><th>متغیر پنهان</th><th>شاخص</th><th>بار عاملی</th><th>آلفای کرونباخ (نمره کل)</th><th>نتیجه</th></tr>
-                      </thead>
-                      <tbody>
-                        {analysis.meas.map((m) => (
-                          <Fragment key={m.varId}>
-                            <tr key={`${m.varId}-total`} style={{ background: "#f8fafc" }}>
-                              <td rowSpan={m.subNames.length + 1} style={{ fontWeight: 900 }}>{m.name}</td>
-                              <td style={{ fontWeight: 800 }}>نمره کل ({m.subNames.length} زیرمقیاس)</td>
-                              <td className="number-cell">—</td>
-                              <td className="number-cell">{fmt(m.alpha)}</td>
-                              <td dangerouslySetInnerHTML={{ __html: m.alpha >= 0.7 ? badge(true, "قابل قبول") : badge(false, "ضعیف") }} />
-                            </tr>
-                            {m.subNames.map((s, si) => (
-                              <tr key={`${m.varId}-${si}`}>
-                                <td>{s}</td>
-                                <td className="number-cell">{fmt(m.loadings[si])}</td>
-                                <td className="number-cell">—</td>
-                                <td />
-                              </tr>
-                            ))}
-                          </Fragment>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>معیار پذیرش آلفای کرونباخ ≥ 0.70</p>
-                </div>
-              )}
-
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">ضرایب مسیر (هر فلش)</h3>
-                <div className="tool-table-wrap mt-2">
-                  <table className="tool-table">
-                    <thead>
-                      <tr><th>مسیر</th><th>B (غیراستاندارد)</th><th>SE</th><th>t</th><th>p</th><th>β (استاندارد)</th><th>نتیجه</th></tr>
-                    </thead>
-                    <tbody>
-                      {analysis.sem.paths.length === 0 && (
-                        <tr><td colSpan={7} className="muted">مسیر فعالی وجود ندارد.</td></tr>
-                      )}
-                      {analysis.sem.paths.map((pr, i) => (
-                        <tr key={i}>
-                          <td>{nodeLabel(pr.from)} ← {nodeLabel(pr.to)}</td>
-                          <td className="number-cell">{fmt(pr.b)}</td>
-                          <td className="number-cell">{fmt(pr.se)}</td>
-                          <td className="number-cell">{fmt(pr.t)}</td>
-                          <td className="number-cell">{fmtP(pr.p)}{starP(pr.p)}</td>
-                          <td className="number-cell">{fmt(pr.std)}</td>
-                          <td dangerouslySetInnerHTML={{ __html: pr.p < 0.05 ? badge(true, "معنی‌دار") : badge(false, "غیرمعنی‌دار") }} />
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>* p &lt; 0.05 ، ** p &lt; 0.01 ، *** p &lt; 0.001</p>
-              </div>
-
-              <div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">
-                    اثرات مستقیم، غیرمستقیم و کل (بوت‌استرپ)
-                  </h3>
-                  <div className="flex items-center gap-2">
-                    <label className="flex items-center gap-1.5 text-[12px] font-bold text-stone-600 dark:text-stone-300">
-                      تعداد نمونه:
-                      <input
-                        type="number"
-                        dir="ltr"
-                        className={`${inputCls} !w-24 !py-1`}
-                        value={constraints.bootSamples}
-                        onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })}
-                      />
-                    </label>
-                    <button type="button" className={btnLight} disabled={bootBusy} onClick={() => runBootstrap()}>
-                      <RefreshCw className={`h-4 w-4 ${bootBusy ? "animate-spin" : ""}`} />
-                      {bootBusy ? "در حال اجرا..." : "اجرای بوت‌استرپ"}
-                    </button>
-                  </div>
-                </div>
-                <p className={tinyCls}>
-                  هر مسیر میانجی جداگانه گزارش می‌شود و «کل اثر غیرمستقیم» مجموع همه مسیرهاست. فاصله اطمینان ۹۵٪ با
-                  بوت‌استرپ؛ عدم عبور از صفر = معناداری در سطح ۰/۰۵.
-                </p>
-                <div className="tool-table-wrap mt-2">
-                  <table className="tool-table">
-                    <thead>
-                      <tr><th>مسیر غیرمستقیم</th><th>اثر مستقیم</th><th>اثر غیرمستقیم</th><th>CI پایین ۹۵٪</th><th>CI بالا ۹۵٪</th><th>p بوت‌استرپ</th><th>اثر کل</th><th>نتیجه میانجی</th></tr>
-                    </thead>
-                    <tbody>
-                      {bootResults === null && (
-                        <tr>
-                          <td colSpan={8} className="muted">
-                            {bootBusy ? "در حال محاسبه بوت‌استرپ..." : "برای محاسبه فاصله اطمینان، بوت‌استرپ را اجرا کنید."}
-                          </td>
-                        </tr>
-                      )}
-                      {bootResults?.map((b, i) => {
-                        const isTotal = b.viaVar === null;
-                        const label = isTotal
-                          ? `کل اثر غیرمستقیم: ${varName(b.fromVar)} ← ${varName(b.toVar)}`
-                          : `${varName(b.fromVar)} ← ${varName(b.viaVar!)} ← ${varName(b.toVar)}`;
-                        return (
-                          <tr key={i} className={isTotal ? "bg-stone-50 font-bold dark:bg-slate-900" : ""}>
-                            <td>{label}</td>
-                            <td className="number-cell">{isTotal ? fmt(b.direct) : "—"}</td>
-                            <td className="number-cell">{fmt(b.indirect)}</td>
-                            <td className="number-cell">{fmt(b.lo)}</td>
-                            <td className="number-cell">{fmt(b.hi)}</td>
-                            <td className="number-cell">{fmtP(b.p)}{starP(b.p)}</td>
-                            <td className="number-cell">{isTotal ? fmt(b.total) : "—"}</td>
-                            <td dangerouslySetInnerHTML={{ __html: b.indirect !== 0 && b.p < 0.05 ? badge(true, "میانجی معنی‌دار") : b.indirect === 0 ? badgeWarn("میانجی وجود ندارد") : badge(false, "غیرمعنی‌دار") }} />
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-                <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>* p &lt; 0.05 ، ** p &lt; 0.01 ، *** p &lt; 0.001</p>
-              </div>
-
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">R² گره‌های درون‌زای مدل</h3>
-                <p className={tinyCls}>
-                  «گره» یعنی هر واحد واردشده در مدل: متغیر جمع‌پذیر با نمره کل یک گره است، و در متغیرهای غیرجمع‌پذیر هر
-                  زیرمقیاس مستقل یک گره جدا می‌شود. R² هر گره یعنی درصد واریانس آن که توسط پیش‌بین‌هایش تبیین می‌شود.
-                </p>
-                <div className="tool-table-wrap mt-2">
-                  <table className="tool-table">
-                    <thead>
-                      <tr><th>گره</th><th>R²</th><th>نتیجه</th></tr>
-                    </thead>
-                    <tbody>
-                      {nodes.map((nd) =>
-                        nd.role === "exogenous" ? null : (
-                          <tr key={nd.nodeId}>
-                            <td style={{ fontWeight: 900 }}>{nd.label}</td>
-                            <td className="number-cell">{fmt(analysis.sem.r2[nd.nodeId] ?? 0)}</td>
-                            <td dangerouslySetInnerHTML={{ __html: (analysis.sem.r2[nd.nodeId] ?? 0) >= 0.1 ? badge(true, "قابل قبول") : badgeWarn("کم") }} />
-                          </tr>
-                        )
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">شاخص‌های برازش مدل</h3>
-                {analysis.sem.fit.valid ? (
-                  <>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۴) نرمال بودن چندمتغیری (ضریب مردیا)</h3>
+                  <p className={tinyCls}>بر اساس بلانچ (۲۰۱۲): نسبت بحرانی ضریب کشیدگی استانداردشده مردیا کمتر از ۵.</p>
+                  {analysis.mardia.valid ? (
                     <div className="tool-table-wrap mt-2">
                       <table className="tool-table">
                         <thead>
-                          <tr><th>χ²</th><th>df</th><th>χ²/df</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>نتیجه کلی</th></tr>
+                          <tr><th>ضریب کشیدگی مردیا</th><th>نسبت بحرانی (CR)</th><th>نتیجه</th></tr>
                         </thead>
                         <tbody>
                           <tr>
-                            <td className="number-cell">{fmt(analysis.sem.fit.chi2)}</td>
-                            <td className="number-cell">{analysis.sem.fit.df}</td>
-                            <td className="number-cell">{fmt(analysis.sem.fit.chi2df)}</td>
-                            <td className="number-cell">{fmt(analysis.sem.fit.cfi)}</td>
-                            <td className="number-cell">{fmt(analysis.sem.fit.tli)}</td>
-                            <td className="number-cell">{fmt(analysis.sem.fit.rmsea)}</td>
-                            <td className="number-cell">{fmt(analysis.sem.fit.srmr)}</td>
-                            <td dangerouslySetInnerHTML={{ __html: analysis.sem.fit.cfi >= 0.9 && analysis.sem.fit.rmsea <= 0.08 ? badge(true, "برازش خوب") : badge(false, "برازش ضعیف") }} />
+                            <td className="number-cell">{fmt(analysis.mardia.kurtosis)}</td>
+                            <td className="number-cell">{fmt(analysis.mardia.cr)}</td>
+                            <td dangerouslySetInnerHTML={{ __html: analysis.mardia.cr < 5 ? badge(true, "نرمال چندمتغیره") : badge(false, "تخطی") }} />
                           </tr>
                         </tbody>
                       </table>
                     </div>
-                    <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>معیار: CFI ≥ 0.90 ، RMSEA ≤ 0.08</p>
-                  </>
-                ) : (
-                  <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.sem.fit.message}</p>
-                )}
-                {analysis.sem.warnings.map((w, i) => (
-                  <p key={i} className={`${tinyCls} mt-1 text-amber-700 dark:text-amber-400`}>{w}</p>
-                ))}
-              </div>
+                  ) : (
+                    <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.mardia.message}</p>
+                  )}
+                  <AssumptionNote
+                    condition="نسبت بحرانی ضریب کشیدگی مردیا کمتر از ۵ باشد"
+                    pass={analysis.mardia.valid && analysis.mardia.cr < 5}
+                  />
+                </div>
 
-              {answerKey && (
                 <div>
-                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">کلید پاسخ (مقادیر هدف در برابر واقعی — مخصوص استاد)</h3>
-                  <p className={`${tinyCls} mt-1`}>
-                    کلید پاسخ یعنی ضرایب استانداردی (β) که هنگام تولید داده برای هر فلش «هدف» قرار گرفته‌اند، در برابر
-                    ضرایبی که در داده نهایی «واقعاً» برآورد شده‌اند. دانشجو باید با تحلیل داده به ضرایبی نزدیک به ستون
-                    «ضریب واقعی» برسد؛ این جدول فقط برای استاد است.
-                  </p>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۵) خطی بودن روابط (ماتریس همبستگی پیرسون)</h3>
+                  <p className={tinyCls}>اعداد زیر قطر ماتریس؛ ** معناداری در سطح ۰/۰۱ و * در سطح ۰/۰۵.</p>
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
-                        <tr><th>مسیر</th><th>ضریب هدف (β)</th><th>ضریب واقعی (β)</th><th>وضعیت</th></tr>
+                        <tr>
+                          <th>گره</th>
+                          {modelNodes.map((nd, i) => (
+                            <th key={i}>{nd.label}</th>
+                          ))}
+                        </tr>
                       </thead>
                       <tbody>
-                        {answerKey.pathTargets.map((pt, i) => (
+                        {modelNodes.map((nd, i) => (
                           <tr key={i}>
-                            <td>{nodeLabel(pt.fromNode)} ← {nodeLabel(pt.toNode)}</td>
-                            <td className="number-cell">{fmt(pt.target)}</td>
-                            <td className="number-cell">{fmt(pt.actual)}</td>
-                            <td dangerouslySetInnerHTML={{ __html: Math.abs(pt.actual - pt.target) < 0.15 ? badge(true, "نزدیک به هدف") : badgeWarn("فاصله دارد") }} />
+                            <td style={{ fontWeight: 900 }}>{nd.label}</td>
+                            {modelNodes.map((_, j) => {
+                              if (i === j) return <td key={j} className="number-cell">1</td>;
+                              if (i < j) return <td key={j} />;
+                              const r = analysis.corr.r?.[i]?.[j] ?? NaN;
+                              const p = analysis.corr.p?.[i]?.[j] ?? 1;
+                              return (
+                                <td key={j} className="number-cell">
+                                  {fmt(r)}
+                                  {p < 0.01 ? "**" : p < 0.05 ? "*" : ""}
+                                </td>
+                              );
+                            })}
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
-                  <p className={`${tinyCls} mt-2`}>تعداد تلاش‌های تولید: {answerKey.attempts}</p>
+                  <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>** p &lt; 0.01 ، * p &lt; 0.05 (دوطرفه)</p>
+                  <AssumptionNote
+                    condition="همبستگی همه فلش‌های فعال مدل در سطح ۰/۰۵ معنادار باشد"
+                    pass={modelArrows.every((a) => (analysis.corr.p[a.fromNode]?.[a.toNode] ?? 1) < 0.05)}
+                  />
                 </div>
-              )}
-            </div>
-          )}
-        </ExpandableSection>
-        </div>
+
+                <div>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۶) عدم هم‌خطی چندگانه و استقلال خطاها</h3>
+                  <p className={tinyCls}>معیار: VIF کمتر از ۵ و دوربین-واتسون بین ۱/۵ تا ۲/۵ (تلورانس = 1/VIF).</p>
+                  <div className="tool-table-wrap mt-2">
+                    <table className="tool-table">
+                      <thead>
+                        <tr><th>گره وابسته</th><th>پیش‌بین‌ها</th><th>VIF</th><th>تلورانس</th><th>دوربین-واتسون</th><th>نتیجه</th></tr>
+                      </thead>
+                      <tbody>
+                        {modelNodes.map((nd) => {
+                          if (nd.role === "exogenous") return null;
+                          const vifs = analysis.sem.vifs[nd.nodeId] ?? [];
+                          const dw = analysis.sem.dw[nd.nodeId] ?? NaN;
+                          const preds = modelArrows.filter((a) => a.active && a.toNode === nd.nodeId).map((a) => nodeLabel(a.fromNode));
+                          const vifOk = vifs.every((x) => x < 5);
+                          const dwOk = !Number.isFinite(dw) || (dw >= 1.5 && dw <= 2.5);
+                          return (
+                            <tr key={nd.nodeId}>
+                              <td style={{ fontWeight: 900 }}>{nd.label}</td>
+                              <td>{preds.length ? preds.join("، ") : "—"}</td>
+                              <td className="number-cell">{vifs.length ? vifs.map((x) => fmt(x)).join("، ") : "—"}</td>
+                              <td className="number-cell">{vifs.length ? vifs.map((x) => fmt(1 / x)).join("، ") : "—"}</td>
+                              <td className="number-cell">{Number.isFinite(dw) ? fmt(dw) : "—"}</td>
+                              <td dangerouslySetInnerHTML={{ __html: vifOk && dwOk ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <AssumptionNote
+                    condition="VIF همه پیش‌بین‌ها کمتر از ۵ و دوربین-واتسون بین ۱/۵ تا ۲/۵ باشد"
+                    pass={modelNodes
+                      .filter((nd) => nd.role !== "exogenous")
+                      .every((nd) => {
+                        const vifs = analysis.sem.vifs[nd.nodeId] ?? [];
+                        const dw = analysis.sem.dw[nd.nodeId] ?? NaN;
+                        return vifs.every((x) => x < 5) && (!Number.isFinite(dw) || (dw >= 1.5 && dw <= 2.5));
+                      })}
+                  />
+                </div>
+              </div>
+            )}
+          </section>
         )}
+
+        {/* ============ مرحله ۶: یافته‌های توصیفی ============ */}
+        {currentStep === stepIdx("descriptive") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های توصیفی</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              آمار توصیفی نمرات کل / گره‌های مدل: تعداد، میانگین، انحراف معیار، کمینه، بیشینه، کجی و کشیدگی.
+            </p>
+            {!descriptive ? (
+              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
+                ابتدا داده تولید یا وارد کنید و تحلیل را اجرا کنید.
+              </div>
+            ) : (
+              <div className="tool-table-wrap mt-3">
+                <table className="tool-table">
+                  <thead>
+                    <tr>
+                      <th>گره</th>
+                      <th>n</th>
+                      <th>میانگین</th>
+                      <th>انحراف معیار</th>
+                      <th>کمینه</th>
+                      <th>بیشینه</th>
+                      <th>کجی</th>
+                      <th>کشیدگی</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {descriptive.map((d, i) => (
+                      <tr key={i}>
+                        <td style={{ fontWeight: 900 }}>{d.label}</td>
+                        <td className="number-cell">{d.n}</td>
+                        <td className="number-cell">{fmt(d.mean)}</td>
+                        <td className="number-cell">{fmt(d.sd)}</td>
+                        <td className="number-cell">{Number.isFinite(d.min) ? fmt(d.min) : "-"}</td>
+                        <td className="number-cell">{Number.isFinite(d.max) ? fmt(d.max) : "-"}</td>
+                        <td className="number-cell">{fmt(d.skew)}</td>
+                        <td className="number-cell">{fmt(d.kurt)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ============ مرحله ۷: دیاگرام مدل ============ */}
+        {currentStep === stepIdx("diagram") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[7]}`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">دیاگرام مدل</h2>
+                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                  نمایش گرافیکی مدل با ضرایب مسیر (β) و R² گره‌ها.
+                </p>
+              </div>
+              <button type="button" className={btnSecondary} onClick={() => setShowBigDiagram(true)}>
+                <RefreshCw className="h-4 w-4" />
+                مشاهده بزرگ
+              </button>
+            </div>
+            <div className="mt-3 rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+              <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} />
+            </div>
+          </section>
+        )}
+
+
+        {/* ============ مرحله ۸: یافته‌های استنباطی ============ */}
+        {currentStep === stepIdx("inferential") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های استنباطی</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              ابتدا شاخص‌های برازش مدل، سپس ضرایب مسیر، اثرات و R².
+            </p>
+            {!analysisValid ? (
+              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
+                ابتدا داده تولید یا وارد کنید و تحلیل را اجرا کنید.
+              </div>
+            ) : (
+              <div className="mt-4 space-y-6">
+                <div>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">شاخص‌های برازش مدل</h3>
+                  {analysis.sem.fit.valid ? (
+                    <>
+                      <div className="tool-table-wrap mt-2">
+                        <table className="tool-table">
+                          <thead>
+                            <tr><th>χ²</th><th>df</th><th>χ²/df</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>نتیجه کلی</th></tr>
+                          </thead>
+                          <tbody>
+                            <tr>
+                              <td className="number-cell">{fmt(analysis.sem.fit.chi2)}</td>
+                              <td className="number-cell">{analysis.sem.fit.df}</td>
+                              <td className="number-cell">{fmt(analysis.sem.fit.chi2df)}</td>
+                              <td className="number-cell">{fmt(analysis.sem.fit.cfi)}</td>
+                              <td className="number-cell">{fmt(analysis.sem.fit.tli)}</td>
+                              <td className="number-cell">{fmt(analysis.sem.fit.rmsea)}</td>
+                              <td className="number-cell">{fmt(analysis.sem.fit.srmr)}</td>
+                              <td dangerouslySetInnerHTML={{ __html: analysis.sem.fit.cfi >= 0.9 && analysis.sem.fit.rmsea <= 0.08 ? badge(true, "برازش خوب") : badge(false, "برازش ضعیف") }} />
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>معیار: CFI ≥ 0.90 ، RMSEA ≤ 0.08</p>
+                    </>
+                  ) : (
+                    <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.sem.fit.message}</p>
+                  )}
+                  {analysis.sem.warnings.map((w, i) => (
+                    <p key={i} className={`${tinyCls} mt-1 text-amber-700 dark:text-amber-400`}>{w}</p>
+                  ))}
+                </div>
+
+                <div>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">ضرایب مسیر (هر فلش)</h3>
+                  <div className="tool-table-wrap mt-2">
+                    <table className="tool-table">
+                      <thead>
+                        <tr><th>مسیر</th><th>B</th><th>SE</th><th>t</th><th>p</th><th>β</th><th>نتیجه</th></tr>
+                      </thead>
+                      <tbody>
+                        {analysis.sem.paths.length === 0 && (
+                          <tr><td colSpan={7} className="muted">مسیر فعالی وجود ندارد.</td></tr>
+                        )}
+                        {analysis.sem.paths.map((pr, i) => (
+                          <tr key={i}>
+                            <td>{nodeLabel(pr.from)} ← {nodeLabel(pr.to)}</td>
+                            <td className="number-cell">{fmt(pr.b)}</td>
+                            <td className="number-cell">{fmt(pr.se)}</td>
+                            <td className="number-cell">{fmt(pr.t)}</td>
+                            <td className="number-cell">{fmtP(pr.p)}{starP(pr.p)}</td>
+                            <td className="number-cell">{fmt(pr.std)}</td>
+                            <td dangerouslySetInnerHTML={{ __html: pr.p < 0.05 ? badge(true, "معنی‌دار") : badge(false, "غیرمعنی‌دار") }} />
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>* p &lt; 0.05 ، ** p &lt; 0.01 ، *** p &lt; 0.001</p>
+                </div>
+
+                <div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="font-extrabold text-stone-800 dark:text-stone-200">اثرات مستقیم، غیرمستقیم و کل (بوت‌استرپ)</h3>
+                    <div className="flex items-center gap-2">
+                      <label className="flex items-center gap-1.5 text-[12px] font-bold text-stone-600 dark:text-stone-300">
+                        تعداد نمونه:
+                        <input
+                          type="number"
+                          dir="ltr"
+                          className={`${inputCls} !w-24 !py-1`}
+                          value={constraints.bootSamples}
+                          onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })}
+                        />
+                      </label>
+                      <button type="button" className={btnLight} disabled={bootBusy} onClick={() => runBootstrap()}>
+                        <RefreshCw className={`h-4 w-4 ${bootBusy ? "animate-spin" : ""}`} />
+                        {bootBusy ? "در حال اجرا..." : "اجرای بوت‌استرپ"}
+                      </button>
+                    </div>
+                  </div>
+                  <p className={tinyCls}>
+                    هر مسیر میانجی جداگانه و «کل اثر غیرمستقیم» مجموع همه مسیرها. فاصله اطمینان ۹۵٪ با بوت‌استرپ؛ عدم عبور
+                    از صفر = معناداری در سطح ۰/۰۵.
+                  </p>
+                  <div className="tool-table-wrap mt-2">
+                    <table className="tool-table">
+                      <thead>
+                        <tr><th>مسیر غیرمستقیم</th><th>اثر مستقیم</th><th>اثر غیرمستقیم</th><th>CI پایین ۹۵٪</th><th>CI بالا ۹۵٪</th><th>p</th><th>اثر کل</th><th>نتیجه</th></tr>
+                      </thead>
+                      <tbody>
+                        {bootResults === null && (
+                          <tr><td colSpan={8} className="muted">{bootBusy ? "در حال محاسبه بوت‌استرپ..." : "برای فاصله اطمینان، بوت‌استرپ را اجرا کنید."}</td></tr>
+                        )}
+                        {bootResults?.map((b, i) => {
+                          const isTotal = b.viaVar === null;
+                          const label = isTotal
+                            ? `کل اثر غیرمستقیم: ${varName(b.fromVar)} ← ${varName(b.toVar)}`
+                            : `${varName(b.fromVar)} ← ${varName(b.viaVar!)} ← ${varName(b.toVar)}`;
+                          return (
+                            <tr key={i} className={isTotal ? "bg-stone-50 font-bold dark:bg-slate-900" : ""}>
+                              <td>{label}</td>
+                              <td className="number-cell">{isTotal ? fmt(b.direct) : "—"}</td>
+                              <td className="number-cell">{fmt(b.indirect)}</td>
+                              <td className="number-cell">{fmt(b.lo)}</td>
+                              <td className="number-cell">{fmt(b.hi)}</td>
+                              <td className="number-cell">{fmtP(b.p)}{starP(b.p)}</td>
+                              <td className="number-cell">{isTotal ? fmt(b.total) : "—"}</td>
+                              <td dangerouslySetInnerHTML={{ __html: b.indirect !== 0 && b.p < 0.05 ? badge(true, "میانجی معنی‌دار") : b.indirect === 0 ? badgeWarn("میانجی وجود ندارد") : badge(false, "غیرمعنی‌دار") }} />
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">R² گره‌های درون‌زای مدل</h3>
+                  <p className={tinyCls}>
+                    «گره» یعنی هر واحد واردشده در مدل: متغیر جمع‌پذیر با نمره کل یک گره است، و در متغیرهای غیرجمع‌پذیر هر
+                    زیرمقیاس مستقل یک گره جدا می‌شود. R² هر گره یعنی درصد واریانس آن که توسط پیش‌بین‌هایش تبیین می‌شود.
+                  </p>
+                  <div className="tool-table-wrap mt-2">
+                    <table className="tool-table">
+                      <thead>
+                        <tr><th>گره</th><th>R²</th><th>نتیجه</th></tr>
+                      </thead>
+                      <tbody>
+                        {modelNodes.map((nd) =>
+                          nd.role === "exogenous" ? null : (
+                            <tr key={nd.nodeId}>
+                              <td style={{ fontWeight: 900 }}>{nd.label}</td>
+                              <td className="number-cell">{fmt(analysis.sem.r2[nd.nodeId] ?? 0)}</td>
+                              <td dangerouslySetInnerHTML={{ __html: (analysis.sem.r2[nd.nodeId] ?? 0) >= 0.1 ? badge(true, "قابل قبول") : badgeWarn("کم") }} />
+                            </tr>
+                          )
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {analysis.meas.length > 0 && (
+                  <div>
+                    <h3 className="font-extrabold text-stone-800 dark:text-stone-200">مدل اندازه‌گیری (آلفای کرونباخ و بارهای عاملی)</h3>
+                    <div className="tool-table-wrap mt-2">
+                      <table className="tool-table">
+                        <thead>
+                          <tr><th>متغیر پنهان</th><th>شاخص</th><th>بار عاملی</th><th>آلفای کرونباخ</th><th>نتیجه</th></tr>
+                        </thead>
+                        <tbody>
+                          {analysis.meas.map((m) => (
+                            <Fragment key={m.varId}>
+                              <tr key={`${m.varId}-total`} style={{ background: "#f8fafc" }}>
+                                <td rowSpan={m.subNames.length + 1} style={{ fontWeight: 900 }}>{m.name}</td>
+                                <td style={{ fontWeight: 800 }}>نمره کل ({m.subNames.length} زیرمقیاس)</td>
+                                <td className="number-cell">—</td>
+                                <td className="number-cell">{fmt(m.alpha)}</td>
+                                <td dangerouslySetInnerHTML={{ __html: m.alpha >= 0.7 ? badge(true, "قابل قبول") : badge(false, "ضعیف") }} />
+                              </tr>
+                              {m.subNames.map((s, si) => (
+                                <tr key={`${m.varId}-${si}`}>
+                                  <td>{s}</td>
+                                  <td className="number-cell">{fmt(m.loadings[si])}</td>
+                                  <td className="number-cell">—</td>
+                                  <td />
+                                </tr>
+                              ))}
+                            </Fragment>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>معیار پذیرش آلفای کرونباخ ≥ 0.70</p>
+                  </div>
+                )}
+
+                {answerKey && (
+                  <div>
+                    <h3 className="font-extrabold text-stone-800 dark:text-stone-200">کلید پاسخ (مقادیر هدف در برابر واقعی — مخصوص استاد)</h3>
+                    <p className={`${tinyCls} mt-1`}>
+                      ضرایب β «هدف» هنگام تولید در برابر ضرایب «واقعی» برآوردشده؛ دانشجو باید به ستون واقعی برسد. این
+                      جدول فقط برای استاد است.
+                    </p>
+                    <div className="tool-table-wrap mt-2">
+                      <table className="tool-table">
+                        <thead>
+                          <tr><th>مسیر</th><th>ضریب هدف (β)</th><th>ضریب واقعی (β)</th><th>وضعیت</th></tr>
+                        </thead>
+                        <tbody>
+                          {answerKey.pathTargets.map((pt, i) => (
+                            <tr key={i}>
+                              <td>{nodeLabel(pt.fromNode)} ← {nodeLabel(pt.toNode)}</td>
+                              <td className="number-cell">{fmt(pt.target)}</td>
+                              <td className="number-cell">{fmt(pt.actual)}</td>
+                              <td dangerouslySetInnerHTML={{ __html: Math.abs(pt.actual - pt.target) < 0.15 ? badge(true, "نزدیک به هدف") : badgeWarn("فاصله دارد") }} />
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className={`${tinyCls} mt-2`}>تعداد تلاش‌های تولید: {answerKey.attempts}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ============ مرحله ۹: آلفای کرونباخ ============ */}
+        {currentStep === stepIdx("alpha") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[7]}`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">محاسبه آلفای کرونباخ</h2>
+                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                  این مرحله اختیاری است؛ اگر نیاز ندارید، آن را خاموش کنید تا از مراحل حذف شود.
+                </p>
+              </div>
+              <div className="flex items-center gap-4 rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
+                <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">نیاز دارم؟</span>
+                <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
+                  <input type="radio" name="wantAlpha" checked={wantAlpha} onChange={() => setWantAlpha(true)} className="h-4 w-4 accent-indigo-600" />
+                  بله
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
+                  <input type="radio" name="wantAlpha" checked={!wantAlpha} onChange={() => setWantAlpha(false)} className="h-4 w-4 accent-indigo-600" />
+                  خیر
+                </label>
+              </div>
+            </div>
+
+            {!wantAlpha ? (
+              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
+                این مرحله غیرفعال شد و از استپر حذف شد.
+              </div>
+            ) : !analysisValid || !analysis.meas.length ? (
+              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
+                {analysisValid
+                  ? "برای محاسبه آلفا، متغیرها باید حداقل ۲ زیرمقیاس/گویه داشته باشند."
+                  : "ابتدا داده تولید یا وارد کنید و تحلیل را اجرا کنید."}
+              </div>
+            ) : (
+              <div className="mt-4 space-y-4">
+                {analysis.meas.map((m) => (
+                  <div key={m.varId} className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="font-extrabold text-stone-800 dark:text-stone-200">{m.name}</h3>
+                      <div className="flex gap-2 text-[12px] font-bold">
+                        <span className="rounded-full bg-indigo-50 px-3 py-1 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                          آلفای کرونباخ: {fmt(m.alpha)}
+                        </span>
+                        <span
+                          className={`rounded-full px-3 py-1 ${
+                            m.alpha >= 0.7
+                              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                              : "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300"
+                          }`}
+                        >
+                          {m.alpha >= 0.7 ? "قابل قبول ✓" : "ضعیف ✗"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="tool-table-wrap mt-3">
+                      <table className="tool-table">
+                        <thead>
+                          <tr>
+                            <th>شاخص</th>
+                            <th>بار عاملی</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {m.subNames.map((s, si) => (
+                            <tr key={si}>
+                              <td>{s}</td>
+                              <td className="number-cell">{fmt(m.loadings[si])}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ))}
+                <div className="rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 p-4 text-[13px] text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300">
+                  برای تحلیل کامل‌تر آلفا (گویه‌به‌گویه، همبستگی گویه-کل، آلفا اگر گویه حذف شود، تولید داده مستقل) از
+                  ابزار جداگانه استفاده کنید:{" "}
+                  <a href="/tools/alpha" className="font-black underline">
+                    صفحه اندازه‌گیری و تحلیل آلفای کرونباخ ←
+                  </a>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ============ مرحله ۱۰: نگارش گزارش ============ */}
+        {currentStep === stepIdx("report") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">نگارش گزارش</h2>
+                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                  گزارش کامل تحلیل به‌صورت متن آماده برای ورد. می‌توانید کپی کنید یا به‌صورت docx / txt دانلود کنید؛
+                  اکسل کامل هم شامل شیت‌های داده، نمرات کل و گزارش است.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className={btnPrimary} onClick={exportExcel}>
+                  <Download className="h-4 w-4" />
+                  دانلود اکسل کامل
+                </button>
+                <button type="button" className={btnLight} onClick={exportDocx}>
+                  <FileText className="h-4 w-4" />
+                  گزارش docx
+                </button>
+                <button type="button" className={btnLight} onClick={exportTxt}>
+                  <FileText className="h-4 w-4" />
+                  گزارش txt
+                </button>
+                <button type="button" className={btnLight} onClick={copyReport}>
+                  <Copy className="h-4 w-4" />
+                  کپی گزارش
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+              <pre
+                dir="rtl"
+                className="max-h-[520px] overflow-auto whitespace-pre-wrap text-[12.5px] leading-7 text-stone-700 dark:text-stone-300"
+              >
+                {buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length)}
+              </pre>
+            </div>
+          </section>
+        )}
+
+        {/* ---------- دکمه‌های قبلی / بعدی ---------- */}
+        <div className="mt-6 flex items-center justify-between gap-3 border-t border-stone-200 pt-4 dark:border-stone-700">
+          <button
+            type="button"
+            className={btnLight}
+            disabled={currentStep === 0}
+            onClick={() => setActiveStep((s) => Math.max(0, s - 1))}
+          >
+            <ChevronRight className="h-4 w-4" />
+            مرحله قبلی
+          </button>
+          <span className="text-[12px] font-bold text-stone-400 dark:text-stone-500">
+            مرحله {currentStep + 1} از {steps.length}
+          </span>
+          {currentStep < steps.length - 1 ? (
+            <button type="button" className={btnPrimary} onClick={goNext}>
+              مرحله بعدی
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+          ) : (
+            <button type="button" className={btnPrimary} onClick={() => setActiveStep(0)}>
+              بازگشت به ابتدا
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ---------- مودال نمایش بزرگ دیاگرام ---------- */}
@@ -2380,12 +2660,51 @@ function SemTool() {
                 بستن
               </button>
             </div>
-            <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysis?.sem} large />
+            <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} large />
           </div>
         </div>
       )}
 
-      {/* ---------- مودال نام‌گذاری بکاپ ---------- */}
+      {/* ---------- مودال پروژه جدید ---------- */}
+      {projectModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setProjectModal(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-stone-700 dark:bg-slate-800"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">پروژه جدید</h3>
+            <p className="mt-1 text-[12px] text-stone-500 dark:text-stone-400">
+              نام پروژه را وارد کنید؛ با متغیرهای پیش‌فرض شروع می‌شود.
+            </p>
+            <input
+              className={`${inputCls} mt-3`}
+              value={newProjectName}
+              placeholder={`پروژه ${projects.length + 1}`}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") createProject();
+              }}
+              autoFocus
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" className={btnLight} onClick={() => setProjectModal(false)}>
+                انصراف
+              </button>
+              <button type="button" className={btnPrimary} onClick={createProject}>
+                <FolderPlus className="h-4 w-4" />
+                ایجاد پروژه
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- مودال بکاپ ---------- */}
       {backupModal && (
         <div
           className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
@@ -2397,36 +2716,48 @@ function SemTool() {
             className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-stone-700 dark:bg-slate-800"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">نام فایل بکاپ</h3>
+            <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">بکاپ پروژه‌ها</h3>
             <p className="mt-1 text-[12px] text-stone-500 dark:text-stone-400">
-              نام دلخواه وارد کنید؛ تاریخ و ساعت به‌صورت خودکار در نام پیش‌فرض آمده است. بکاپ شامل تنظیمات، متغیرها،
-              فلش‌ها، قیود و داده فعلی است.
+              بکاپ شامل متغیرها، فلش‌ها، قیود و داده همه پروژه‌ها (یا فقط همین پروژه) است. نام فایل را وارد کنید؛ تاریخ و
+              ساعت به‌صورت خودکار در نام پیش‌فرض آمده است.
             </p>
+
+            <div className="mt-3 space-y-2">
+              <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 p-3 text-sm font-bold text-stone-700 dark:border-stone-700 dark:bg-slate-900 dark:text-stone-300">
+                <input
+                  type="radio"
+                  name="backupScope"
+                  checked={backupScope === "all"}
+                  onChange={() => setBackupScope("all")}
+                  className="h-4 w-4 accent-indigo-600"
+                />
+                بکاپ کامل (همه {projects.length} پروژه)
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 p-3 text-sm font-bold text-stone-700 dark:border-stone-700 dark:bg-slate-900 dark:text-stone-300">
+                <input
+                  type="radio"
+                  name="backupScope"
+                  checked={backupScope === "one"}
+                  onChange={() => setBackupScope("one")}
+                  className="h-4 w-4 accent-indigo-600"
+                />
+                فقط پروژه فعلی ({currentProject?.name ?? "—"})
+              </label>
+            </div>
+
             <input
               dir="ltr"
               className={`${inputCls} mt-3`}
               value={backupName}
               onChange={(e) => setBackupName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  doBackup(backupName);
-                  setBackupModal(false);
-                }
-              }}
               autoFocus
             />
+
             <div className="mt-4 flex justify-end gap-2">
               <button type="button" className={btnLight} onClick={() => setBackupModal(false)}>
                 انصراف
               </button>
-              <button
-                type="button"
-                className={btnPrimary}
-                onClick={() => {
-                  doBackup(backupName);
-                  setBackupModal(false);
-                }}
-              >
+              <button type="button" className={btnPrimary} onClick={doBackup}>
                 <Download className="h-4 w-4" />
                 دانلود بکاپ
               </button>
@@ -2435,7 +2766,7 @@ function SemTool() {
         </div>
       )}
 
-      {/* ---------- مودال نتیجه تحلیل ---------- */}
+      {/* ---------- مودال نتیجه ---------- */}
       {modal && <ResultModal ok={modal.ok} lines={modal.lines} onClose={() => setModal(null)} />}
 
       {/* ---------- فوتر ثابت خروجی ---------- */}
@@ -2443,8 +2774,7 @@ function SemTool() {
         <div className="mx-auto flex max-w-[1280px] flex-col items-center gap-1.5 px-4 py-2.5">
           <p className="text-center text-[12px] leading-5 text-stone-500 dark:text-stone-400">
             برای دریافت خروجی مورد نظر، روی دکمه مربوطه کلیک کنید؛ اکسل کامل شامل شیت‌های «داده»، «نمرات کل / گره‌ها» و
-            «گزارش»، قالب داده برای پر کردن و ایمپورت مجدد، و گزارش docx یا txt جداگانه در دسترس است. بکاپ تنظیمات و داده
-            را هم می‌توانید ذخیره و بازیابی کنید.
+            «گزارش» است. بکاپ پروژه‌ها از مرحله «پروژه و منبع داده» در دسترس است.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-2">
             <button type="button" className={btnPrimary} onClick={exportExcel}>
@@ -2469,22 +2799,7 @@ function SemTool() {
             </button>
             <button type="button" className={btnLight} onClick={openBackupModal}>
               <Download className="h-4 w-4" />
-              بکاپ تنظیمات
-            </button>
-            <input
-              ref={restoreRef}
-              type="file"
-              accept=".json"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) restore(f);
-                e.target.value = "";
-              }}
-            />
-            <button type="button" className={btnLight} onClick={() => restoreRef.current?.click()}>
-              <Upload className="h-4 w-4" />
-              بازیابی بکاپ
+              بکاپ پروژه‌ها
             </button>
           </div>
           <div aria-live="polite" className="min-h-5">
@@ -2495,7 +2810,6 @@ function SemTool() {
             )}
           </div>
         </div>
-      </div>
       </div>
     </div>
   );

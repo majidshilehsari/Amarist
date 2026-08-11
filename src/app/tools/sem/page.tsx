@@ -217,6 +217,47 @@ function computeNodeCols(
   return { nodeCols, indicatorCols };
 }
 
+function stdAlphaOf(cols: number[][]): number {
+  const k = cols.length;
+  if (k < 2) return NaN;
+  const corr = correlationMatrixWithP(cols).r;
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < k; i++) {
+    for (let j = i + 1; j < k; j++) {
+      sum += corr[i][j];
+      count++;
+    }
+  }
+  if (!count) return NaN;
+  const rBar = sum / count;
+  return (k * rBar) / (1 + (k - 1) * rBar);
+}
+
+function pearsonCorr(x: number[], y: number[]): number {
+  const n = Math.min(x.length, y.length);
+  let sx = 0;
+  let sy = 0;
+  let sxy = 0;
+  let sxx = 0;
+  let syy = 0;
+  for (let i = 0; i < n; i++) {
+    sx += x[i];
+    sy += y[i];
+  }
+  const mx = sx / n;
+  const my = sy / n;
+  for (let i = 0; i < n; i++) {
+    const dx = x[i] - mx;
+    const dy = y[i] - my;
+    sxy += dx * dy;
+    sxx += dx * dx;
+    syy += dy * dy;
+  }
+  if (sxx <= 0 || syy <= 0) return NaN;
+  return sxy / Math.sqrt(sxx * syy);
+}
+
 function varNameOf(vars: VariableSpec[], id: number): string {
   return vars.find((v) => v.id === id)?.name ?? `متغیر ${id}`;
 }
@@ -925,11 +966,11 @@ function SemTool() {
       { id: "diagram", label: "دیاگرام مدل", short: "دیاگرام" },
       { id: "inferential", label: "یافته‌های استنباطی", short: "استنباطی" }
     );
-    if (wantAlpha) list.push({ id: "alpha", label: "آلفای کرونباخ", short: "آلفا" });
+    list.push({ id: "alpha", label: "آلفای کرونباخ", short: "آلفا" });
     list.push({ id: "report", label: "نگارش گزارش", short: "گزارش" });
     list.push({ id: "save", label: "ذخیره", short: "ذخیره" });
     return list;
-  }, [source, wantAlpha]);
+  }, [source]);
 
   const stepIdx = (id: string) => steps.findIndex((s) => s.id === id);
   const currentStep = Math.min(activeStep, steps.length - 1);
@@ -1169,6 +1210,27 @@ function SemTool() {
   };
 
   const removeVar = (id: number) => {
+    const target = vars.find((v) => v.id === id);
+    const remaining = vars.filter((v) => v.id !== id);
+    if (!target) return;
+    if (target.role === "exogenous" && !remaining.some((v) => v.role === "exogenous")) {
+      setModal({ ok: false, lines: ["حذف ممکن نیست: برای شکل‌گیری مدل حداقل یک متغیر برون‌زا (X) لازم است."] });
+      return;
+    }
+    if (target.role === "outcome" && !remaining.some((v) => v.role === "outcome")) {
+      setModal({ ok: false, lines: ["حذف ممکن نیست: برای شکل‌گیری مدل حداقل یک متغیر درون‌زا (Y) لازم است."] });
+      return;
+    }
+    if (target.role === "mediator" && !remaining.some((v) => v.role === "mediator")) {
+      setModal({
+        ok: false,
+        lines: [
+          "با حذف این متغیر، هیچ میانجی (M) باقی نمی‌ماند و مدل بدون مسیر غیرمستقیم می‌شود.",
+          "اگر مطمئن هستید، ابتدا نقش یک متغیر دیگر را به «میانجی» تغییر دهید.",
+        ],
+      });
+      return;
+    }
     setVars((prev) => prev.filter((v) => v.id !== id));
     setColMap((prev) => {
       const next = { ...prev };
@@ -1731,26 +1793,28 @@ function SemTool() {
           <div className="min-w-0 flex-1 overflow-x-auto">
             <ProgressStepper steps={steps} statuses={stepStatuses} onSelect={goToStep} />
           </div>
-          <span className="hidden shrink-0 rounded-full bg-indigo-50 px-3 py-1 text-[11px] font-black text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 md:block">
-            مرحله {currentStep + 1} از {steps.length}
-          </span>
-          <div className="flex shrink-0 items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
               disabled={currentStep === 0}
               onClick={goPrev}
               title="مرحله قبلی"
-              className="flex h-9 w-9 items-center justify-center rounded-xl border border-stone-300 bg-white text-stone-600 transition hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-30 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-300"
+              className="flex h-9 items-center gap-1 rounded-xl border border-stone-300 bg-white px-2.5 text-[11px] font-extrabold text-stone-600 transition hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-30 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-300"
             >
               <ChevronRight className="h-4 w-4" />
+              {currentStep > 0 ? (steps[currentStep - 1].short ?? steps[currentStep - 1].label) : "شروع"}
             </button>
+            <span className="rounded-full bg-indigo-600 px-3 py-1.5 text-[11px] font-black text-white shadow-md shadow-indigo-600/25">
+              مرحله {currentStep + 1} از {steps.length}
+            </span>
             <button
               type="button"
               disabled={currentStep >= steps.length - 1}
               onClick={goNext}
               title="مرحله بعدی"
-              className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-md shadow-indigo-600/25 transition hover:bg-indigo-500 disabled:opacity-30"
+              className="flex h-9 items-center gap-1 rounded-xl bg-indigo-600 px-2.5 text-[11px] font-extrabold text-white shadow-md shadow-indigo-600/25 transition hover:bg-indigo-500 disabled:opacity-30"
             >
+              {currentStep < steps.length - 1 ? (steps[currentStep + 1].short ?? steps[currentStep + 1].label) : "پایان"}
               <ChevronLeft className="h-4 w-4" />
             </button>
           </div>
@@ -2239,7 +2303,19 @@ function SemTool() {
                         const val = constraints.indirectTargets[row.key] ?? "sig";
                         return (
                           <tr key={row.key} className={row.isTotal ? "bg-stone-50 font-bold dark:bg-slate-900" : ""}>
-                            <td>{row.label}</td>
+                            <td>
+                              {row.isTotal && (
+                                <span className="me-2 rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-black text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                                  وضعیت کلی
+                                </span>
+                              )}
+                              {!row.isTotal && (
+                                <span className="me-2 rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-black text-stone-500 dark:bg-slate-900 dark:text-stone-400">
+                                  فرعی
+                                </span>
+                              )}
+                              {row.label}
+                            </td>
                             <td>
                               <select className={`${inputCls} !py-1.5`} value={val} onChange={(e) => setIndirectTarget(row.key, e.target.value as IndirectTarget)}>
                                 <option value="sig">معنی‌دار باشد</option>
@@ -2404,6 +2480,16 @@ function SemTool() {
               <button type="button" className={btnSecondary} onClick={() => analyze(undefined, undefined, undefined, true, true)}>
                 <RefreshCw className="h-4 w-4" />
                 {analysisValid ? "اجرای مجدد تحلیل" : "اجرای تحلیل"}
+              </button>
+              <button
+                type="button"
+                className={btnLight}
+                onClick={() => {
+                  markDone("diagnose");
+                  setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
+                }}
+              >
+                ادامه بدون تغییر داده‌ها
               </button>
               <span
                 className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
@@ -3076,8 +3162,8 @@ function SemTool() {
             </div>
 
             {!wantAlpha ? (
-              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-                این مرحله غیرفعال شد و از استپر حذف شد.
+              <div className="mt-4 rounded-xl border border-dashed border-amber-300 bg-amber-50/60 p-8 text-center text-sm font-bold text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                این مرحله فعلاً غیرفعال است — اگر خواستید، «بله» را انتخاب کنید تا محاسبه آلفا فعال شود.
               </div>
             ) : !analysisValid || !analysis.meas.length ? (
               <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
@@ -3087,52 +3173,76 @@ function SemTool() {
               </div>
             ) : (
               <div className="mt-4 space-y-4">
-                {analysis.meas.map((m) => (
-                  <div key={m.varId} className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h3 className="font-extrabold text-stone-800 dark:text-stone-200">{m.name}</h3>
-                      <div className="flex gap-2 text-[12px] font-bold">
-                        <span className="rounded-full bg-indigo-50 px-3 py-1 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
-                          آلفای کرونباخ: {fmt(m.alpha)}
-                        </span>
-                        <span
-                          className={`rounded-full px-3 py-1 ${
-                            m.alpha >= 0.7
-                              ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                              : "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300"
-                          }`}
-                        >
-                          {m.alpha >= 0.7 ? "قابل قبول ✓" : "ضعیف ✗"}
-                        </span>
+                {analysis.meas.map((m) => {
+                  const cols = analysis.indicatorCols[m.varId] ?? [];
+                  const items = m.subNames.map((s, si) => {
+                    const col = cols[si] ?? [];
+                    const rest = cols.filter((_, j) => j !== si);
+                    const restTotal = rest[0]?.map((_, ri) => rest.reduce((acc, c) => acc + (c[ri] ?? 0), 0)) ?? [];
+                    const corr = col.length && restTotal.length ? pearsonCorr(col, restTotal) : NaN;
+                    return {
+                      name: s,
+                      mean: mean(col),
+                      sd: sampleStd(col),
+                      itemTotal: corr,
+                      alphaIfDeleted: cronbachAlpha(rest),
+                    };
+                  });
+                  return (
+                    <div key={m.varId} className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="font-extrabold text-stone-800 dark:text-stone-200">{m.name}</h3>
+                        <div className="flex flex-wrap gap-2 text-[12px] font-bold">
+                          <span className="rounded-full bg-indigo-50 px-3 py-1 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                            آلفای کرونباخ: {fmt(m.alpha)}
+                          </span>
+                          <span className="rounded-full bg-sky-50 px-3 py-1 text-sky-700 dark:bg-sky-950 dark:text-sky-300">
+                            آلفای استانداردشده: {fmt(stdAlphaOf(cols))}
+                          </span>
+                          <span
+                            className={`rounded-full px-3 py-1 ${
+                              m.alpha >= 0.7
+                                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                                : "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300"
+                            }`}
+                          >
+                            {m.alpha >= 0.7 ? "قابل قبول ✓" : "ضعیف ✗"}
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                    <div className="tool-table-wrap mt-3">
-                      <table className="tool-table">
-                        <thead>
-                          <tr>
-                            <th>شاخص</th>
-                            <th>بار عاملی</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {m.subNames.map((s, si) => (
-                            <tr key={si}>
-                              <td>{s}</td>
-                              <td className="number-cell">{fmt(m.loadings[si])}</td>
+                      <div className="tool-table-wrap mt-3">
+                        <table className="tool-table">
+                          <thead>
+                            <tr>
+                              <th>گویه / زیرمقیاس</th>
+                              <th>میانگین</th>
+                              <th>انحراف معیار</th>
+                              <th>همبستگی گویه-کل</th>
+                              <th>آلفا اگر حذف شود</th>
+                              <th>بار عاملی</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody>
+                            {items.map((it, si) => (
+                              <tr key={si}>
+                                <td>{it.name}</td>
+                                <td className="number-cell">{Number.isFinite(it.mean) ? fmt(it.mean) : "-"}</td>
+                                <td className="number-cell">{Number.isFinite(it.sd) ? fmt(it.sd) : "-"}</td>
+                                <td className="number-cell">{Number.isFinite(it.itemTotal) ? fmt(it.itemTotal) : "-"}</td>
+                                <td className="number-cell">{Number.isFinite(it.alphaIfDeleted) ? fmt(it.alphaIfDeleted) : "-"}</td>
+                                <td className="number-cell">{fmt(m.loadings[si])}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className={`${tinyCls} mt-2`}>
+                        معیار: همبستگی گویه-کل ≥ 0.30 مطلوب؛ اگر «آلفا اگر حذف شود» از آلفای کل بزرگ‌تر باشد، حذف آن گویه
+                        آلفا را بالا می‌برد.
+                      </p>
                     </div>
-                  </div>
-                ))}
-                <div className="rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 p-4 text-[13px] text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300">
-                  برای تحلیل کامل‌تر آلفا (گویه‌به‌گویه، همبستگی گویه-کل، آلفا اگر گویه حذف شود) از ابزار جداگانه استفاده
-                  کنید:{" "}
-                  <a href="/tools/alpha" className="font-black underline">
-                    صفحه اندازه‌گیری و تحلیل آلفای کرونباخ ←
-                  </a>
-                </div>
+                  );
+                })}
               </div>
             )}
           </section>
@@ -3190,21 +3300,43 @@ function SemTool() {
               می‌توانید از اینجا دانلود کنید.
             </p>
 
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <div className="mt-4 grid gap-4 sm:grid-cols-3">
               <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">بکاپ پروژه‌ها</p>
+                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">بکاپ این پروژه</p>
                 <p className={`${tinyCls} mt-1`}>
-                  بکاپ کامل (همه پروژه‌ها) یا فقط همین پروژه را با نام دلخواه دانلود کنید؛ تاریخ و ساعت خودکار در نام
-                  پیش‌فرض می‌آید. با «بازیابی» می‌توانید دوباره بارگذاری کنید.
+                  فقط پروژه فعلی («{currentProject?.name ?? "—"}») با متغیرها، فلش‌ها، قیود و داده ذخیره می‌شود.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className={btnSecondary}
+                    onClick={() => {
+                      const now = new Date();
+                      const pad = (x: number) => String(x).padStart(2, "0");
+                      setBackupName(`بکاپ-${currentProject?.name ?? "پروژه"}-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`);
+                      setBackupScope("one");
+                      setBackupModal(true);
+                    }}
+                  >
+                    <Download className="h-4 w-4" />
+                    بکاپ این پروژه
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">بکاپ تمام پروژه‌ها</p>
+                <p className={`${tinyCls} mt-1`}>
+                  همه {projects.length} پروژه با هم در یک فایل ذخیره می‌شوند؛ برای انتقال کامل بین مرورگرها مناسب است.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button type="button" className={btnSecondary} onClick={openBackupModal}>
                     <Download className="h-4 w-4" />
-                    بکاپ پروژه‌ها
+                    بکاپ تمام پروژه‌ها
                   </button>
                   <button type="button" className={btnLight} onClick={() => restoreRef.current?.click()}>
                     <Upload className="h-4 w-4" />
-                    بازیابی از بکاپ
+                    بازیابی
                   </button>
                 </div>
               </div>
@@ -3218,6 +3350,10 @@ function SemTool() {
                   <button type="button" className={btnPrimary} onClick={exportExcel}>
                     <Download className="h-4 w-4" />
                     دانلود اکسل کامل
+                  </button>
+                  <button type="button" className={btnLight} onClick={exportDocx}>
+                    <FileText className="h-4 w-4" />
+                    گزارش docx
                   </button>
                   <button type="button" className={btnLight} onClick={downloadTemplate}>
                     <FileSpreadsheet className="h-4 w-4" />
@@ -3339,6 +3475,8 @@ function SemTool() {
                   onClick={() => {
                     setDiagnoseModal(false);
                     generate();
+                    markDone("diagnose");
+                    setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
                   }}
                 >
                   <Play className="h-4 w-4" />
@@ -3351,6 +3489,8 @@ function SemTool() {
                 onClick={() => {
                   setDiagnoseModal(false);
                   analyze(undefined, undefined, undefined, true, true);
+                  markDone("diagnose");
+                  setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
                 }}
               >
                 <RefreshCw className="h-4 w-4" />

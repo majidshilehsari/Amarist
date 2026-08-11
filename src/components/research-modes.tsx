@@ -4,6 +4,7 @@ import {
   HeartPulse,
   Network,
   TrendingUp,
+  Waypoints,
   type LucideIcon,
 } from "lucide-react";
 import FollowUpToggle from "./follow-up-toggle";
@@ -85,11 +86,20 @@ const categories: Category[] = [
     },
     modes: [
       {
-        icon: Network,
-        title: "معادلات ساختاری (SEM)",
+        icon: Waypoints,
+        title: "تحلیل مسیر",
         description:
-          "بررسی روابط بین متغیرهای پنهان و آشکار، مسیرهای علّی و برازش مدل با شاخص‌های استاندارد.",
-        tags: ["تحلیل مسیر", "شاخص‌های برازش", "CFI / RMSEA"],
+          "بررسی روابط مستقیم و غیرمستقیم بین متغیرهای مشاهده‌شده؛ بدون متغیر پنهان. مناسب مدل‌های میانجی ساده.",
+        tags: ["متغیر مشاهده‌شده", "روابط مستقیم/غیرمستقیم", "میانجی"],
+        href: "/tools/sem",
+      },
+      {
+        icon: Network,
+        title: "مدل معادلات ساختاری (SEM)",
+        description:
+          "مدل با متغیرهای پنهان، مدل اندازه‌گیری (CFA) و خطای اندازه‌گیری؛ گزارش شاخص‌های برازش مدل.",
+        tags: ["متغیر پنهان", "CFA", "CFI / RMSEA"],
+        href: "/tools/sem",
       },
       {
         icon: TrendingUp,

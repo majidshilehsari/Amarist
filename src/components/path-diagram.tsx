@@ -1,9 +1,7 @@
 "use client";
 
 import type { VariableSpec } from "@/lib/sem-generator";
-import type { PathRow, Role, SemResults } from "@/lib/sem-stats";
-
-const roleCol: Record<Role, number> = { exogenous: 0, mediator: 1, outcome: 2 };
+import type { ModelArrow, ModelNode, Role, SemResults } from "@/lib/sem-stats";
 
 const roleColors: Record<Role, { fill: string; stroke: string; text: string }> = {
   exogenous: { fill: "#eff6ff", stroke: "#2563eb", text: "#1e40af" },
@@ -18,86 +16,128 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
+type Pos = { cx: number; cy: number };
+
 export default function PathDiagram({
   vars,
-  paths,
+  nodes,
+  arrows,
   results,
+  large = false,
 }: {
   vars: VariableSpec[];
-  paths: PathRow[];
+  nodes: ModelNode[];
+  arrows: ModelArrow[];
   results?: SemResults | null;
+  large?: boolean;
 }) {
-  const nodeW = 200;
-  const nodeH = 56;
-  const colGap = 270;
-  const subW = 150;
-  const subH = 26;
-  const subColGap = 12;
-  const subRowGap = 30;
+  const scale = large ? 1.3 : 1;
+  const nodeW = 190 * scale;
+  const nodeH = 54 * scale;
+  const colGap = 265 * scale;
+  const subW = 145 * scale;
+  const subH = 26 * scale;
   const subCols = 2;
+  const subColGap = 10 * scale;
+  const subRowGap = 34 * scale;
 
-  const ordered = [...vars].sort((a, b) => roleCol[a.role] - roleCol[b.role]);
-  const nodes = ordered.map((v, idx) => ({
-    id: v.id,
-    name: truncate(v.name, 24),
-    latent: v.subscales.length > 0,
-    x: 30 + idx * colGap,
-    y: 60,
-    color: roleColors[v.role],
-  }));
+  const varsByRole: VariableSpec[][] = [
+    vars.filter((v) => v.role === "exogenous"),
+    vars.filter((v) => v.role === "mediator"),
+    vars.filter((v) => v.role === "outcome"),
+  ];
 
-  const W = 30 + (ordered.length - 1) * colGap + nodeW + 30;
-  const maxSubRows = Math.max(
-    0,
-    ...vars.map((v) => Math.ceil(v.subscales.length / subCols))
-  );
-  const H = Math.max(60 + nodeH + 40 + maxSubRows * subRowGap + 30, 200);
+  const nodePos = new Map<number, Pos>();
+  /** زیرمقیاس‌های متغیرهای جمع‌پذیر (فقط نمایشی — به گره کل وصل می‌شوند) */
+  const indicatorPos = new Map<number, Pos[]>();
+  let W = 40;
+  let H = 60;
 
-  const active = paths.filter((p) => p.active);
+  for (let col = 0; col < 3; col++) {
+    const colVars = varsByRole[col];
+    if (!colVars.length) continue;
+    const x = 40 + col * colGap;
+    let yCursor = 60;
+    let colH = 60;
+    for (const v of colVars) {
+      const vNodes = nodes.filter((n) => n.varId === v.id);
+      const nSub = v.subscales.length;
+      if (nSub === 0) {
+        const node = vNodes[0];
+        nodePos.set(node.nodeId, { cx: x + nodeW / 2, cy: yCursor + nodeH / 2 });
+        yCursor += nodeH + 40 * scale;
+      } else if (v.hasTotal) {
+        // متغیر جمع‌پذیر: بیضی (گره کل) + زیرمقیاس‌های نمایشی زیر آن
+        const total = vNodes[0];
+        const cy = yCursor + nodeH / 2 + 6 * scale;
+        nodePos.set(total.nodeId, { cx: x + nodeW / 2, cy });
+        const subRows = Math.ceil(nSub / subCols);
+        const totalRowW = subCols * subW + (subCols - 1) * subColGap;
+        const subsY = yCursor + nodeH + 26 * scale;
+        const inds: Pos[] = [];
+        v.subscales.forEach((s, si) => {
+          const ci = si % subCols;
+          const ri = Math.floor(si / subCols);
+          const sx = x + (nodeW - totalRowW) / 2 + ci * (subW + subColGap);
+          const sy = subsY + ri * subRowGap;
+          inds.push({ cx: sx + subW / 2, cy: sy + subH / 2 });
+        });
+        indicatorPos.set(v.id, inds);
+        yCursor = subsY + subRows * subRowGap + 10 * scale;
+      } else {
+        // متغیر غیرجمع‌پذیر: هر زیرمقیاس یک گره مستقل
+        const subRows = Math.ceil(nSub / subCols);
+        const totalRowW = subCols * subW + (subCols - 1) * subColGap;
+        const startY = yCursor;
+        vNodes.forEach((node, si) => {
+          const ci = si % subCols;
+          const ri = Math.floor(si / subCols);
+          const sx = x + (nodeW - totalRowW) / 2 + ci * (subW + subColGap);
+          const sy = startY + ri * subRowGap;
+          nodePos.set(node.nodeId, { cx: sx + subW / 2, cy: sy + subH / 2 });
+        });
+        yCursor = startY + subRows * subRowGap + 10 * scale;
+      }
+      colH = Math.max(colH, yCursor - 60);
+    }
+    H = Math.max(H, colH + 90);
+    W = Math.max(W, x + nodeW + 40);
+  }
+
+  const active = arrows.filter((a) => a.active);
   const betaOf = (from: number, to: number) =>
     results?.paths.find((p) => p.from === from && p.to === to)?.std;
   const r2Of = (id: number) => results?.r2[id];
 
   return (
-    <div dir="ltr" className="tool-table-wrap overflow-x-auto p-4">
-      <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full min-w-[680px]" role="img" aria-label="دیاگرام مدل">
+    <div dir="ltr" className="w-full overflow-auto">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className={`h-auto ${large ? "w-full" : "w-full min-w-[560px]"}`}
+        role="img"
+        aria-label="دیاگرام مدل"
+      >
         <defs>
-          <marker
-            id="arrow"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
           </marker>
-          <marker
-            id="arrow-sub"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="5"
-            markerHeight="5"
-            orient="auto-start-reverse"
-          >
+          <marker id="arrow-sub" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" />
           </marker>
         </defs>
 
-        {/* فلش‌های بین متغیرهای اصلی */}
-        {active.map((p, i) => {
-          const f = nodes.find((n) => n.id === p.from);
-          const t = nodes.find((n) => n.id === p.to);
+        {/* فلش‌های مدل بین گره‌ها */}
+        {active.map((a, i) => {
+          const f = nodePos.get(a.fromNode);
+          const t = nodePos.get(a.toNode);
           if (!f || !t) return null;
-          const x1 = f.x + nodeW;
-          const y1 = f.y + nodeH / 2;
-          const x2 = t.x;
-          const y2 = t.y + nodeH / 2;
-          const beta = betaOf(p.from, p.to);
+          const x1 = f.cx + nodeW / 2;
+          const y1 = f.cy;
+          const x2 = t.cx - nodeW / 2;
+          const y2 = t.cy;
+          const beta = betaOf(a.fromNode, a.toNode);
           const mx = (x1 + x2) / 2;
-          const my = (y1 + y2) / 2 - 10;
+          const my = (y1 + y2) / 2 - 12 * scale;
           return (
             <g key={i}>
               <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#64748b" strokeWidth={1.8} markerEnd="url(#arrow)" />
@@ -113,74 +153,62 @@ export default function PathDiagram({
           );
         })}
 
-        {/* گره‌ها و زیرمقیاس‌ها */}
-        {nodes.map((n) => {
-          const cx = n.x + nodeW / 2;
-          const cy = n.y + nodeH / 2;
-          const r2 = r2Of(n.id);
-          const subs = vars.find((v) => v.id === n.id)?.subscales ?? [];
-          const subRows = Math.ceil(subs.length / subCols);
-          return (
-            <g key={n.id}>
-              {n.latent ? (
-                <ellipse cx={cx} cy={cy} rx={nodeW / 2} ry={nodeH / 2 + 8} fill={n.color.fill} stroke={n.color.stroke} strokeWidth={1.6} />
-              ) : (
-                <rect x={n.x} y={n.y} width={nodeW} height={nodeH} rx={10} fill={n.color.fill} stroke={n.color.stroke} strokeWidth={1.6} />
-              )}
-              <text x={cx} y={cy - (r2 != null && Number.isFinite(r2) ? 1 : 4)} textAnchor="middle" fontSize={11} fontWeight={700} fill={n.color.text}>
-                {n.name}
-              </text>
-              {r2 != null && Number.isFinite(r2) && (
-                <text x={cx} y={cy + 14} textAnchor="middle" fontSize={10} fontWeight={700} fill="#475569">
-                  R² = {r2.toFixed(2)}
-                </text>
-              )}
+        {/* گره‌ها */}
+        {nodes.map((node) => {
+          const pos = nodePos.get(node.nodeId);
+          if (!pos) return null;
+          const cx = pos.cx;
+          const cy = pos.cy;
+          const color = roleColors[node.role];
+          const r2 = r2Of(node.nodeId);
 
-              {/* زیرمقیاس‌ها در دو ستون */}
-              {subs.map((s, si) => {
-                const colIdx = si % subCols;
-                const rowIdx = Math.floor(si / subCols);
-                const sy = n.y + nodeH + 34 + rowIdx * subRowGap;
-                const totalRowW = subCols * subW + (subCols - 1) * subColGap;
-                const sx = n.x + (nodeW - totalRowW) / 2 + colIdx * (subW + subColGap);
-                const startY = n.y + nodeH + (n.latent ? 10 : 0);
-                const subCx = sx + subW / 2;
-                return (
+          if (node.kind === "total") {
+            // بیضی (مکنون) + زیرمقیاس‌های نمایشی
+            const inds = indicatorPos.get(node.varId) ?? [];
+            const v = vars.find((x) => x.id === node.varId);
+            return (
+              <g key={node.nodeId}>
+                <ellipse cx={cx} cy={cy} rx={nodeW / 2} ry={nodeH / 2 + 8 * scale} fill={color.fill} stroke={color.stroke} strokeWidth={1.6} />
+                <text x={cx} y={cy - (r2 != null && Number.isFinite(r2) ? 1 : 4)} textAnchor="middle" fontSize={11 * scale} fontWeight={700} fill={color.text}>
+                  {truncate(node.label, 24)}
+                </text>
+                {r2 != null && Number.isFinite(r2) && (
+                  <text x={cx} y={cy + 14 * scale} textAnchor="middle" fontSize={10 * scale} fontWeight={700} fill="#475569">
+                    R² = {r2.toFixed(2)}
+                  </text>
+                )}
+                {inds.map((sp, si) => (
                   <g key={si}>
-                    <line
-                      x1={cx}
-                      y1={startY}
-                      x2={subCx}
-                      y2={sy - 2}
-                      stroke="#cbd5e1"
-                      strokeWidth={1.1}
-                      markerEnd="url(#arrow-sub)"
-                    />
-                    <rect x={sx} y={sy} width={subW} height={subH} rx={6} fill={subFill} stroke={subStroke} strokeWidth={1} />
-                    <text x={subCx} y={sy + subH / 2 + 3.5} textAnchor="middle" fontSize={9} fontWeight={600} fill="#475569">
-                      {truncate(s.name, 20)}
+                    <line x1={cx} y1={cy + nodeH / 2} x2={sp.cx} y2={sp.cy - subH / 2} stroke="#cbd5e1" strokeWidth={1.1} markerEnd="url(#arrow-sub)" />
+                    <rect x={sp.cx - subW / 2} y={sp.cy - subH / 2} width={subW} height={subH} rx={6} fill={subFill} stroke={subStroke} strokeWidth={1} />
+                    <text x={sp.cx} y={sp.cy + 3.5} textAnchor="middle" fontSize={9 * scale} fontWeight={600} fill="#475569">
+                      {truncate(v?.subscales[si]?.name ?? "", 20)}
                     </text>
                   </g>
-                );
-              })}
+                ))}
+              </g>
+            );
+          }
 
-              {/* خط اتصال افقی بین ستون‌های زیرمقیاس */}
-              {subRows > 1 && (
-                <line
-                  x1={cx}
-                  y1={n.y + nodeH + 10}
-                  x2={cx}
-                  y2={n.y + nodeH + 34 + (subRows - 1) * subRowGap}
-                  stroke="#e2e8f0"
-                  strokeWidth={1}
-                />
+          // مستطیل: زیرمقیاس مستقل یا متغیر تک‌نمره
+          return (
+            <g key={node.nodeId}>
+              <rect x={cx - nodeW / 2} y={cy - nodeH / 2} width={nodeW} height={nodeH} rx={10} fill={color.fill} stroke={color.stroke} strokeWidth={1.6} />
+              <text x={cx} y={cy - (r2 != null && Number.isFinite(r2) ? 2 : 5)} textAnchor="middle" fontSize={10.5 * scale} fontWeight={700} fill={color.text}>
+                {truncate(node.label, 26)}
+              </text>
+              {r2 != null && Number.isFinite(r2) && (
+                <text x={cx} y={cy + 13 * scale} textAnchor="middle" fontSize={9.5 * scale} fontWeight={700} fill="#475569">
+                  R² = {r2.toFixed(2)}
+                </text>
               )}
             </g>
           );
         })}
       </svg>
       <p className="mt-2 text-center text-[11px] text-stone-400 dark:text-stone-500">
-        بیضی = متغیر پنهان (مکنون) · مستطیل = متغیر مشاهده‌شده · رنگ‌ها: برون‌زا (آبی) / میانجی (نارنجی) / درون‌زا (سبز) · R² زیر نام متغیرهای درون‌زا
+        بیضی = متغیر پنهان (مکنون) جمع‌پذیر با نمره کل · مستطیل = متغیر مشاهده‌شده یا زیرمقیاس مستقل (غیرجمع‌پذیر) ·
+        رنگ‌ها: برون‌زا (آبی) / میانجی (نارنجی) / درون‌زا (سبز) · R² زیر نام گره‌ها
       </p>
     </div>
   );

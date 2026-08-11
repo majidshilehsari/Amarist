@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Moon, Sigma, Sun } from "lucide-react";
 
 export default function ToolHeader({
   title,
   subtitle,
+  actions,
 }: {
   title: string;
   subtitle?: string;
+  actions?: ReactNode;
 }) {
   const [dark, setDark] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -22,7 +24,7 @@ export default function ToolHeader({
   }, [dark]);
 
   return (
-    <header className="sticky top-0 z-50 border-b border-stone-200/80 bg-[#faf9f6]/90 backdrop-blur-md dark:border-stone-700 dark:bg-stone-900/90">
+    <header className="sticky top-0 z-50 border-b border-stone-200/80 bg-[#faf9f6]/90 backdrop-blur-md dark:border-stone-700 dark:bg-slate-900/90">
       <div className="mx-auto flex h-14 max-w-[1280px] items-center gap-3 px-4">
         <Link href="/" className="flex shrink-0 items-center gap-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-600 to-violet-600 text-white shadow-sm">
@@ -33,12 +35,14 @@ export default function ToolHeader({
         <span className="text-stone-300 dark:text-stone-600">|</span>
         <span className="truncate text-sm font-bold text-stone-700 dark:text-stone-200">{title}</span>
         {subtitle && (
-          <span className="hidden shrink-0 text-xs text-stone-400 dark:text-stone-500 sm:block">{subtitle}</span>
+          <span className="hidden shrink-0 text-xs text-stone-400 dark:text-stone-500 lg:block">{subtitle}</span>
         )}
+
+        {actions && <div className="ms-auto flex shrink-0 items-center gap-2">{actions}</div>}
 
         {/* سوییچ لایت / دارک */}
         <div
-          className="ms-auto flex shrink-0 items-center gap-0.5 rounded-full border border-stone-200 bg-white p-0.5 shadow-sm dark:border-stone-700 dark:bg-stone-800"
+          className={`flex shrink-0 items-center gap-0.5 rounded-full border border-stone-200 bg-white p-0.5 shadow-sm dark:border-stone-700 dark:bg-slate-800 ${actions ? "" : "ms-auto"}`}
           role="radiogroup"
           aria-label="حالت نمایش"
         >

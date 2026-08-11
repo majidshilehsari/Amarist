@@ -7,7 +7,6 @@ import {
   sampleVariance,
   sampleStd,
   regularizedBeta,
-  normalCDF,
   chiSquareSurvival,
   determinant,
   matMul,
@@ -17,13 +16,13 @@ import {
 
 export type Role = "exogenous" | "mediator" | "outcome";
 
+
+
 export type PathRow = {
   from: number;
   to: number;
   active: boolean;
 };
-
-const ROLE_ORDER: Record<Role, number> = { exogenous: 0, mediator: 1, outcome: 2 };
 
 // ---------- آماره‌های تک‌متغیره ----------
 
@@ -295,116 +294,6 @@ export function vifForPredictors(predictors: number[][]): number[] {
   return vifs;
 }
 
-// ---------- بوت‌استرپ اثر غیرمستقیم (مسیرهای جداگانه + کل) ----------
-
-export type IndirectBootRow = {
-  from: number;
-  to: number;
-  /** میانجی‌های این مسیر خاص؛ null یعنی «کل اثر غیرمستقیم» (مجموع همه مسیرها) */
-  via: number[] | null;
-  indirect: number;
-  lo: number;
-  hi: number;
-  p: number;
-  sig: boolean;
-};
-
-export function bootstrapIndirectEffects(
-  composites: number[][],
-  roles: Role[],
-  pathRows: PathRow[],
-  nBoot: number
-): IndirectBootRow[] {
-  const n = composites[0]?.length ?? 0;
-  const fullRows: number[][] = [];
-  for (let i = 0; i < n; i++) {
-    const r = composites.map((c) => c[i]);
-    if (r.every(Number.isFinite)) fullRows.push(r);
-  }
-  const nn = fullRows.length;
-  if (nn < 10) return [];
-  const active = pathRows.filter((pr) => pr.active);
-  const meds = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "mediator").map((x) => x.i);
-  const exogs = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "exogenous").map((x) => x.i);
-  const outs = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "outcome").map((x) => x.i);
-  const results: IndirectBootRow[] = [];
-
-  const summarize = (effects: number[]): { lo: number; hi: number; p: number } => {
-    effects.sort((a, b) => a - b);
-    const lo = effects[Math.max(0, Math.floor(nn * 0.025))];
-    const hi = effects[Math.min(nn - 1, Math.floor(nn * 0.975))];
-    const p = clamp(
-      2 * Math.min(
-        effects.filter((x) => x <= 0).length / nn,
-        effects.filter((x) => x >= 0).length / nn
-      ),
-      0,
-      1
-    );
-    return { lo, hi, p };
-  };
-
-  for (const e of exogs) {
-    for (const o of outs) {
-      const mList = meds.filter(
-        (m) => active.some((p) => p.from === e && p.to === m) && active.some((p) => p.from === m && p.to === o)
-      );
-      if (!mList.length) continue;
-
-      // هر مسیر مجزا: X → M → Y
-      for (const m of mList) {
-        const effects: number[] = [];
-        for (let b = 0; b < nBoot; b++) {
-          const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
-          const boot = (v: number) => idx.map((k) => fullRows[k][v]);
-          const a = ols([boot(e)], boot(m)).coefs[1] ?? 0;
-          const c = ols([boot(e), boot(m)], boot(o)).coefs[2] ?? 0;
-          effects.push(a * c);
-        }
-        const { lo, hi, p } = summarize(effects);
-        results.push({
-          from: e,
-          to: o,
-          via: [m],
-          indirect: mean(effects),
-          lo,
-          hi,
-          p,
-          sig: lo > 0 || hi < 0,
-        });
-      }
-
-      // کل اثر غیرمستقیم (مجموع همه مسیرها)
-      if (mList.length > 1) {
-        const effects: number[] = [];
-        for (let b = 0; b < nBoot; b++) {
-          const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
-          const boot = (v: number) => idx.map((k) => fullRows[k][v]);
-          let sum = 0;
-          for (const m of mList) {
-            const a = ols([boot(e)], boot(m)).coefs[1] ?? 0;
-            const c = ols([boot(e), boot(m)], boot(o)).coefs[2] ?? 0;
-            sum += a * c;
-          }
-          effects.push(sum);
-        }
-        const { lo, hi, p } = summarize(effects);
-        results.push({
-          from: e,
-          to: o,
-          via: null,
-          indirect: mean(effects),
-          lo,
-          hi,
-          p,
-          sig: lo > 0 || hi < 0,
-        });
-      }
-    }
-  }
-  return results;
-}
-
 // ---------- قابلیت اعتماد و بارهای عاملی ----------
 
 export function cronbachAlpha(cols: number[][]): number {
@@ -440,7 +329,24 @@ export function pcaLoadings(cols: number[][]): number[] {
   return vec.map((v) => v * Math.sqrt(Math.max(0, ev)));
 }
 
-// ---------- مدل مسیر / SEM ----------
+// ---------- مدل گره‌ای (متغیر جمع‌پذیر / غیرجمع‌پذیر) ----------
+
+export type ModelNode = {
+  nodeId: number;
+  varId: number;
+  label: string;
+  kind: "total" | "sub" | "single";
+  role: Role;
+};
+
+export type ModelArrow = {
+  id: string;
+  fromNode: number;
+  toNode: number;
+  fromVar: number;
+  toVar: number;
+  active: boolean;
+};
 
 export type SemFit = {
   valid: boolean;
@@ -465,13 +371,10 @@ export type SemPathResult = {
 };
 
 export type SemEffect = {
-  from: number;
-  to: number;
+  fromVar: number;
+  toVar: number;
   direct: number;
   indirect: number;
-  seIndirect: number;
-  zIndirect: number;
-  pIndirect: number;
   total: number;
 };
 
@@ -486,17 +389,19 @@ export type SemResults = {
   warnings: string[];
 };
 
-export function estimateSem(composites: number[][], roles: Role[], pathRows: PathRow[]): SemResults {
-  const p = composites.length;
-  const ordered = composites
-    .map((_, i) => i)
-    .sort((a, b) => ROLE_ORDER[roles[a]] - ROLE_ORDER[roles[b]]);
-  const pos = new Map<number, number>(ordered.map((v, i) => [v, i]));
-  const active = pathRows.filter((pr) => pr.active);
-  const nCases = completeRows(composites);
+const ROLE_ORDER_NODE: Record<Role, number> = { exogenous: 0, mediator: 1, outcome: 2 };
+
+export function estimateSem(nodes: ModelNode[], arrows: ModelArrow[], nodeCols: number[][]): SemResults {
+  const p = nodes.length;
+  const ordered = [...nodes]
+    .sort((a, b) => ROLE_ORDER_NODE[a.role] - ROLE_ORDER_NODE[b.role])
+    .map((n) => n.nodeId);
+  const pos = new Map<number, number>(ordered.map((id, i) => [id, i]));
+  const active = arrows.filter((a) => a.active);
+  const nCases = completeRows(nodeCols);
   const warnings: string[] = [];
 
-  const S = covarianceMatrix(ordered.map((v) => composites[v]));
+  const S = covarianceMatrix(ordered.map((id) => nodeCols[id]));
 
   const B = Array.from({ length: p }, () => Array(p).fill(0));
   const psi = Array(p).fill(0);
@@ -505,28 +410,28 @@ export function estimateSem(composites: number[][], roles: Role[], pathRows: Pat
   const dw: Record<number, number> = {};
   const vifs: Record<number, number[]> = {};
 
-  for (const v of ordered) {
-    if (roles[v] === "exogenous") continue;
-    const preds = active.filter((pr) => pr.to === v);
+  for (const id of ordered) {
+    const node = nodes.find((n) => n.nodeId === id)!;
+    if (node.role === "exogenous") continue;
+    const preds = active.filter((a) => a.toNode === id);
     if (!preds.length) {
-      psi[pos.get(v)!] = sampleVariance(composites[v]) || 0;
-      r2[v] = 0;
-      dw[v] = NaN;
-      vifs[v] = [];
-      warnings.push(`متغیر «${v + 1}» هیچ مسیر ورودی فعالی ندارد.`);
+      psi[pos.get(id)!] = sampleVariance(nodeCols[id]) || 0;
+      r2[id] = 0;
+      dw[id] = NaN;
+      vifs[id] = [];
+      warnings.push(`گره «${node.label}» هیچ مسیر ورودی فعالی ندارد.`);
       continue;
     }
-    const X = preds.map((pr) => composites[pr.from]);
-    const y = composites[v];
-    const o = ols(X, y);
-    const sy = sampleStd(y);
-    preds.forEach((pr, j) => {
+    const X = preds.map((a) => nodeCols[a.fromNode]);
+    const o = ols(X, nodeCols[id]);
+    const sy = sampleStd(nodeCols[id]);
+    preds.forEach((a, j) => {
       const sx = sampleStd(X[j]);
       const std = Number.isFinite(o.coefs[j + 1]) && sx > 0 && sy > 0 ? (o.coefs[j + 1] * sx) / sy : NaN;
-      B[pos.get(v)!][pos.get(pr.from)!] = o.coefs[j + 1];
+      B[pos.get(id)!][pos.get(a.fromNode)!] = o.coefs[j + 1];
       pathResults.push({
-        from: pr.from,
-        to: v,
+        from: a.fromNode,
+        to: id,
         b: o.coefs[j + 1],
         se: o.se[j + 1],
         t: o.t[j + 1],
@@ -534,21 +439,19 @@ export function estimateSem(composites: number[][], roles: Role[], pathRows: Pat
         std,
       });
     });
-    psi[pos.get(v)!] = o.ssr / o.n;
-    r2[v] = o.r2;
-    dw[v] = o.dw;
-    vifs[v] = vifForPredictors(X);
+    psi[pos.get(id)!] = o.ssr / o.n;
+    r2[id] = o.r2;
+    dw[id] = o.dw;
+    vifs[id] = vifForPredictors(X);
   }
 
-  const exogIdxs = ordered.filter((v) => roles[v] === "exogenous");
-  const q = exogIdxs.length;
+  const exogNodes = ordered.filter((id) => nodes.find((n) => n.nodeId === id)!.role === "exogenous");
+  const q = exogNodes.length;
 
   const Psi = Array.from({ length: p }, () => Array(p).fill(0));
-  exogIdxs.forEach((a) =>
-    exogIdxs.forEach((b) => (Psi[pos.get(a)!][pos.get(b)!] = S[pos.get(a)!][pos.get(b)!]))
-  );
-  ordered.forEach((v) => {
-    if (roles[v] !== "exogenous") Psi[pos.get(v)!][pos.get(v)!] = psi[pos.get(v)!];
+  exogNodes.forEach((a) => exogNodes.forEach((b) => (Psi[pos.get(a)!][pos.get(b)!] = S[pos.get(a)!][pos.get(b)!])));
+  ordered.forEach((id) => {
+    if (nodes.find((n) => n.nodeId === id)!.role !== "exogenous") Psi[pos.get(id)!][pos.get(id)!] = psi[pos.get(id)!];
   });
 
   let fit: SemFit;
@@ -596,7 +499,7 @@ export function estimateSem(composites: number[][], roles: Role[], pathRows: Pat
       }, 0);
       const F = logDetSig + traceSInv - logDetS - p;
       const chi2 = Math.max(0, (nCases - 1) * F);
-      const npar = active.length + ordered.filter((v) => roles[v] !== "exogenous").length + (q * (q + 1)) / 2;
+      const npar = active.length + ordered.filter((id) => nodes.find((n) => n.nodeId === id)!.role !== "exogenous").length + (q * (q + 1)) / 2;
       const df = Math.max(0, (p * (p + 1)) / 2 - npar);
 
       const D = S.map((row, i) => row.map((_, j) => (i === j ? row[i] : 0)));
@@ -611,8 +514,7 @@ export function estimateSem(composites: number[][], roles: Role[], pathRows: Pat
 
       const denom = Math.max(chi2 - df, chi2i - dfi, 0);
       const cfi = denom > 0 ? 1 - Math.max(chi2 - df, 0) / denom : 1;
-      const tli =
-        dfi > 0 && df > 0 && chi2i / dfi - 1 !== 0 ? (chi2i / dfi - chi2 / df) / (chi2i / dfi - 1) : 1;
+      const tli = dfi > 0 && df > 0 && chi2i / dfi - 1 !== 0 ? (chi2i / dfi - chi2 / df) / (chi2i / dfi - 1) : 1;
       const rmsea = df > 0 ? Math.sqrt(Math.max(chi2 - df, 0) / (df * (nCases - 1))) : 0;
 
       let srSum = 0;
@@ -635,36 +537,143 @@ export function estimateSem(composites: number[][], roles: Role[], pathRows: Pat
         srmr,
       };
       if (df === 0) {
-        warnings.push("مدل اشباع‌شده است؛ شاخص‌های برازش به‌صورت کامل (CFI=1 و RMSEA=0) محاسبه می‌شوند.");
+        warnings.push("مدل اشباع‌شده است؛ شاخص‌های برازش کامل (CFI=1 و RMSEA=0) محاسبه می‌شوند.");
       }
     }
   }
 
-  // اثرات مستقیم، غیرمستقیم و کل
+  // اثرات در سطح متغیر (مستقیم / غیرمستقیم / کل)
+  const exogVars = [...new Set(nodes.filter((n) => n.role === "exogenous").map((n) => n.varId))];
+  const outVars = [...new Set(nodes.filter((n) => n.role === "outcome").map((n) => n.varId))];
   const effects: SemEffect[] = [];
-  for (const e of exogIdxs) {
-    for (const o of ordered.filter((v) => roles[v] === "outcome")) {
-      const direct = B[pos.get(o)!][pos.get(e)!] || 0;
+  for (const e of exogVars) {
+    for (const c of outVars) {
+      let direct = 0;
       let indirect = 0;
-      let varInd = 0;
-      for (const m of ordered.filter((v) => roles[v] === "mediator")) {
-        const bMo = B[pos.get(o)!][pos.get(m)!] || 0;
-        const aMe = B[pos.get(m)!][pos.get(e)!] || 0;
-        if (bMo !== 0 && aMe !== 0) {
-          indirect += aMe * bMo;
-          const pMe = pathResults.find((pr) => pr.from === e && pr.to === m);
-          const pMo = pathResults.find((pr) => pr.from === m && pr.to === o);
-          if (pMe && pMo) {
-            varInd += bMo * bMo * pMe.se * pMe.se + aMe * aMe * pMo.se * pMo.se;
+      for (const y of nodes.filter((n) => n.varId === c)) {
+        for (const x of nodes.filter((n) => n.varId === e)) {
+          direct += B[pos.get(y.nodeId)!][pos.get(x.nodeId)!];
+        }
+      }
+      for (const m of nodes.filter((n) => n.role === "mediator")) {
+        for (const x of nodes.filter((n) => n.varId === e)) {
+          for (const y of nodes.filter((n) => n.varId === c)) {
+            indirect += B[pos.get(m.nodeId)!][pos.get(x.nodeId)!] * B[pos.get(y.nodeId)!][pos.get(m.nodeId)!];
           }
         }
       }
-      const seInd = Math.sqrt(varInd);
-      const z = seInd > 0 ? indirect / seInd : NaN;
-      const pInd = Number.isFinite(z) ? clamp(2 * (1 - normalCDF(Math.abs(z))), 0, 1) : NaN;
-      effects.push({ from: e, to: o, direct, indirect, seIndirect: seInd, zIndirect: z, pIndirect: pInd, total: direct + indirect });
+      effects.push({ fromVar: e, toVar: c, direct, indirect, total: direct + indirect });
     }
   }
 
   return { ordered, paths: pathResults, r2, dw, vifs, fit, effects, warnings };
+}
+
+// ---------- بوت‌استرپ اثر غیرمستقیم (مسیرهای جداگانه + کل) ----------
+
+export type IndirectBootRow = {
+  fromVar: number;
+  toVar: number;
+  /** متغیر میانجی این مسیر خاص؛ null یعنی «کل اثر غیرمستقیم» */
+  viaVar: number | null;
+  indirect: number;
+  lo: number;
+  hi: number;
+  p: number;
+  sig: boolean;
+};
+
+export function bootstrapIndirectEffects(
+  nodes: ModelNode[],
+  arrows: ModelArrow[],
+  nodeCols: number[][],
+  nBoot: number
+): IndirectBootRow[] {
+  const n = nodeCols[0]?.length ?? 0;
+  const fullRows: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    const r = nodeCols.map((c) => c[i]);
+    if (r.every(Number.isFinite)) fullRows.push(r);
+  }
+  const nn = fullRows.length;
+  if (nn < 10) return [];
+  const active = arrows.filter((a) => a.active);
+  const medVars = [...new Set(nodes.filter((x) => x.role === "mediator").map((x) => x.varId))];
+  const exogVars = [...new Set(nodes.filter((x) => x.role === "exogenous").map((x) => x.varId))];
+  const outVars = [...new Set(nodes.filter((x) => x.role === "outcome").map((x) => x.varId))];
+  const results: IndirectBootRow[] = [];
+
+  const summarize = (effects: number[]): { lo: number; hi: number; p: number } => {
+    effects.sort((a, b) => a - b);
+    const lo = effects[Math.max(0, Math.floor(nn * 0.025))];
+    const hi = effects[Math.min(nn - 1, Math.floor(nn * 0.975))];
+    const p = clamp(
+      2 * Math.min(
+        effects.filter((x) => x <= 0).length / nn,
+        effects.filter((x) => x >= 0).length / nn
+      ),
+      0,
+      1
+    );
+    return { lo, hi, p };
+  };
+
+  for (const e of exogVars) {
+    for (const c of outVars) {
+      const meds = medVars.filter(
+        (m) =>
+          active.some((a) => a.fromVar === e && a.toVar === m) &&
+          active.some((a) => a.fromVar === m && a.toVar === c)
+      );
+      if (!meds.length) continue;
+
+      const xNodes = nodes.filter((x) => x.varId === e);
+      const yNodes = nodes.filter((x) => x.varId === c);
+
+      for (const m of meds) {
+        const mNodes = nodes.filter((x) => x.varId === m);
+        const effects: number[] = [];
+        for (let b = 0; b < nBoot; b++) {
+          const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
+          const boot = (v: number) => idx.map((k) => fullRows[k][v]);
+          let sum = 0;
+          for (const mNode of mNodes) {
+            const aCoefs = ols(xNodes.map((x) => boot(x.nodeId)), boot(mNode.nodeId)).coefs;
+            for (const yNode of yNodes) {
+              const bCoefs = ols([...xNodes.map((x) => boot(x.nodeId)), boot(mNode.nodeId)], boot(yNode.nodeId)).coefs;
+              const bCoef = bCoefs[bCoefs.length - 1] ?? 0;
+              for (let i = 1; i < aCoefs.length; i++) sum += aCoefs[i] * bCoef;
+            }
+          }
+          effects.push(sum);
+        }
+        const { lo, hi, p } = summarize(effects);
+        results.push({ fromVar: e, toVar: c, viaVar: m, indirect: mean(effects), lo, hi, p, sig: lo > 0 || hi < 0 });
+      }
+
+      if (meds.length > 1) {
+        const effects: number[] = [];
+        for (let b = 0; b < nBoot; b++) {
+          const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
+          const boot = (v: number) => idx.map((k) => fullRows[k][v]);
+          let sum = 0;
+          for (const m of meds) {
+            const mNodes = nodes.filter((x) => x.varId === m);
+            for (const mNode of mNodes) {
+              const aCoefs = ols(xNodes.map((x) => boot(x.nodeId)), boot(mNode.nodeId)).coefs;
+              for (const yNode of yNodes) {
+                const bCoefs = ols([...xNodes.map((x) => boot(x.nodeId)), boot(mNode.nodeId)], boot(yNode.nodeId)).coefs;
+                const bCoef = bCoefs[bCoefs.length - 1] ?? 0;
+                for (let i = 1; i < aCoefs.length; i++) sum += aCoefs[i] * bCoef;
+              }
+            }
+          }
+          effects.push(sum);
+        }
+        const { lo, hi, p } = summarize(effects);
+        results.push({ fromVar: e, toVar: c, viaVar: null, indirect: mean(effects), lo, hi, p, sig: lo > 0 || hi < 0 });
+      }
+    }
+  }
+  return results;
 }

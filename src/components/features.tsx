@@ -45,7 +45,7 @@ export default function Features() {
     >
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <SectionHeading
-          eyebrow="چرا آمارایست؟"
+          eyebrow="چرا آماریست؟"
           title="ساده، امن و آماده‌ی ارائه"
           description="بدون نصب نرم‌افزار، بدون دیتابیس، بدون نگرانی از لو رفتن داده‌ها."
         />

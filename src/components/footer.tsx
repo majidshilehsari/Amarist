@@ -12,7 +12,7 @@ export default function Footer() {
             <Sigma className="h-4 w-4" strokeWidth={2.5} />
           </span>
           <div>
-            <p className="text-sm font-extrabold text-stone-900">آمارایست</p>
+            <p className="text-sm font-extrabold text-stone-900">آماریست</p>
             <p className="text-xs text-stone-500">
               ابزار تحلیل آماری و تولید داده‌ی تمرینی برای اساتید و دانشجویان
             </p>

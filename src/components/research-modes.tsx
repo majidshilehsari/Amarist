@@ -6,6 +6,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import SectionHeading from "./section-heading";
+import FollowUpToggle from "./follow-up-toggle";
 
 const categories = [
   {
@@ -28,14 +29,12 @@ const categories = [
         title: "اثربخشی یک درمان",
         description:
           "بررسی اثر یک مداخله روی یک گروه؛ مقایسه‌ی پیش و پس از مداخله، یا گروه مداخله با گروه کنترل.",
-        tags: ["آزمون t وابسته", "آزمون t مستقل", "اندازه اثر"],
       },
       {
         icon: GitCompareArrows,
         title: "مقایسه اثربخشی دو درمان",
         description:
           "مقایسه‌ی اثر دو مداخله در دو گروه مستقل؛ مشخص کردن اینکه کدام درمان مؤثرتر است.",
-        tags: ["آزمون t مستقل", "من–ویتنی", "اندازه اثر"],
       },
     ],
   },
@@ -80,9 +79,9 @@ export default function ResearchModes() {
     >
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
         <SectionHeading
-          eyebrow="در قلب آمارایست"
+          eyebrow="در قلب آماریست"
           title="چهار حالت پژوهشی"
-          description="همه‌ی ابزارهای آمارایست حول چهار حالت پژوهشی می‌چرخند؛ برای هر حالت هم می‌توانید داده‌ی واقعی تحلیل کنید، هم داده‌ی تمرینی هدفمند تولید کنید."
+          description="همه‌ی ابزارهای آماریست حول چهار حالت پژوهشی می‌چرخند؛ برای هر حالت هم می‌توانید داده‌ی واقعی تحلیل کنید، هم داده‌ی تمرینی هدفمند تولید کنید."
         />
 
         <div className="mt-14 grid gap-8 lg:grid-cols-2">
@@ -137,16 +136,20 @@ export default function ResearchModes() {
                     <p className="mt-2 flex-1 text-[13px] leading-6 text-stone-600">
                       {mode.description}
                     </p>
-                    <div className="mt-4 flex flex-wrap gap-1.5">
-                      {mode.tags.map((tag) => (
-                        <span
-                          key={tag}
-                          className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600"
-                        >
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
+                    {"tags" in mode && mode.tags ? (
+                      <div className="mt-4 flex flex-wrap gap-1.5">
+                        {mode.tags.map((tag) => (
+                          <span
+                            key={tag}
+                            className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600"
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <FollowUpToggle />
+                    )}
                   </div>
                 ))}
               </div>

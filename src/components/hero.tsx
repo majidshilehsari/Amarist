@@ -47,7 +47,7 @@ export default function Hero() {
           </h1>
 
           <p className="mx-auto mt-6 max-w-xl text-lg leading-8 text-stone-600 lg:mx-0">
-            آمارایست دو کار برایتان انجام می‌دهد: داده‌های پژوهشی واقعی را
+            آماریست دو کار برایتان انجام می‌دهد: داده‌های پژوهشی واقعی را
             تحلیل می‌کند و داده‌های تمرینی شبیه‌سازی‌شده‌ای می‌سازد که
             دانشجوها با کار روی آن‌ها به نتایجِ مورد انتظار برسند.
           </p>
@@ -127,8 +127,8 @@ export default function Hero() {
             {/* آماره‌ها */}
             <div className="mt-6 grid grid-cols-3 gap-2 border-t border-dashed border-stone-200 pt-4 text-center">
               <div>
-                <p className="text-[11px] font-medium text-stone-500">آزمون t</p>
-                <p className="mt-0.5 text-sm font-bold text-stone-900">t = ۴٫۳۲</p>
+                <p className="text-[11px] font-medium text-stone-500">تحلیل کوواریانس</p>
+                <p className="mt-0.5 text-sm font-bold text-stone-900">F = ۱۸٫۶</p>
               </div>
               <div>
                 <p className="text-[11px] font-medium text-stone-500">p-value</p>
@@ -136,7 +136,7 @@ export default function Hero() {
               </div>
               <div>
                 <p className="text-[11px] font-medium text-stone-500">اندازه اثر</p>
-                <p className="mt-0.5 text-sm font-bold text-indigo-700">d = ۰٫۹۴</p>
+                <p className="mt-0.5 text-sm font-bold text-indigo-700">η² = ۰٫۲۹</p>
               </div>
             </div>
           </div>

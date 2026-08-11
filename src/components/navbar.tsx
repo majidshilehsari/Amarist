@@ -16,7 +16,7 @@ export default function Navbar() {
             <Sigma className="h-5 w-5" strokeWidth={2.5} />
           </span>
           <span className="text-lg font-extrabold tracking-tight text-stone-900">
-            آمارایست
+            آماریست
           </span>
           <span className="mt-1 hidden rounded-full bg-stone-100 px-2 py-0.5 text-[11px] font-medium text-stone-500 sm:inline-block">
             Amarist

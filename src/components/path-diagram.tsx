@@ -17,7 +17,7 @@ function truncate(s: string, max: number): string {
 }
 
 type Pos = { cx: number; cy: number };
-type Side = "left" | "right" | "bottom";
+type Side = "left" | "right" | "top" | "bottom";
 
 export default function PathDiagram({
   vars,
@@ -45,12 +45,15 @@ export default function PathDiagram({
     vars.filter((v) => v.role === "mediator"),
     vars.filter((v) => v.role === "outcome"),
   ];
-  // سمت قرارگیری زیرمقیاس‌ها: ستون چپ → چپ، ستون راست → راست، ستون وسط → پایین
+  // سمت قرارگیری زیرمقیاس‌ها: ستون چپ → چپ، ستون راست → راست،
+  // ستون وسط (میانجی‌ها) → متغیرهای بالایی بالا، متغیرهای پایینی پایین
   const sideOf = (v: VariableSpec): Side => {
     const col = varsByRole.findIndex((arr) => arr.includes(v));
     if (col === 0) return "left";
     if (col === 2) return "right";
-    return "bottom";
+    const colVars = varsByRole[1];
+    const idx = colVars.findIndex((x) => x.id === v.id);
+    return idx < Math.ceil(colVars.length / 2) ? "top" : "bottom";
   };
 
   const nodePos = new Map<number, Pos>();
@@ -69,7 +72,7 @@ export default function PathDiagram({
       const vNodes = nodes.filter((n) => n.varId === v.id);
       const nSub = v.subscales.length;
       const side = sideOf(v);
-      const subsOnSide = side !== "bottom";
+      const subsOnSide = side === "left" || side === "right";
 
       if (nSub === 0) {
         const node = vNodes[0];
@@ -89,16 +92,27 @@ export default function PathDiagram({
           const subBlockH = Math.max(nSub * subGap, nodeH);
           yCursor += Math.max(nodeH + 40 * scale, subBlockH + 30 * scale);
         } else {
-          const subsY = yCursor + nodeH + 26 * scale;
-          v.subscales.forEach((_, si) => {
-            const ci = si % 2;
-            const ri = Math.floor(si / 2);
-            const rowW = 2 * subW + 10 * scale;
-            const sx = x + (nodeW - rowW) / 2 + ci * (subW + 10 * scale);
-            inds.push({ cx: sx + subW / 2, cy: subsY + ri * subGap + subH / 2 });
-          });
+          // بالا یا پایین برای ستون وسط
           const subRows = Math.ceil(nSub / 2);
-          yCursor = subsY + subRows * subGap + 10 * scale;
+          const rowW = 2 * subW + 10 * scale;
+          const place = (baseY: number) =>
+            v.subscales.forEach((_, si) => {
+              const ci = si % 2;
+              const ri = Math.floor(si / 2);
+              const sx = x + (nodeW - rowW) / 2 + ci * (subW + 10 * scale);
+              inds.push({ cx: sx + subW / 2, cy: baseY + ri * subGap + subH / 2 });
+            });
+          if (side === "top") {
+            const subsTop = yCursor;
+            place(subsTop);
+            // گره بعد از زیرمقیاس‌ها
+            const blockH = subRows * subGap + subH;
+            yCursor = subsTop + blockH + nodeH + 20 * scale;
+          } else {
+            const subsY = yCursor + nodeH + 26 * scale;
+            place(subsY);
+            yCursor = subsY + subRows * subGap + 10 * scale;
+          }
         }
         indicatorPos.set(v.id, inds);
       } else {
@@ -113,15 +127,22 @@ export default function PathDiagram({
           yCursor = startY + subBlockH + 30 * scale;
         } else {
           const rowW = 2 * subW + 10 * scale;
-          vNodes.forEach((node, si) => {
-            const ci = si % 2;
-            const ri = Math.floor(si / 2);
-            const sx = x + (nodeW - rowW) / 2 + ci * (subW + 10 * scale);
-            const sy = startY + ri * subGap;
-            nodePos.set(node.nodeId, { cx: sx + subW / 2, cy: sy + subH / 2 });
-          });
           const subRows = Math.ceil(nSub / 2);
-          yCursor = startY + subRows * subGap + 10 * scale;
+          const placeNodes = (baseY: number) =>
+            vNodes.forEach((node, si) => {
+              const ci = si % 2;
+              const ri = Math.floor(si / 2);
+              const sx = x + (nodeW - rowW) / 2 + ci * (subW + 10 * scale);
+              nodePos.set(node.nodeId, { cx: sx + subW / 2, cy: baseY + ri * subGap + subH / 2 });
+            });
+          if (side === "top") {
+            placeNodes(startY);
+            const blockH = subRows * subGap + subH;
+            yCursor = startY + blockH + 30 * scale;
+          } else {
+            placeNodes(startY);
+            yCursor = startY + subRows * subGap + 10 * scale;
+          }
         }
       }
       colH = Math.max(colH, yCursor - 60);

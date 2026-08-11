@@ -17,7 +17,19 @@ import {
   Upload,
 } from "lucide-react";
 import * as XLSX from "xlsx";
-import { Document, Packer, Paragraph, TextRun } from "docx";
+import {
+  AlignmentType,
+  BorderStyle,
+  Document,
+  Packer,
+  Paragraph,
+  ShadingType,
+  Table,
+  TableCell,
+  TableRow,
+  TextRun,
+  WidthType,
+} from "docx";
 import { fmt, fmtP, mean, sampleStd } from "@/lib/statistics";
 import {
   cronbachAlpha,
@@ -45,7 +57,7 @@ import {
 } from "@/lib/sem-generator";
 import ErrorBoundary from "@/components/error-boundary";
 import PathDiagram from "@/components/path-diagram";
-import ProgressStepper from "@/components/progress-stepper";
+import ProgressStepper, { type StepStatus } from "@/components/progress-stepper";
 import ResultModal from "@/components/result-modal";
 import ToolHeader from "@/components/tool-header";
 
@@ -207,6 +219,10 @@ function varNameOf(vars: VariableSpec[], id: number): string {
   return vars.find((v) => v.id === id)?.name ?? `متغیر ${id}`;
 }
 
+function faNum(v: string | number): string {
+  return String(v).replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);
+}
+
 // ------------------------------------------------------------
 // تایپ‌ها
 // ------------------------------------------------------------
@@ -226,6 +242,7 @@ type BootResult = {
 type Analysis = {
   nodeIds: number[];
   nodeCols: number[][];
+  indicatorCols: Record<number, number[][]>;
   sem: SemResults;
   corr: { r: number[][]; p: number[][] };
   maha: ReturnType<typeof mahalanobisDistances>;
@@ -370,8 +387,9 @@ function defaultProjectData(): ProjectData {
   };
 }
 
+
 // ------------------------------------------------------------
-// گزارش متنی
+// گزارش متنی (txt / کپی)
 // ------------------------------------------------------------
 
 function buildReportText(
@@ -504,6 +522,306 @@ function buildReportText(
   return L.join("\n");
 }
 
+// ------------------------------------------------------------
+// ساخت سند docx زیبا (فونت فارسی + جداول)
+// ------------------------------------------------------------
+
+const FA_FONT = "B Nazanin";
+const FA_HEAD = "B Titr";
+
+const thinBorder = {
+  style: BorderStyle.SINGLE,
+  size: 2,
+  color: "9AA5B1",
+} as const;
+
+function docP(text: string, opts: { bold?: boolean; size?: number; color?: string; align?: (typeof AlignmentType)[keyof typeof AlignmentType] } = {}) {
+  return new Paragraph({
+    alignment: opts.align ?? AlignmentType.RIGHT,
+    spacing: { after: 100 },
+    children: [
+      new TextRun({
+        text,
+        font: FA_FONT,
+        size: opts.size ?? 22,
+        bold: opts.bold,
+        color: opts.color,
+      }),
+    ],
+  });
+}
+
+function docH(text: string) {
+  return new Paragraph({
+    spacing: { before: 280, after: 120 },
+    children: [new TextRun({ text, font: FA_HEAD, size: 28, bold: true, color: "1F3864" })],
+  });
+}
+
+function docCell(text: string, opts: { bold?: boolean; fill?: string; width?: number } = {}) {
+  return new TableCell({
+    width: opts.width ? { size: opts.width, type: WidthType.PERCENTAGE } : undefined,
+    shading: opts.fill ? { type: ShadingType.CLEAR, fill: opts.fill } : undefined,
+    margins: { top: 60, bottom: 60, left: 80, right: 80 },
+    children: [
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [new TextRun({ text: faNum(text), font: FA_FONT, size: 20, bold: opts.bold })],
+      }),
+    ],
+  });
+}
+
+function docTable(headers: string[], rows: (string | number)[][]) {
+  const w = headers.map(() => Math.floor(100 / headers.length));
+  const headerRow = new TableRow({
+    tableHeader: true,
+    children: headers.map((h, i) => docCell(h, { bold: true, fill: "D9E2F3", width: w[i] })),
+  });
+  const body = rows.map(
+    (r) =>
+      new TableRow({
+        children: r.map((c, i) => docCell(String(c), { width: w[i] })),
+      })
+  );
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    borders: {
+      top: thinBorder,
+      bottom: thinBorder,
+      left: thinBorder,
+      right: thinBorder,
+      insideHorizontal: thinBorder,
+      insideVertical: thinBorder,
+    },
+    rows: [headerRow, ...body],
+  });
+}
+
+function buildDocxReport(
+  projectName: string,
+  vars: VariableSpec[],
+  nodes: ModelNode[],
+  analysis: Analysis | null,
+  answerKey: SemAnswerKey | null,
+  bootResults: BootResult[] | null,
+  n: number,
+  source: "generate" | "real"
+): Document {
+  const children: (Paragraph | Table)[] = [];
+  children.push(
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 200 },
+      children: [new TextRun({ text: "گزارش آماری — آماریست", font: FA_HEAD, size: 40, bold: true, color: "1F3864" })],
+    })
+  );
+  children.push(
+    docP(`پروژه: ${projectName} | منبع داده: ${source === "generate" ? "تولید تمرینی" : "داده واقعی"} | تعداد موارد: ${faNum(n)} | تعداد گره‌های مدل: ${faNum(nodes.length)}`, { align: AlignmentType.CENTER, bold: true })
+  );
+
+  if (!analysis) {
+    children.push(docP("تحلیلی اجرا نشده است."));
+    return new Document({ sections: [{ children }] });
+  }
+
+  const { sem, corr, maha, mardia, missing, normals, meas } = analysis;
+  const nodeLabel = (id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`;
+
+  // ۱) داده‌های گمشده
+  children.push(docH("۱) داده‌های گمشده"));
+  children.push(
+    docTable(
+      ["ستون", "تعداد گمشده", "نتیجه"],
+      missing.map((m) => [m.col, m.count, m.count === 0 ? "کامل" : "دارای گمشده"])
+    )
+  );
+
+  // ۲) داده پرت
+  children.push(docH("۲) داده پرت چندمتغیری (ماهالانوبیس)"));
+  children.push(
+    docP(
+      maha.valid
+        ? `تعداد داده‌های پرت شناسایی‌شده: ${faNum(maha.outliers.length)} (آستانه p < ۰/۰۵)`
+        : maha.message
+    )
+  );
+
+  // ۳) نرمال بودن تک‌متغیری
+  children.push(docH("۳) نرمال بودن تک‌متغیری (کجی و کشیدگی)"));
+  children.push(
+    docTable(
+      ["گره", "کجی", "کشیدگی", "نتیجه کجی", "نتیجه کشیدگی"],
+      normals.map((x) => [
+        x.name,
+        fmt(x.skew),
+        fmt(x.kurt),
+        Math.abs(x.skew) < 3 ? "برقرار" : "برقرار نیست",
+        Math.abs(x.kurt) < 10 ? "برقرار" : "برقرار نیست",
+      ])
+    )
+  );
+  children.push(docP("معیار کلاین (۲۰۲۳): قدرمطلق کجی < ۳ و قدرمطلق کشیدگی < ۱۰.", { size: 20, color: "666666" }));
+
+  // ۴) مردیا
+  children.push(docH("۴) نرمال بودن چندمتغیری (مردیا)"));
+  children.push(
+    mardia.valid
+      ? docP(`ضریب کشیدگی مردیا: ${faNum(fmt(mardia.kurtosis))} | نسبت بحرانی: ${faNum(fmt(mardia.cr))} — ${mardia.cr < 5 ? "نرمال چندمتغیره برقرار است" : "تخطی از نرمال چندمتغیری"}`)
+      : docP(mardia.message)
+  );
+
+  // ۵) همبستگی
+  children.push(docH("۵) ماتریس همبستگی پیرسون"));
+  children.push(
+    docTable(
+      ["", ...nodes.map((nd) => nd.label)],
+      nodes.map((nd, i) => [
+        nd.label,
+        ...nodes.map((_, j) => {
+          if (i === j) return "1";
+          if (i < j) return "";
+          const r = corr.r?.[i]?.[j] ?? NaN;
+          const p = corr.p?.[i]?.[j] ?? 1;
+          return `${fmt(r)}${p < 0.01 ? "**" : p < 0.05 ? "*" : ""}`;
+        }),
+      ])
+    )
+  );
+  children.push(docP("** p < 0.01 ، * p < 0.05", { size: 20, color: "666666" }));
+
+  // ۶) VIF / DW
+  children.push(docH("۶) عدم هم‌خطی چندگانه و استقلال خطاها"));
+  const vifRows: (string | number)[][] = [];
+  nodes.forEach((nd) => {
+    if (nd.role === "exogenous") return;
+    const vifs = sem.vifs[nd.nodeId] ?? [];
+    const dw = sem.dw[nd.nodeId];
+    if (vifs.length) {
+      vifRows.push([nd.label, vifs.map((x) => fmt(x)).join("، "), vifs.map((x) => fmt(1 / x)).join("، "), Number.isFinite(dw as number) ? fmt(dw as number) : "-"]);
+    }
+  });
+  children.push(docTable(["گره وابسته", "VIF", "تلورانس", "دوربین-واتسون"], vifRows));
+
+  // ۷) ضرایب مسیر
+  children.push(docH("۷) ضرایب مسیر"));
+  children.push(
+    docTable(
+      ["مسیر", "B", "SE", "t", "p", "β"],
+      sem.paths.map((pr) => [
+        `${nodeLabel(pr.from)} ← ${nodeLabel(pr.to)}`,
+        fmt(pr.b),
+        fmt(pr.se),
+        fmt(pr.t),
+        `${fmtP(pr.p)}${starP(pr.p)}`,
+        fmt(pr.std),
+      ])
+    )
+  );
+  children.push(docP("* p < 0.05 ، ** p < 0.01 ، *** p < 0.001", { size: 20, color: "666666" }));
+
+  // ۸) اثرات
+  children.push(docH("۸) اثرات مستقیم، غیرمستقیم و کل (بوت‌استرپ)"));
+  const effectRows: (string | number)[][] = [];
+  if (bootResults && bootResults.length) {
+    bootResults.forEach((b) => {
+      const label = b.viaVar
+        ? `${varNameOf(vars, b.fromVar)} ← ${varNameOf(vars, b.viaVar)} ← ${varNameOf(vars, b.toVar)}`
+        : `کل اثر غیرمستقیم: ${varNameOf(vars, b.fromVar)} ← ${varNameOf(vars, b.toVar)}`;
+      effectRows.push([
+        label,
+        b.viaVar === null ? fmt(b.direct) : "—",
+        fmt(b.indirect),
+        fmt(b.lo),
+        fmt(b.hi),
+        `${fmtP(b.p)}${starP(b.p)}`,
+        b.viaVar === null ? fmt(b.total) : "—",
+      ]);
+    });
+  } else {
+    sem.effects.forEach((ef) => {
+      effectRows.push([
+        `${varNameOf(vars, ef.fromVar)} ← ${varNameOf(vars, ef.toVar)}`,
+        fmt(ef.direct),
+        fmt(ef.indirect),
+        "—",
+        "—",
+        "—",
+        fmt(ef.total),
+      ]);
+    });
+  }
+  children.push(docTable(["مسیر", "مستقیم", "غیرمستقیم", "CI پایین", "CI بالا", "p", "کل"], effectRows));
+  children.push(docP("فاصله اطمینان ۹۵٪ با بوت‌استرپ؛ عدم عبور از صفر = معناداری در سطح ۰/۰۵.", { size: 20, color: "666666" }));
+
+  // ۹) R²
+  children.push(docH("۹) R² گره‌های درون‌زا"));
+  children.push(
+    docTable(
+      ["گره", "R²", "نتیجه"],
+      nodes
+        .filter((nd) => nd.role !== "exogenous")
+        .map((nd) => [nd.label, fmt(sem.r2[nd.nodeId] ?? 0), (sem.r2[nd.nodeId] ?? 0) >= 0.1 ? "قابل قبول" : "کم"])
+    )
+  );
+
+  // ۱۰) برازش
+  children.push(docH("۱۰) شاخص‌های برازش مدل"));
+  if (sem.fit.valid) {
+    children.push(
+      docTable(
+        ["χ²", "df", "χ²/df", "CFI", "TLI", "RMSEA", "SRMR", "نتیجه"],
+        [[
+          fmt(sem.fit.chi2),
+          sem.fit.df,
+          fmt(sem.fit.chi2df),
+          fmt(sem.fit.cfi),
+          fmt(sem.fit.tli),
+          fmt(sem.fit.rmsea),
+          fmt(sem.fit.srmr),
+          sem.fit.cfi >= 0.9 && sem.fit.rmsea <= 0.08 ? "برازش خوب" : "برازش ضعیف",
+        ]]
+      )
+    );
+    children.push(docP("معیار: CFI ≥ 0.90 ، RMSEA ≤ 0.08", { size: 20, color: "666666" }));
+  } else {
+    children.push(docP(sem.fit.message ?? "نامشخص"));
+  }
+
+  // ۱۱) آلفا
+  if (meas.length) {
+    children.push(docH("۱۱) مدل اندازه‌گیری (آلفای کرونباخ و بارهای عاملی)"));
+    meas.forEach((m) => {
+      children.push(docP(`${m.name}: آلفای کرونباخ = ${faNum(fmt(m.alpha))}`, { bold: true }));
+      children.push(
+        docTable(
+          ["شاخص", "بار عاملی"],
+          m.subNames.map((s, si) => [s, fmt(m.loadings[si])])
+        )
+      );
+    });
+    children.push(docP("معیار پذیرش آلفای کرونباخ ≥ 0.70", { size: 20, color: "666666" }));
+  }
+
+  // ۱۲) کلید پاسخ
+  if (answerKey) {
+    children.push(docH("۱۲) کلید پاسخ (مخصوص استاد)"));
+    children.push(
+      docTable(
+        ["مسیر", "ضریب هدف (β)", "ضریب واقعی (β)", "وضعیت"],
+        answerKey.pathTargets.map((pt) => [
+          `${nodeLabel(pt.fromNode)} ← ${nodeLabel(pt.toNode)}`,
+          fmt(pt.target),
+          fmt(pt.actual),
+          Math.abs(pt.actual - pt.target) < 0.15 ? "نزدیک به هدف" : "فاصله دارد",
+        ])
+      )
+    );
+  }
+
+  return new Document({ sections: [{ children }] });
+}
+
 
 // ------------------------------------------------------------
 // کامپوننت اصلی
@@ -539,11 +857,7 @@ function SemTool() {
   const [answerKey, setAnswerKey] = useState<SemAnswerKey | null>(null);
   const [bootResults, setBootResults] = useState<BootResult[] | null>(null);
   const [bootBusy, setBootBusy] = useState(false);
-  const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({
-    text: "",
-    kind: "",
-  });
-  const [footerMsg, setFooterMsg] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({ text: "", kind: "" });
   const [modal, setModal] = useState<ModalState>(null);
   const [showBigDiagram, setShowBigDiagram] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
@@ -559,10 +873,7 @@ function SemTool() {
   // ---------- گره‌ها و فلش‌ها ----------
   const nodes = useMemo(() => buildModelNodes(vars), [vars]);
   const allArrows = useMemo(() => buildModelArrows(nodes), [nodes]);
-  const arrows = useMemo(
-    () => allArrows.filter((a) => !inactiveArrowIds.has(a.id)),
-    [allArrows, inactiveArrowIds]
-  );
+  const arrows = useMemo(() => allArrows.filter((a) => !inactiveArrowIds.has(a.id)), [allArrows, inactiveArrowIds]);
   const connectedVarIds = useMemo(() => {
     const s = new Set<number>();
     arrows.forEach((a) => {
@@ -575,10 +886,7 @@ function SemTool() {
   const modelNodes = useMemo(() => buildModelNodes(modelVars), [modelVars]);
   const modelArrows = arrows;
   const isolatedVars = vars.filter((v) => !connectedVarIds.has(v.id));
-  const nodeLabel = useCallback(
-    (id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`,
-    [nodes]
-  );
+  const nodeLabel = useCallback((id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`, [nodes]);
 
   const analysisValid =
     !!analysis &&
@@ -592,13 +900,15 @@ function SemTool() {
   // ---------- مراحل استپر ----------
   const steps = useMemo(() => {
     const list: { id: string; label: string; short?: string }[] = [
-      { id: "project", label: "پروژه و منبع داده", short: "پروژه" },
+      { id: "project", label: "پروژه", short: "پروژه" },
+      { id: "source", label: "منبع داده", short: "منبع" },
       { id: "variables", label: "مشخصات متغیرها", short: "متغیرها" },
       { id: "draw", label: "ترسیم مدل", short: "مدل" },
     ];
     if (source === "generate") list.push({ id: "constraints", label: "قیود تولید داده", short: "قیود" });
     list.push(
       { id: "data", label: "جدول داده‌ها", short: "داده" },
+      { id: "diagnose", label: "تشخیص", short: "تشخیص" },
       { id: "assumptions", label: "بررسی پیش‌فرض‌ها", short: "پیش‌فرض" },
       { id: "descriptive", label: "یافته‌های توصیفی", short: "توصیفی" },
       { id: "diagram", label: "دیاگرام مدل", short: "دیاگرام" },
@@ -606,11 +916,37 @@ function SemTool() {
     );
     if (wantAlpha) list.push({ id: "alpha", label: "آلفای کرونباخ", short: "آلفا" });
     list.push({ id: "report", label: "نگارش گزارش", short: "گزارش" });
+    list.push({ id: "save", label: "ذخیره", short: "ذخیره" });
     return list;
   }, [source, wantAlpha]);
 
   const stepIdx = (id: string) => steps.findIndex((s) => s.id === id);
+  const currentStep = Math.min(activeStep, steps.length - 1);
 
+  // مراحل وابسته به تحلیل (فقط بعد از اجرای تحلیل سبز می‌شوند)
+  const analysisSteps = new Set(["assumptions", "descriptive", "diagram", "inferential", "alpha"]);
+
+  const stepStatuses: StepStatus[] = useMemo(() => {
+    return steps.map((s, i) => {
+      if (i === currentStep) return "current";
+      if (i > currentStep) return "pending";
+      if (analysisSteps.has(s.id) && !analysisValid) return "analysis";
+      return "done";
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [steps, currentStep, analysisValid]);
+
+  const goToStep = (i: number) => {
+    if (i >= 0 && i <= currentStep) setActiveStep(i);
+  };
+
+  const goNext = () => {
+    setActiveStep((s) => Math.min(Math.max(s, currentStep) + 1, steps.length - 1));
+  };
+
+  const goPrev = () => {
+    setActiveStep((s) => Math.max(Math.min(s, currentStep) - 1, 0));
+  };
 
   // ---------- اعمال/ذخیره پروژه ----------
   const applyProjectData = useCallback((data: ProjectData) => {
@@ -690,12 +1026,7 @@ function SemTool() {
 
   const createProject = () => {
     const name = newProjectName.trim() || `پروژه ${projects.length + 1}`;
-    const p: Project = {
-      id: uid(),
-      name,
-      updatedAt: new Date().toISOString(),
-      data: defaultProjectData(),
-    };
+    const p: Project = { id: uid(), name, updatedAt: new Date().toISOString(), data: defaultProjectData() };
     setProjects((prev) => {
       const next = [...prev, p];
       saveProjects(next);
@@ -703,7 +1034,9 @@ function SemTool() {
     });
     setProjectModal(false);
     setNewProjectName("");
-    switchProject(p.id);
+    setProjectId(p.id);
+    applyProjectData(p.data);
+    setActiveStep(0);
   };
 
   const deleteProject = (id: string) => {
@@ -729,17 +1062,11 @@ function SemTool() {
 
   const addVar = () => {
     const id = vars.length ? Math.max(...vars.map((v) => v.id)) + 1 : 0;
-    const newVar: VariableSpec = {
-      id,
-      name: `متغیر ${vars.length + 1}`,
-      role: "outcome",
-      hasTotal: false,
-      totalMin: 1,
-      totalMax: 5,
-      subscales: [],
-    };
-    setVars((prev) => [...prev, newVar]);
-    setStatus({ text: `متغیر «${newVar.name}» اضافه شد.`, kind: "ok" });
+    setVars((prev) => [
+      ...prev,
+      { id, name: `متغیر ${prev.length + 1}`, role: "outcome" as Role, hasTotal: true, totalMin: 1, totalMax: 5, subscales: [] },
+    ]);
+    setStatus({ text: "متغیر جدید اضافه شد.", kind: "ok" });
   };
 
   const removeVar = (id: number) => {
@@ -780,26 +1107,25 @@ function SemTool() {
 
   const removeSubscale = (id: number, idx: number) => {
     setVars((prev) =>
-      prev.map((v) =>
-        v.id === id ? { ...v, subscales: v.subscales.filter((_, i) => i !== idx) } : v
-      )
+      prev.map((v) => {
+        if (v.id !== id) return v;
+        const subscales = v.subscales.filter((_, i) => i !== idx);
+        // اگر زیرمقیاسی باقی نماند، نمره کل اجباری می‌شود
+        return subscales.length === 0 ? { ...v, subscales, hasTotal: true } : { ...v, subscales };
+      })
     );
   };
 
   const setSubscaleName = (id: number, idx: number, name: string) => {
     setVars((prev) =>
-      prev.map((v) =>
-        v.id === id ? { ...v, subscales: v.subscales.map((s, i) => (i === idx ? { ...s, name } : s)) } : v
-      )
+      prev.map((v) => (v.id === id ? { ...v, subscales: v.subscales.map((s, i) => (i === idx ? { ...s, name } : s)) } : v))
     );
   };
 
   const setSubscaleRange = (id: number, idx: number, field: "min" | "max", value: number) => {
     setVars((prev) =>
       prev.map((v) =>
-        v.id === id
-          ? { ...v, subscales: v.subscales.map((s, i) => (i === idx ? { ...s, [field]: value } : s)) }
-          : v
+        v.id === id ? { ...v, subscales: v.subscales.map((s, i) => (i === idx ? { ...s, [field]: value } : s)) } : v
       )
     );
   };
@@ -874,7 +1200,7 @@ function SemTool() {
       const cm = mapArg ?? colMap;
       const c = colsArg ?? columns;
       try {
-        if (!r.length) throw new Error("داده‌ای وجود ندارد.");
+        if (!r.length) throw new Error("داده‌ای وجود ندارد؛ ابتدا داده تولید یا وارد کنید.");
         const { nodeCols, indicatorCols } = computeNodeCols(r, vars, modelNodes, cm);
         if (nodeCols.some((col) => col.every((v) => !Number.isFinite(v)))) {
           throw new Error("حداقل یکی از گره‌ها داده معتبر ندارد؛ نگاشت ستون‌ها را بررسی کنید.");
@@ -901,7 +1227,18 @@ function SemTool() {
             loadings: pcaLoadings(indicatorCols[v.id]),
             subNames: v.subscales.map((s) => s.name),
           }));
-        setAnalysis({ nodeIds: modelNodes.map((nd) => nd.nodeId), nodeCols, sem, corr, maha, mardia, missing, normals, meas });
+        setAnalysis({
+          nodeIds: modelNodes.map((nd) => nd.nodeId),
+          nodeCols,
+          indicatorCols,
+          sem,
+          corr,
+          maha,
+          mardia,
+          missing,
+          normals,
+          meas,
+        });
         setBootResults(null);
         setStatus({ text: "تحلیل با موفقیت اجرا شد.", kind: "ok" });
         if (openModal) {
@@ -955,20 +1292,6 @@ function SemTool() {
     }
   }, [n, modelVars, modelArrows, constraints, analyze, vars]);
 
-  const generateRef = useRef(generate);
-  useEffect(() => {
-    generateRef.current = generate;
-  });
-  useEffect(() => {
-    const t = setTimeout(() => {
-      // فقط اگر هنوز داده‌ای تولید نشده
-      if (typeof window !== "undefined" && !loadProjects()[0]?.data.rows.length) {
-        generateRef.current();
-      }
-    }, 150);
-    return () => clearTimeout(t);
-  }, []);
-
   // ---------- ایمپورت اکسل ----------
   const handleImport = async (file: File) => {
     try {
@@ -1007,6 +1330,7 @@ function SemTool() {
       setModal({ ok: false, lines: [(err as Error).message] });
     }
   };
+
 
   // ---------- خروجی‌ها ----------
   const exportExcel = () => {
@@ -1085,20 +1409,16 @@ function SemTool() {
 
   const exportDocx = async () => {
     try {
-      const lines = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length).split("\n");
-      const doc = new Document({
-        sections: [
-          {
-            children: lines.map(
-              (l) =>
-                new Paragraph({
-                  children: [new TextRun({ text: l, font: "Tahoma", size: 22 })],
-                  spacing: { after: 80 },
-                })
-            ),
-          },
-        ],
-      });
+      const doc = buildDocxReport(
+        currentProject?.name ?? "پروژه",
+        vars,
+        modelNodes,
+        analysis,
+        answerKey,
+        bootResults,
+        rows.length,
+        source
+      );
       const blob = await Packer.toBlob(doc);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -1142,8 +1462,6 @@ function SemTool() {
         document.body.removeChild(ta);
       }
       setStatus({ text: "کل گزارش کپی شد.", kind: "ok" });
-      setFooterMsg("گزارش کپی شد ✓ — حالا می‌توانید آن را هر جا Paste کنید");
-      setTimeout(() => setFooterMsg(null), 4000);
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
@@ -1175,8 +1493,6 @@ function SemTool() {
       URL.revokeObjectURL(url);
       setBackupModal(false);
       setStatus({ text: "بکاپ دانلود شد.", kind: "ok" });
-      setFooterMsg("بکاپ دانلود شد ✓");
-      setTimeout(() => setFooterMsg(null), 4000);
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
@@ -1264,214 +1580,217 @@ function SemTool() {
     return rowsList;
   }, [vars, modelArrows]);
 
-  // ---------- یافته‌های توصیفی ----------
+  // ---------- یافته‌های توصیفی درختی ----------
   const descriptive = useMemo(() => {
     if (!analysis) return null;
-    return modelNodes.map((nd) => {
-      const col = analysis.nodeCols[nd.nodeId];
+    const statOf = (col: number[]) => {
       const vals = col.filter(Number.isFinite);
       return {
-        label: nd.label,
         n: vals.length,
-        mean: mean(vals),
-        sd: sampleStd(vals),
+        mean: vals.length ? mean(vals) : NaN,
+        sd: vals.length > 1 ? sampleStd(vals) : NaN,
         min: vals.length ? Math.min(...vals) : NaN,
         max: vals.length ? Math.max(...vals) : NaN,
         skew: skewness(col),
         kurt: kurtosis(col),
       };
-    });
-  }, [analysis, modelNodes]);
-
-  const currentStep = Math.min(activeStep, steps.length - 1);
-
-  const goNext = () => {
-    // اگر از مرحله جدول داده جلو می‌رویم و تحلیلی نیست، خودکار تحلیل کن
-    if (steps[currentStep]?.id === "data" && !analysisValid && rows.length) {
-      analyze(undefined, undefined, undefined, true, false);
+    };
+    const out: { label: string; indent: number; bold?: boolean; s: ReturnType<typeof statOf> }[] = [];
+    for (const v of modelVars) {
+      const vNodes = modelNodes.filter((nd) => nd.varId === v.id);
+      if (v.subscales.length === 0) {
+        const nd = vNodes[0];
+        out.push({ label: v.name, indent: 0, bold: true, s: statOf(analysis.nodeCols[nd.nodeId]) });
+      } else if (v.hasTotal) {
+        const totalNode = vNodes.find((nd) => nd.kind === "total") ?? vNodes[0];
+        out.push({ label: `${v.name} (نمره کل)`, indent: 0, bold: true, s: statOf(analysis.nodeCols[totalNode.nodeId]) });
+        const subs = analysis.indicatorCols[v.id] ?? [];
+        v.subscales.forEach((s, i) => {
+          const col = subs[i];
+          if (col) out.push({ label: `└─ ${s.name}`, indent: 1, s: statOf(col) });
+        });
+      } else {
+        vNodes.forEach((nd, i) => {
+          const sub = v.subscales[i];
+          out.push({ label: sub ? `${v.name} — ${sub.name}` : nd.label, indent: 0, s: statOf(analysis.nodeCols[nd.nodeId]) });
+        });
+      }
     }
-    if (steps[currentStep]?.id === "project" && !currentProject) return;
-    setActiveStep((s) => Math.min(s + 1, steps.length - 1));
-  };
+    return out;
+  }, [analysis, modelVars, modelNodes]);
 
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-40 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900">
-      <ToolHeader
-        title="تحلیل مسیر و مدل معادلات ساختاری (SEM)"
-        subtitle={modeLabel}
-        actions={
-          <div className="flex items-center gap-2">
-            {source === "generate" && (
-              <button
-                type="button"
-                className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-[12px] font-extrabold text-white shadow-sm transition hover:bg-indigo-500"
-                onClick={generate}
-              >
-                <Play className="h-3.5 w-3.5" />
-                تولید داده و تحلیل
-              </button>
-            )}
+    <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-24 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900">
+      <ToolHeader title="تحلیل مسیر و مدل معادلات ساختاری (SEM)" subtitle={modeLabel} />
+
+      {/* ---------- استپر شناور زیر هدر + دکمه‌های قبلی/بعدی ---------- */}
+      <div className="sticky top-14 z-40 border-b border-stone-200 bg-white/95 shadow-sm backdrop-blur dark:border-stone-700 dark:bg-slate-900/95">
+        <div className="mx-auto flex max-w-[1280px] items-center gap-3 px-4 py-1.5">
+          <div className="min-w-0 flex-1 overflow-x-auto">
+            <ProgressStepper steps={steps} statuses={stepStatuses} onSelect={goToStep} />
+          </div>
+          <span className="hidden shrink-0 rounded-full bg-indigo-50 px-3 py-1 text-[11px] font-black text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 md:block">
+            مرحله {currentStep + 1} از {steps.length}
+          </span>
+          <div className="flex shrink-0 items-center gap-1.5">
             <button
               type="button"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-1.5 text-[12px] font-extrabold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
-              onClick={() => analyze(undefined, undefined, undefined, true, true)}
+              disabled={currentStep === 0}
+              onClick={goPrev}
+              title="مرحله قبلی"
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-stone-300 bg-white text-stone-600 transition hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-30 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-300"
             >
-              <RefreshCw className="h-3.5 w-3.5" />
-              اجرای تحلیل
+              <ChevronRight className="h-4 w-4" />
             </button>
-            <a
-              href="/tools/alpha"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[12px] font-extrabold text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
-              title="ابزار جداگانه اندازه‌گیری و تحلیل آلفای کرونباخ"
+            <button
+              type="button"
+              disabled={currentStep >= steps.length - 1}
+              onClick={goNext}
+              title="مرحله بعدی"
+              className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-md shadow-indigo-600/25 transition hover:bg-indigo-500 disabled:opacity-30"
             >
-              <FileText className="h-3.5 w-3.5" />
-              آلفای کرونباخ
-            </a>
+              <ChevronLeft className="h-4 w-4" />
+            </button>
           </div>
-        }
-      />
+        </div>
+      </div>
 
       <div className="mx-auto max-w-[1280px] px-4">
-        {/* ---------- استپر پیشرفت ---------- */}
-        <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-3 shadow-sm dark:border-stone-700 dark:bg-slate-800">
-          <ProgressStepper steps={steps} active={currentStep} onSelect={(i) => i <= currentStep && setActiveStep(i)} />
-        </div>
-
-        {/* ============ مرحله ۰: پروژه و منبع داده ============ */}
+        {/* ============ مرحله ۰: پروژه ============ */}
         {currentStep === stepIdx("project") && (
-          <div className="mt-4 space-y-4">
-            <section className={`rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
-              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">پروژه‌ها</h2>
-              <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                همه داده‌ها در مرورگر شما ذخیره می‌شوند. یک پروژه انتخاب کنید یا پروژه جدید بسازید؛ با «بکاپ پروژه‌ها»
-                می‌توانید همه پروژه‌ها یا فقط همین پروژه را ذخیره کنید.
-              </p>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">پروژه‌ها</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              همه داده‌ها در مرورگر شما ذخیره می‌شوند. یک پروژه انتخاب کنید یا پروژه جدید بسازید؛ با «بکاپ پروژه‌ها»
+              می‌توانید همه پروژه‌ها یا فقط همین پروژه را ذخیره کنید.
+            </p>
 
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {projects.map((p) => (
-                  <div
-                    key={p.id}
-                    className={`rounded-2xl border-2 p-4 transition ${
-                      p.id === projectId
-                        ? "border-indigo-500 bg-indigo-50 dark:border-indigo-400 dark:bg-indigo-950/40"
-                        : "border-stone-200 bg-white hover:border-indigo-300 dark:border-stone-700 dark:bg-slate-800"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <Database className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
-                      <p className="font-extrabold text-stone-900 dark:text-stone-100">{p.name}</p>
-                      {p.id === projectId && (
-                        <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-bold text-white">فعال</span>
-                      )}
-                    </div>
-                    <p className="mt-1 text-[11px] text-stone-400 dark:text-stone-500">
-                      {p.data.vars.length} متغیر · {p.data.rows.length} ردیف داده · به‌روزرسانی:{" "}
-                      {new Date(p.updatedAt).toLocaleDateString("fa-IR")}
-                    </p>
-                    <div className="mt-3 flex gap-2">
-                      <button
-                        type="button"
-                        className={`${p.id === projectId ? "opacity-60" : ""} ${btnLight} flex-1`}
-                        disabled={p.id === projectId}
-                        onClick={() => switchProject(p.id)}
-                      >
-                        {p.id === projectId ? "پروژه فعلی" : "باز کردن"}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => deleteProject(p.id)}
-                        className="flex h-9 w-9 items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400"
-                        title="حذف پروژه"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {projects.map((p) => (
+                <div
+                  key={p.id}
+                  className={`rounded-2xl border-2 p-4 transition ${
+                    p.id === projectId
+                      ? "border-indigo-500 bg-indigo-50 dark:border-indigo-400 dark:bg-indigo-950/40"
+                      : "border-stone-200 bg-white hover:border-indigo-300 dark:border-stone-700 dark:bg-slate-800"
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Database className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                    <p className="font-extrabold text-stone-900 dark:text-stone-100">{p.name}</p>
+                    {p.id === projectId && (
+                      <span className="rounded-full bg-indigo-600 px-2 py-0.5 text-[10px] font-bold text-white">فعال</span>
+                    )}
                   </div>
-                ))}
-
-                <button
-                  type="button"
-                  onClick={() => setProjectModal(true)}
-                  className="flex min-h-28 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-stone-300 text-stone-400 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-stone-600 dark:text-stone-500"
-                >
-                  <FolderPlus className="h-8 w-8" />
-                  <span className="text-sm font-extrabold">پروژه جدید</span>
-                </button>
-              </div>
-
-              <div className="mt-4 flex flex-wrap gap-2">
-                <button type="button" className={btnSecondary} onClick={openBackupModal}>
-                  <Download className="h-4 w-4" />
-                  بکاپ پروژه‌ها
-                </button>
-                <input
-                  ref={restoreRef}
-                  type="file"
-                  accept=".json"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) restoreBackup(f);
-                    e.target.value = "";
-                  }}
-                />
-                <button type="button" className={btnLight} onClick={() => restoreRef.current?.click()}>
-                  <Upload className="h-4 w-4" />
-                  بازیابی از بکاپ
-                </button>
-              </div>
-            </section>
-
-            <section className={`rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
-              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">منبع داده</h2>
-              <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود.
-              </p>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <button
-                  type="button"
-                  onClick={() => setSource("generate")}
-                  className={`rounded-2xl border-2 p-4 text-start transition ${
-                    source === "generate"
-                      ? "border-blue-600 bg-blue-100/60 dark:border-blue-500 dark:bg-blue-950/40"
-                      : "border-stone-200 bg-white hover:border-blue-300 dark:border-stone-700 dark:bg-slate-800"
-                  }`}
-                >
-                  <p className="font-extrabold text-stone-900 dark:text-stone-100">تولید داده تمرینی</p>
-                  <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
-                    با رعایت قیود انتخابی شما (معنی‌داری مسیرها، اثر میانجی، R² و...) داده شبیه‌سازی‌شده ساخته می‌شود.
+                  <p className="mt-1 text-[11px] text-stone-400 dark:text-stone-500">
+                    {p.data.vars.length} متغیر · {p.data.rows.length} ردیف داده · به‌روزرسانی:{" "}
+                    {new Date(p.updatedAt).toLocaleDateString("fa-IR")}
                   </p>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSource("real")}
-                  className={`rounded-2xl border-2 p-4 text-start transition ${
-                    source === "real"
-                      ? "border-blue-600 bg-blue-100/60 dark:border-blue-500 dark:bg-blue-950/40"
-                      : "border-stone-200 bg-white hover:border-blue-300 dark:border-stone-700 dark:bg-slate-800"
-                  }`}
-                >
-                  <p className="font-extrabold text-stone-900 dark:text-stone-100">داده واقعی خودم</p>
-                  <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
-                    فایل اکسل را در مرحله «جدول داده‌ها» وارد کنید؛ ستون‌ها را به متغیرها نسبت دهید.
-                  </p>
-                </button>
-              </div>
-            </section>
-          </div>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      type="button"
+                      className={`${btnLight} flex-1 ${p.id === projectId ? "opacity-60" : ""}`}
+                      disabled={p.id === projectId}
+                      onClick={() => switchProject(p.id)}
+                    >
+                      {p.id === projectId ? "پروژه فعلی" : "باز کردن"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteProject(p.id)}
+                      className="flex h-9 w-9 items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400"
+                      title="حذف پروژه"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+
+              <button
+                type="button"
+                onClick={() => setProjectModal(true)}
+                className="flex min-h-28 flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-stone-300 text-stone-400 transition hover:border-indigo-400 hover:text-indigo-600 dark:border-stone-600 dark:text-stone-500"
+              >
+                <FolderPlus className="h-8 w-8" />
+                <span className="text-sm font-extrabold">پروژه جدید</span>
+              </button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button type="button" className={btnSecondary} onClick={openBackupModal}>
+                <Download className="h-4 w-4" />
+                بکاپ پروژه‌ها
+              </button>
+              <input
+                ref={restoreRef}
+                type="file"
+                accept=".json"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) restoreBackup(f);
+                  e.target.value = "";
+                }}
+              />
+              <button type="button" className={btnLight} onClick={() => restoreRef.current?.click()}>
+                <Upload className="h-4 w-4" />
+                بازیابی از بکاپ
+              </button>
+            </div>
+          </section>
         )}
 
-
-        {/* ============ مرحله ۱: متغیرها ============ */}
-        {currentStep === stepIdx("variables") && (
+        {/* ============ مرحله ۱: منبع داده ============ */}
+        {currentStep === stepIdx("source") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">منبع داده</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود.
+            </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setSource("generate")}
+                className={`rounded-2xl border-2 p-4 text-start transition ${
+                  source === "generate"
+                    ? "border-blue-600 bg-blue-100/60 dark:border-blue-500 dark:bg-blue-950/40"
+                    : "border-stone-200 bg-white hover:border-blue-300 dark:border-stone-700 dark:bg-slate-800"
+                }`}
+              >
+                <p className="font-extrabold text-stone-900 dark:text-stone-100">تولید داده تمرینی</p>
+                <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
+                  با رعایت قیود انتخابی شما (معنی‌داری مسیرها، اثر میانجی، R² و...) داده شبیه‌سازی‌شده ساخته می‌شود.
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSource("real")}
+                className={`rounded-2xl border-2 p-4 text-start transition ${
+                  source === "real"
+                    ? "border-blue-600 bg-blue-100/60 dark:border-blue-500 dark:bg-blue-950/40"
+                    : "border-stone-200 bg-white hover:border-blue-300 dark:border-stone-700 dark:bg-slate-800"
+                }`}
+              >
+                <p className="font-extrabold text-stone-900 dark:text-stone-100">داده واقعی خودم</p>
+                <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
+                  فایل اکسل را در مرحله «جدول داده‌ها» وارد کنید؛ ستون‌ها را به متغیرها نسبت دهید.
+                </p>
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* ============ مرحله ۲: متغیرها ============ */}
+        {currentStep === stepIdx("variables") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[2]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">مشخصات متغیرها</h2>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                  نقش ← نام ← جمع‌پذیری (نمره کل) ← زیرمقیاس‌ها. متغیر جمع‌پذیر با نمره کل وارد مدل می‌شود؛ متغیر
-                  غیرجمع‌پذیر به‌صورت زیرمقیاس‌های مستقل با فلش‌های جداگانه وارد می‌شود.
+                  اول زیرمقیاس دارد؟ بعد نمره کل دارد؟ — متغیر جمع‌پذیر با نمره کل وارد مدل می‌شود؛ متغیر غیرجمع‌پذیر
+                  به‌صورت زیرمقیاس‌های مستقل وارد می‌شود.
                 </p>
               </div>
               <button type="button" className={btnLight} onClick={addVar}>
@@ -1515,39 +1834,30 @@ function SemTool() {
                       </button>
                     </div>
 
-                    <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-slate-900/60">
-                      <div className="flex flex-wrap items-center gap-6">
-                        <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">جمع‌پذیر است؟ (نمره کل دارد؟)</span>
-                        <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                          <input type="radio" name={`hasTotal-${v.id}`} checked={v.hasTotal} onChange={() => updateVar(v.id, { hasTotal: true })} className="h-4 w-4 accent-indigo-600" />
-                          بله — نمره کل دارد
-                        </label>
-                        <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                          <input type="radio" name={`hasTotal-${v.id}`} checked={!v.hasTotal} onChange={() => updateVar(v.id, { hasTotal: false })} className="h-4 w-4 accent-indigo-600" />
-                          خیر — زیرمقیاس‌ها مستقل‌اند
-                        </label>
-                      </div>
-                      <div className="mt-2 grid max-w-md grid-cols-2 gap-3">
-                        <div>
-                          <label className={labelCls}>حداقل نمره کل</label>
-                          <input type="number" className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`} value={v.totalMin} disabled={!v.hasTotal} onChange={(e) => updateVar(v.id, { totalMin: Number(e.target.value) })} />
-                        </div>
-                        <div>
-                          <label className={labelCls}>حداکثر نمره کل</label>
-                          <input type="number" className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`} value={v.totalMax} disabled={!v.hasTotal} onChange={(e) => updateVar(v.id, { totalMax: Number(e.target.value) })} />
-                        </div>
-                      </div>
-                    </div>
-
+                    {/* ۱) زیرمقیاس دارد؟ */}
                     <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-slate-900/60">
                       <div className="flex flex-wrap items-center gap-6">
                         <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">زیرمقیاس دارد؟</span>
                         <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                          <input type="radio" name={`hasSub-${v.id}`} checked={v.subscales.length > 0} onChange={() => { if (v.subscales.length === 0) addSubscale(v.id); }} className="h-4 w-4 accent-indigo-600" />
+                          <input
+                            type="radio"
+                            name={`hasSub-${v.id}`}
+                            checked={v.subscales.length > 0}
+                            onChange={() => {
+                              if (v.subscales.length === 0) addSubscale(v.id);
+                            }}
+                            className="h-4 w-4 accent-indigo-600"
+                          />
                           بله
                         </label>
                         <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                          <input type="radio" name={`hasSub-${v.id}`} checked={v.subscales.length === 0} onChange={() => updateVar(v.id, { subscales: [] })} className="h-4 w-4 accent-indigo-600" />
+                          <input
+                            type="radio"
+                            name={`hasSub-${v.id}`}
+                            checked={v.subscales.length === 0}
+                            onChange={() => updateVar(v.id, { subscales: [], hasTotal: true })}
+                            className="h-4 w-4 accent-indigo-600"
+                          />
                           خیر
                         </label>
                       </div>
@@ -1578,12 +1888,6 @@ function SemTool() {
                             <span className="text-center text-[13px] font-black text-violet-800 dark:text-violet-200">{sumMin}</span>
                             <span className="text-center text-[13px] font-black text-violet-800 dark:text-violet-200">{sumMax}</span>
                           </div>
-                          {v.hasTotal &&
-                            (totalMatches ? (
-                              <span className="mt-2 inline-block rounded-full bg-emerald-100 px-3 py-1 text-[12px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">✓ نمره کل با جمع زیرمقیاس‌ها برابر است</span>
-                            ) : (
-                              <span className="mt-2 inline-block rounded-full bg-amber-100 px-3 py-1 text-[12px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">⚠ نمره کل ({v.totalMin} تا {v.totalMax}) با جمع زیرمقیاس‌ها ({sumMin} تا {sumMax}) برابر نیست</span>
-                            ))}
 
                           <button type="button" className={`${btnLight} mt-3`} onClick={() => addSubscale(v.id)}>
                             <Plus className="h-4 w-4" />
@@ -1591,9 +1895,45 @@ function SemTool() {
                           </button>
                         </>
                       ) : (
-                        <p className={`${tinyCls} mt-2`}>بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) در نظر گرفته می‌شود.</p>
+                        <p className={`${tinyCls} mt-2`}>
+                          بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) — نمره کل همان خود متغیر است و تنظیمات نمره کل
+                          لازم نیست.
+                        </p>
                       )}
                     </div>
+
+                    {/* ۲) نمره کل دارد؟ — فقط وقتی زیرمقیاس دارد */}
+                    {v.subscales.length > 0 && (
+                      <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-slate-900/60">
+                        <div className="flex flex-wrap items-center gap-6">
+                          <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">جمع‌پذیر است؟ (نمره کل دارد؟)</span>
+                          <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
+                            <input type="radio" name={`hasTotal-${v.id}`} checked={v.hasTotal} onChange={() => updateVar(v.id, { hasTotal: true })} className="h-4 w-4 accent-indigo-600" />
+                            بله — نمره کل دارد
+                          </label>
+                          <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
+                            <input type="radio" name={`hasTotal-${v.id}`} checked={!v.hasTotal} onChange={() => updateVar(v.id, { hasTotal: false })} className="h-4 w-4 accent-indigo-600" />
+                            خیر — زیرمقیاس‌ها مستقل‌اند
+                          </label>
+                        </div>
+                        <div className="mt-2 grid max-w-md grid-cols-2 gap-3">
+                          <div>
+                            <label className={labelCls}>حداقل نمره کل</label>
+                            <input type="number" className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`} value={v.totalMin} disabled={!v.hasTotal} onChange={(e) => updateVar(v.id, { totalMin: Number(e.target.value) })} />
+                          </div>
+                          <div>
+                            <label className={labelCls}>حداکثر نمره کل</label>
+                            <input type="number" className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`} value={v.totalMax} disabled={!v.hasTotal} onChange={(e) => updateVar(v.id, { totalMax: Number(e.target.value) })} />
+                          </div>
+                        </div>
+                        {v.hasTotal &&
+                          (totalMatches ? (
+                            <span className="mt-2 inline-block rounded-full bg-emerald-100 px-3 py-1 text-[12px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">✓ نمره کل با جمع زیرمقیاس‌ها برابر است</span>
+                          ) : (
+                            <span className="mt-2 inline-block rounded-full bg-amber-100 px-3 py-1 text-[12px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">⚠ نمره کل ({v.totalMin} تا {v.totalMax}) با جمع زیرمقیاس‌ها ({sumMin} تا {sumMax}) برابر نیست</span>
+                          ))}
+                      </div>
+                    )}
 
                     {source === "real" && (
                       <div className="mt-3 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/50 p-3 dark:border-indigo-800 dark:bg-indigo-950/30">
@@ -1632,9 +1972,9 @@ function SemTool() {
           </section>
         )}
 
-        {/* ============ مرحله ۲: ترسیم مدل ============ */}
+        {/* ============ مرحله ۳: ترسیم مدل ============ */}
         {currentStep === stepIdx("draw") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[2]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[3]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">ترسیم مدل</h2>
@@ -1698,9 +2038,9 @@ function SemTool() {
         )}
 
 
-        {/* ============ مرحله ۳: قیود تولید ============ */}
+        {/* ============ مرحله ۴: قیود تولید ============ */}
         {currentStep === stepIdx("constraints") && source === "generate" && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[3]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">قیود تولید داده</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار
@@ -1728,10 +2068,7 @@ function SemTool() {
             </div>
 
             <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">قیود مسیرهای مستقیم</h3>
-            <p className={tinyCls}>
-              برای هر جفت متغیر (شامل همه فلش‌های بین گره‌هایشان) مشخص کنید معنی‌دار باشد، نباشد یا مهم نباشد؛ بازه β
-              اختیاری است.
-            </p>
+            <p className={tinyCls}>برای هر جفت متغیر مشخص کنید معنی‌دار باشد، نباشد یا مهم نباشد؛ بازه β اختیاری است.</p>
             <div className="tool-table-wrap mt-3">
               <table className="tool-table" style={{ minWidth: 640 }}>
                 <thead>
@@ -1885,15 +2222,15 @@ function SemTool() {
           </section>
         )}
 
-        {/* ============ مرحله ۴: جدول داده‌ها ============ */}
+        {/* ============ مرحله ۵: جدول داده‌ها ============ */}
         {currentStep === stepIdx("data") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">جدول داده‌ها</h2>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
                   {source === "generate"
-                    ? "داده تولیدشده را می‌توانید ویرایش کنید؛ ایمپورت و اکسپورت با اکسل انجام می‌شود."
+                    ? "داده‌ها در مرحله «تشخیص» تولید می‌شوند؛ اینجا می‌توانید داده موجود را ویرایش یا ایمپورت/اکسپورت کنید."
                     : "فایل اکسل داده‌های واقعی را وارد کنید یا از قالب داده استفاده کنید."}
                 </p>
               </div>
@@ -1924,30 +2261,6 @@ function SemTool() {
               </div>
             </div>
 
-            <div className="mt-4 flex flex-wrap items-center gap-3">
-              {source === "generate" && (
-                <button type="button" className={btnPrimary} onClick={generate}>
-                  <Play className="h-4 w-4" />
-                  تولید داده و تحلیل
-                </button>
-              )}
-              <button type="button" className={btnSecondary} onClick={() => analyze(undefined, undefined, undefined, true, true)}>
-                <RefreshCw className="h-4 w-4" />
-                اجرای تحلیل روی داده فعلی
-              </button>
-              <span
-                className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
-                  status.kind === "ok"
-                    ? "font-bold text-emerald-700 dark:text-emerald-400"
-                    : status.kind === "err"
-                      ? "font-bold text-red-700 dark:text-red-400"
-                      : "text-stone-400 dark:text-stone-500"
-                }`}
-              >
-                {status.kind === "ok" ? "✓" : status.kind === "err" ? "✗" : "•"} {status.text}
-              </span>
-            </div>
-
             {rows.length > 0 ? (
               <div className="tool-table-wrap tool-table-scroll mt-4">
                 <table className="tool-table" style={{ minWidth: Math.max(720, columns.length * 90) }}>
@@ -1975,16 +2288,105 @@ function SemTool() {
               </div>
             ) : (
               <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-                هنوز داده‌ای وجود ندارد. «تولید داده و تحلیل» را بزنید یا فایل اکسل وارد کنید.
+                هنوز داده‌ای وجود ندارد؛ در مرحله «تشخیص» داده تولید کنید یا فایل اکسل وارد کنید.
               </div>
             )}
           </section>
         )}
 
+        {/* ============ مرحله ۶: تشخیص ============ */}
+        {currentStep === stepIdx("diagnose") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">تشخیص</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              خلاصه وضعیت مدل را مرور کنید و تصمیم بگیرید؛ تولید داده یا اجرای تحلیل فقط از اینجا انجام می‌شود.
+            </p>
 
-        {/* ============ مرحله ۵: بررسی پیش‌فرض‌ها ============ */}
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[11px] font-bold text-stone-400 dark:text-stone-500">منبع داده</p>
+                <p className="mt-1 font-extrabold text-stone-800 dark:text-stone-200">
+                  {source === "generate" ? "تولید داده تمرینی" : "داده واقعی خودم"}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[11px] font-bold text-stone-400 dark:text-stone-500">متغیرها / گره‌ها</p>
+                <p className="mt-1 font-extrabold text-stone-800 dark:text-stone-200">
+                  {modelVars.length} متغیر · {modelNodes.length} گره
+                </p>
+              </div>
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[11px] font-bold text-stone-400 dark:text-stone-500">فلش‌های فعال</p>
+                <p className="mt-1 font-extrabold text-stone-800 dark:text-stone-200">
+                  {modelArrows.length} از {allArrows.length}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[11px] font-bold text-stone-400 dark:text-stone-500">داده</p>
+                <p className="mt-1 font-extrabold text-stone-800 dark:text-stone-200">
+                  {rows.length} ردیف · {columns.length} ستون {source === "generate" && `· n=${n}`}
+                </p>
+              </div>
+            </div>
+
+            {rows.length > 0 && (
+              <div className="mt-3 rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">دامنه متغیرها</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {modelVars.map((v) => (
+                    <span key={v.id} className="rounded-full bg-stone-100 px-3 py-1 text-[11px] font-bold text-stone-600 dark:bg-slate-900 dark:text-stone-400">
+                      {v.name}
+                      {v.subscales.length
+                        ? v.hasTotal
+                          ? ` (کل ${v.totalMin}-${v.totalMax})`
+                          : ` (${v.subscales.map((s) => s.min + "-" + s.max).join("، ")})`
+                        : ` (${v.totalMin}-${v.totalMax})`}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="mt-5 flex flex-wrap items-center gap-3">
+              {source === "generate" && (
+                <button type="button" className={btnPrimary} onClick={generate}>
+                  <Play className="h-4 w-4" />
+                  تولید داده و تحلیل
+                </button>
+              )}
+              <button type="button" className={btnSecondary} onClick={() => analyze(undefined, undefined, undefined, true, true)}>
+                <RefreshCw className="h-4 w-4" />
+                اجرای تحلیل
+              </button>
+              <span
+                className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
+                  status.kind === "ok"
+                    ? "font-bold text-emerald-700 dark:text-emerald-400"
+                    : status.kind === "err"
+                      ? "font-bold text-red-700 dark:text-red-400"
+                      : "text-stone-400 dark:text-stone-500"
+                }`}
+              >
+                {status.kind === "ok" ? "✓" : status.kind === "err" ? "✗" : "•"} {status.text}
+              </span>
+            </div>
+            {source === "generate" && !rows.length && (
+              <p className={`${tinyCls} mt-2`}>
+                هنوز داده‌ای تولید نشده است؛ با «تولید داده و تحلیل» داده ساخته و تحلیل اجرا می‌شود.
+              </p>
+            )}
+            {source === "real" && !rows.length && (
+              <p className={`${tinyCls} mt-2`}>
+                هنوز داده‌ای وارد نشده است؛ به مرحله «جدول داده‌ها» برگردید و فایل اکسل را وارد کنید.
+              </p>
+            )}
+          </section>
+        )}
+
+
+        {/* ============ مرحله ۷: بررسی پیش‌فرض‌ها ============ */}
         {currentStep === stepIdx("assumptions") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[7]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">بررسی پیش‌فرض‌های تحلیل</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود.
@@ -1992,8 +2394,8 @@ function SemTool() {
             {!analysisValid ? (
               <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
                 {analysis
-                  ? "مدل تغییر کرده است؛ برای به‌روزرسانی نتایج، دوباره «اجرای تحلیل» را بزنید."
-                  : "بعد از تولید یا ورود داده، نتایج این بخش نمایش داده می‌شود."}
+                  ? "مدل تغییر کرده است؛ از مرحله «تشخیص» دوباره تحلیل را اجرا کنید."
+                  : "ابتدا از مرحله «تشخیص» داده تولید یا تحلیل را اجرا کنید."}
               </div>
             ) : (
               <div className="mt-4 space-y-6">
@@ -2196,16 +2598,16 @@ function SemTool() {
           </section>
         )}
 
-        {/* ============ مرحله ۶: یافته‌های توصیفی ============ */}
+        {/* ============ مرحله ۸: یافته‌های توصیفی (درختی) ============ */}
         {currentStep === stepIdx("descriptive") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های توصیفی</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-              آمار توصیفی نمرات کل / گره‌های مدل: تعداد، میانگین، انحراف معیار، کمینه، بیشینه، کجی و کشیدگی.
+              آمار توصیفی به‌صورت درخت‌واری: نمره کل هر متغیر و زیرمقیاس‌های آن در زیرش.
             </p>
             {!descriptive ? (
               <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-                ابتدا داده تولید یا وارد کنید و تحلیل را اجرا کنید.
+                ابتدا از مرحله «تشخیص» تحلیل را اجرا کنید.
               </div>
             ) : (
               <div className="tool-table-wrap mt-3">
@@ -2224,15 +2626,15 @@ function SemTool() {
                   </thead>
                   <tbody>
                     {descriptive.map((d, i) => (
-                      <tr key={i}>
-                        <td style={{ fontWeight: 900 }}>{d.label}</td>
-                        <td className="number-cell">{d.n}</td>
-                        <td className="number-cell">{fmt(d.mean)}</td>
-                        <td className="number-cell">{fmt(d.sd)}</td>
-                        <td className="number-cell">{Number.isFinite(d.min) ? fmt(d.min) : "-"}</td>
-                        <td className="number-cell">{Number.isFinite(d.max) ? fmt(d.max) : "-"}</td>
-                        <td className="number-cell">{fmt(d.skew)}</td>
-                        <td className="number-cell">{fmt(d.kurt)}</td>
+                      <tr key={i} className={d.bold ? "bg-stone-50 font-bold dark:bg-slate-900" : ""}>
+                        <td style={{ fontWeight: d.bold ? 900 : 600, paddingInlineStart: d.indent ? "2rem" : undefined }}>{d.label}</td>
+                        <td className="number-cell">{d.s.n}</td>
+                        <td className="number-cell">{Number.isFinite(d.s.mean) ? fmt(d.s.mean) : "-"}</td>
+                        <td className="number-cell">{Number.isFinite(d.s.sd) ? fmt(d.s.sd) : "-"}</td>
+                        <td className="number-cell">{Number.isFinite(d.s.min) ? fmt(d.s.min) : "-"}</td>
+                        <td className="number-cell">{Number.isFinite(d.s.max) ? fmt(d.s.max) : "-"}</td>
+                        <td className="number-cell">{Number.isFinite(d.s.skew) ? fmt(d.s.skew) : "-"}</td>
+                        <td className="number-cell">{Number.isFinite(d.s.kurt) ? fmt(d.s.kurt) : "-"}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -2242,9 +2644,9 @@ function SemTool() {
           </section>
         )}
 
-        {/* ============ مرحله ۷: دیاگرام مدل ============ */}
+        {/* ============ مرحله ۹: دیاگرام مدل ============ */}
         {currentStep === stepIdx("diagram") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[7]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">دیاگرام مدل</h2>
@@ -2263,17 +2665,16 @@ function SemTool() {
           </section>
         )}
 
-
-        {/* ============ مرحله ۸: یافته‌های استنباطی ============ */}
+        {/* ============ مرحله ۱۰: یافته‌های استنباطی ============ */}
         {currentStep === stepIdx("inferential") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[2]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های استنباطی</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               ابتدا شاخص‌های برازش مدل، سپس ضرایب مسیر، اثرات و R².
             </p>
             {!analysisValid ? (
               <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-                ابتدا داده تولید یا وارد کنید و تحلیل را اجرا کنید.
+                ابتدا از مرحله «تشخیص» تحلیل را اجرا کنید.
               </div>
             ) : (
               <div className="mt-4 space-y-6">
@@ -2359,8 +2760,7 @@ function SemTool() {
                     </div>
                   </div>
                   <p className={tinyCls}>
-                    هر مسیر میانجی جداگانه و «کل اثر غیرمستقیم» مجموع همه مسیرها. فاصله اطمینان ۹۵٪ با بوت‌استرپ؛ عدم عبور
-                    از صفر = معناداری در سطح ۰/۰۵.
+                    هر مسیر میانجی جداگانه و «کل اثر غیرمستقیم» مجموع همه مسیرها. فاصله اطمینان ۹۵٪ با بوت‌استرپ.
                   </p>
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
@@ -2398,7 +2798,7 @@ function SemTool() {
                   <h3 className="font-extrabold text-stone-800 dark:text-stone-200">R² گره‌های درون‌زای مدل</h3>
                   <p className={tinyCls}>
                     «گره» یعنی هر واحد واردشده در مدل: متغیر جمع‌پذیر با نمره کل یک گره است، و در متغیرهای غیرجمع‌پذیر هر
-                    زیرمقیاس مستقل یک گره جدا می‌شود. R² هر گره یعنی درصد واریانس آن که توسط پیش‌بین‌هایش تبیین می‌شود.
+                    زیرمقیاس مستقل یک گره جدا. R² هر گره یعنی درصد واریانس آن که توسط پیش‌بین‌هایش تبیین می‌شود.
                   </p>
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
@@ -2487,9 +2887,10 @@ function SemTool() {
           </section>
         )}
 
-        {/* ============ مرحله ۹: آلفای کرونباخ ============ */}
+
+        {/* ============ مرحله ۱۱: آلفای کرونباخ ============ */}
         {currentStep === stepIdx("alpha") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[7]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[3]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">محاسبه آلفای کرونباخ</h2>
@@ -2518,7 +2919,7 @@ function SemTool() {
               <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
                 {analysisValid
                   ? "برای محاسبه آلفا، متغیرها باید حداقل ۲ زیرمقیاس/گویه داشته باشند."
-                  : "ابتدا داده تولید یا وارد کنید و تحلیل را اجرا کنید."}
+                  : "ابتدا از مرحله «تشخیص» تحلیل را اجرا کنید."}
               </div>
             ) : (
               <div className="mt-4 space-y-4">
@@ -2562,8 +2963,8 @@ function SemTool() {
                   </div>
                 ))}
                 <div className="rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 p-4 text-[13px] text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300">
-                  برای تحلیل کامل‌تر آلفا (گویه‌به‌گویه، همبستگی گویه-کل، آلفا اگر گویه حذف شود، تولید داده مستقل) از
-                  ابزار جداگانه استفاده کنید:{" "}
+                  برای تحلیل کامل‌تر آلفا (گویه‌به‌گویه، همبستگی گویه-کل، آلفا اگر گویه حذف شود) از ابزار جداگانه استفاده
+                  کنید:{" "}
                   <a href="/tools/alpha" className="font-black underline">
                     صفحه اندازه‌گیری و تحلیل آلفای کرونباخ ←
                   </a>
@@ -2573,25 +2974,20 @@ function SemTool() {
           </section>
         )}
 
-        {/* ============ مرحله ۱۰: نگارش گزارش ============ */}
+        {/* ============ مرحله ۱۲: نگارش گزارش ============ */}
         {currentStep === stepIdx("report") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">نگارش گزارش</h2>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                  گزارش کامل تحلیل به‌صورت متن آماده برای ورد. می‌توانید کپی کنید یا به‌صورت docx / txt دانلود کنید؛
-                  اکسل کامل هم شامل شیت‌های داده، نمرات کل و گزارش است.
+                  گزارش کامل تحلیل به‌صورت متن آماده. می‌توانید کپی کنید یا docx / txt دانلود کنید.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button type="button" className={btnPrimary} onClick={exportExcel}>
-                  <Download className="h-4 w-4" />
-                  دانلود اکسل کامل
-                </button>
-                <button type="button" className={btnLight} onClick={exportDocx}>
+                <button type="button" className={btnPrimary} onClick={exportDocx}>
                   <FileText className="h-4 w-4" />
-                  گزارش docx
+                  دانلود گزارش docx
                 </button>
                 <button type="button" className={btnLight} onClick={exportTxt}>
                   <FileText className="h-4 w-4" />
@@ -2615,30 +3011,81 @@ function SemTool() {
           </section>
         )}
 
-        {/* ---------- دکمه‌های قبلی / بعدی ---------- */}
-        <div className="mt-6 flex items-center justify-between gap-3 border-t border-stone-200 pt-4 dark:border-stone-700">
-          <button
-            type="button"
-            className={btnLight}
-            disabled={currentStep === 0}
-            onClick={() => setActiveStep((s) => Math.max(0, s - 1))}
-          >
-            <ChevronRight className="h-4 w-4" />
-            مرحله قبلی
-          </button>
-          <span className="text-[12px] font-bold text-stone-400 dark:text-stone-500">
-            مرحله {currentStep + 1} از {steps.length}
+        {/* ============ مرحله ۱۳: ذخیره ============ */}
+        {currentStep === stepIdx("save") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">ذخیره</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              پروژه به‌صورت خودکار در مرورگر ذخیره می‌شود. برای انتقال یا بکاپ، فایل بکاپ بگیرید؛ خروجی‌های نهایی را هم
+              می‌توانید از اینجا دانلود کنید.
+            </p>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">بکاپ پروژه‌ها</p>
+                <p className={`${tinyCls} mt-1`}>
+                  بکاپ کامل (همه پروژه‌ها) یا فقط همین پروژه را با نام دلخواه دانلود کنید؛ تاریخ و ساعت خودکار در نام
+                  پیش‌فرض می‌آید. با «بازیابی» می‌توانید دوباره بارگذاری کنید.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" className={btnSecondary} onClick={openBackupModal}>
+                    <Download className="h-4 w-4" />
+                    بکاپ پروژه‌ها
+                  </button>
+                  <button type="button" className={btnLight} onClick={() => restoreRef.current?.click()}>
+                    <Upload className="h-4 w-4" />
+                    بازیابی از بکاپ
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">خروجی‌های نهایی</p>
+                <p className={`${tinyCls} mt-1`}>
+                  اکسل کامل (داده، نمرات کل، گزارش)، گزارش docx و txt، و قالب داده برای پر کردن مجدد.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" className={btnPrimary} onClick={exportExcel}>
+                    <Download className="h-4 w-4" />
+                    دانلود اکسل کامل
+                  </button>
+                  <button type="button" className={btnLight} onClick={downloadTemplate}>
+                    <FileSpreadsheet className="h-4 w-4" />
+                    قالب داده
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-dashed border-indigo-300 bg-indigo-50/60 p-4 dark:border-indigo-800 dark:bg-indigo-950/30">
+              <div>
+                <p className="text-sm font-extrabold text-indigo-800 dark:text-indigo-300">شروع دوباره؟</p>
+                <p className={`${tinyCls} mt-1 text-indigo-700 dark:text-indigo-400`}>
+                  برای شروع یک پروژه جدید از صفر، پروژه جدید بسازید — به مرحله اول برمی‌گردد.
+                </p>
+              </div>
+              <button type="button" className={btnSecondary} onClick={() => setProjectModal(true)}>
+                <FolderPlus className="h-4 w-4" />
+                پروژه جدید
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* ---------- راهنمای رنگ استپر ---------- */}
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-4 text-[11px] font-bold text-stone-400 dark:text-stone-500">
+          <span className="flex items-center gap-1.5">
+            <span className="h-3 w-3 rounded-full bg-emerald-500" /> کامل شده
           </span>
-          {currentStep < steps.length - 1 ? (
-            <button type="button" className={btnPrimary} onClick={goNext}>
-              مرحله بعدی
-              <ChevronLeft className="h-4 w-4" />
-            </button>
-          ) : (
-            <button type="button" className={btnPrimary} onClick={() => setActiveStep(0)}>
-              بازگشت به ابتدا
-            </button>
-          )}
+          <span className="flex items-center gap-1.5">
+            <span className="h-3 w-3 rounded-full bg-amber-400" /> در انتظار
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="h-3 w-3 rounded-full bg-red-400" /> نیازمند تحلیل
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span className="h-3 w-3 rounded-full bg-indigo-600" /> مرحله فعلی
+          </span>
         </div>
       </div>
 
@@ -2679,7 +3126,7 @@ function SemTool() {
           >
             <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">پروژه جدید</h3>
             <p className="mt-1 text-[12px] text-stone-500 dark:text-stone-400">
-              نام پروژه را وارد کنید؛ با متغیرهای پیش‌فرض شروع می‌شود.
+              نام پروژه را وارد کنید؛ با متغیرهای پیش‌فرض شروع می‌شود و به مرحله اول برمی‌گردید.
             </p>
             <input
               className={`${inputCls} mt-3`}
@@ -2718,8 +3165,8 @@ function SemTool() {
           >
             <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">بکاپ پروژه‌ها</h3>
             <p className="mt-1 text-[12px] text-stone-500 dark:text-stone-400">
-              بکاپ شامل متغیرها، فلش‌ها، قیود و داده همه پروژه‌ها (یا فقط همین پروژه) است. نام فایل را وارد کنید؛ تاریخ و
-              ساعت به‌صورت خودکار در نام پیش‌فرض آمده است.
+              بکاپ شامل متغیرها، فلش‌ها، قیود و داده همه پروژه‌ها (یا فقط همین پروژه) است. تاریخ و ساعت به‌صورت خودکار در
+              نام پیش‌فرض آمده است.
             </p>
 
             <div className="mt-3 space-y-2">
@@ -2768,49 +3215,6 @@ function SemTool() {
 
       {/* ---------- مودال نتیجه ---------- */}
       {modal && <ResultModal ok={modal.ok} lines={modal.lines} onClose={() => setModal(null)} />}
-
-      {/* ---------- فوتر ثابت خروجی ---------- */}
-      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-stone-200 bg-white/95 shadow-[0_-6px_24px_rgba(24,32,51,0.08)] backdrop-blur dark:border-stone-700 dark:bg-slate-900/95">
-        <div className="mx-auto flex max-w-[1280px] flex-col items-center gap-1.5 px-4 py-2.5">
-          <p className="text-center text-[12px] leading-5 text-stone-500 dark:text-stone-400">
-            برای دریافت خروجی مورد نظر، روی دکمه مربوطه کلیک کنید؛ اکسل کامل شامل شیت‌های «داده»، «نمرات کل / گره‌ها» و
-            «گزارش» است. بکاپ پروژه‌ها از مرحله «پروژه و منبع داده» در دسترس است.
-          </p>
-          <div className="flex flex-wrap items-center justify-center gap-2">
-            <button type="button" className={btnPrimary} onClick={exportExcel}>
-              <Download className="h-4 w-4" />
-              دانلود اکسل کامل
-            </button>
-            <button type="button" className={btnSecondary} onClick={downloadTemplate}>
-              <FileSpreadsheet className="h-4 w-4" />
-              دانلود قالب داده
-            </button>
-            <button type="button" className={btnLight} onClick={exportDocx}>
-              <FileText className="h-4 w-4" />
-              گزارش docx
-            </button>
-            <button type="button" className={btnLight} onClick={exportTxt}>
-              <FileText className="h-4 w-4" />
-              گزارش txt
-            </button>
-            <button type="button" className={btnLight} onClick={copyReport}>
-              <Copy className="h-4 w-4" />
-              کپی کل گزارش
-            </button>
-            <button type="button" className={btnLight} onClick={openBackupModal}>
-              <Download className="h-4 w-4" />
-              بکاپ پروژه‌ها
-            </button>
-          </div>
-          <div aria-live="polite" className="min-h-5">
-            {footerMsg && (
-              <span className="rounded-full bg-emerald-100 px-3 py-0.5 text-[12px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-                ✓ {footerMsg}
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

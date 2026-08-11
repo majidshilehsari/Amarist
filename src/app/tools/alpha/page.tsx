@@ -8,6 +8,7 @@ import {
   FileText,
   Play,
   Plus,
+  RefreshCw,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import { Document, Packer, Paragraph, TextRun } from "docx";
 import { fmt, mean, sampleStd } from "@/lib/statistics";
 import { cronbachAlpha, pearson, correlationMatrixWithP } from "@/lib/sem-stats";
 import ToolHeader from "@/components/tool-header";
+import ResultModal from "@/components/result-modal";
 
 // ------------------------------------------------------------
 // ثابت‌های استایل
@@ -25,7 +27,7 @@ const inputCls =
   "w-full rounded-xl border border-stone-300 bg-[#fbfdff] px-3 py-2 text-sm outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-100";
 const labelCls = "mb-1 block text-[12px] font-bold text-stone-600 dark:text-stone-300";
 const tinyCls = "mt-1 text-[11px] leading-5 text-stone-400 dark:text-stone-500";
-const cardCls = "rounded-2xl border p-5 shadow-sm sm:p-6";
+const cardCls = "rounded-2xl p-5 shadow-sm sm:p-6";
 const btnPrimary =
   "inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-extrabold text-white shadow-md shadow-indigo-600/20 transition hover:bg-indigo-500 active:translate-y-0 disabled:opacity-50";
 const btnSecondary =
@@ -40,13 +42,38 @@ const sectionTones = [
   "border-violet-300 bg-violet-50/50 dark:border-violet-900 dark:bg-slate-900",
 ];
 
-type Questionnaire = {
-  id: number;
+/** هر متغیر (از صفحه SEM آمده و نامش قفل است) با گویه‌هایش؛ هر گویه دامنه نمره مستقل دارد */
+type AlphaScale = {
+  varId: number;
   name: string;
-  itemCount: number;
-  itemMin: number;
-  itemMax: number;
+  items: { min: number; max: number }[];
 };
+
+/** خواندن متغیرهای تعریف‌شده در صفحه SEM از localStorage */
+function loadScalesFromSem(): AlphaScale[] {
+  try {
+    const raw = localStorage.getItem("amarist-sem-vars");
+    if (raw) {
+      const vars = JSON.parse(raw) as { id: number; name: string }[];
+      if (Array.isArray(vars) && vars.length) {
+        return vars.map((v) => ({
+          varId: v.id,
+          name: v.name,
+          items: Array.from({ length: 6 }, () => ({ min: 1, max: 5 })),
+        }));
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return [
+    {
+      varId: 0,
+      name: "متغیر نمونه",
+      items: Array.from({ length: 8 }, () => ({ min: 1, max: 5 })),
+    },
+  ];
+}
 
 function alphaInterpretation(a: number): { label: string; ok: boolean } {
   if (!Number.isFinite(a)) return { label: "نامشخص", ok: false };
@@ -104,9 +131,7 @@ function Cell({ value, onCommit }: { value: number | null; onCommit: (v: number 
 
 export default function AlphaTool() {
   const [source, setSource] = useState<"generate" | "real">("generate");
-  const [questionnaires, setQuestionnaires] = useState<Questionnaire[]>([
-    { id: 0, name: "پرسشنامه نمونه", itemCount: 8, itemMin: 1, itemMax: 5 },
-  ]);
+  const [scales, setScales] = useState<AlphaScale[]>(() => loadScalesFromSem());
   const [n, setN] = useState("120");
   const [alphaMin, setAlphaMin] = useState("0.7");
   const [alphaMax, setAlphaMax] = useState("0.9");
@@ -116,24 +141,36 @@ export default function AlphaTool() {
     text: "هنوز داده‌ای تولید نشده است.",
     kind: "",
   });
+  const [tick, setTick] = useState(0);
+  const [modal, setModal] = useState<{ ok: boolean; lines: string[] } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const allItemCount = questionnaires.reduce((s, q) => s + q.itemCount, 0);
+  const totalItems = scales.reduce((s, q) => s + q.items.length, 0);
 
-  const updateQ = (id: number, patch: Partial<Questionnaire>) => {
-    setQuestionnaires((prev) => prev.map((q) => (q.id === id ? { ...q, ...patch } : q)));
+  const addItem = (varId: number) => {
+    setScales((prev) =>
+      prev.map((q) =>
+        q.varId === varId
+          ? { ...q, items: [...q.items, { min: q.items[0]?.min ?? 1, max: q.items[0]?.max ?? 5 }] }
+          : q
+      )
+    );
   };
 
-  const addQ = () => {
-    const id = questionnaires.length ? Math.max(...questionnaires.map((q) => q.id)) + 1 : 0;
-    setQuestionnaires((prev) => [
-      ...prev,
-      { id, name: `پرسشنامه ${prev.length + 1}`, itemCount: 6, itemMin: 1, itemMax: 5 },
-    ]);
+  const removeItem = (varId: number, idx: number) => {
+    setScales((prev) =>
+      prev.map((q) => (q.varId === varId ? { ...q, items: q.items.filter((_, i) => i !== idx) } : q))
+    );
   };
 
-  const removeQ = (id: number) => {
-    setQuestionnaires((prev) => prev.filter((q) => q.id !== id));
+  const setItemRange = (varId: number, idx: number, field: "min" | "max", value: number) => {
+    setScales((prev) =>
+      prev.map((q) =>
+        q.varId === varId
+          ? { ...q, items: q.items.map((it, i) => (i === idx ? { ...it, [field]: value } : it)) }
+          : q
+      )
+    );
   };
 
   // ---------- تولید داده ----------
@@ -146,28 +183,22 @@ export default function AlphaTool() {
       if (!Number.isFinite(aMin) || !Number.isFinite(aMax) || aMin >= aMax || aMin < 0 || aMax > 1) {
         throw new Error("بازه آلفای هدف معتبر نیست (بین ۰ تا ۱ و حداقل کوچک‌تر از حداکثر).");
       }
-      if (allItemCount === 0) throw new Error("حداقل یک پرسشنامه با تعداد گویه تعریف کنید.");
+      if (totalItems === 0) throw new Error("حداقل یک متغیر با گویه تعریف کنید.");
 
       const cols: number[][] = [];
       const colNames: string[] = [];
-      // لامبدا از سقف بازه گرفته می‌شود تا گرد شدن به اعداد صحیح، آلفا را از بازه بیرون نبرد
       const targetAlpha = Math.min(0.97, aMax + 0.05);
 
-      for (const q of questionnaires) {
-        const k = q.itemCount;
-        if (k < 2) throw new Error(`پرسشنامه «${q.name}» باید حداقل ۲ گویه داشته باشد.`);
-        // بار عاملی معادل برای رسیدن به آلفای هدف (مدل tau-equivalent)
-        let lam = Math.sqrt(targetAlpha / (k - (k - 1) * targetAlpha));
-        lam = Math.max(0.35, Math.min(0.95, lam));
-        const mn = q.itemMin;
-        const mx = q.itemMax;
-        const mid = (mn + mx) / 2;
-        const sd = Math.max(0.6, (mx - mn) / 5);
+      for (const q of scales) {
+        const k = q.items.length;
+        if (k < 2) throw new Error(`متغیر «${q.name}» باید حداقل ۲ گویه داشته باشد.`);
+        const lam = Math.sqrt(targetAlpha / (k - (k - 1) * targetAlpha));
+        const lamC = Math.max(0.35, Math.min(0.95, lam));
 
         let attempt = 0;
         let alpha = NaN;
         let qCols: number[][] = [];
-        const maxTries = 200;
+        const maxTries = 250;
         do {
           const latent = Array.from({ length: nn }, () => {
             let u = 0;
@@ -176,30 +207,25 @@ export default function AlphaTool() {
             while (v === 0) v = Math.random();
             return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
           });
-          qCols = Array.from({ length: k }, () =>
-            latent.map(
-              (z) =>
-                Math.round(
-                  Math.min(
-                    mx,
-                    Math.max(mn, mid + sd * (lam * z + Math.sqrt(1 - lam * lam) * (() => {
-                      let u = 0;
-                      let v = 0;
-                      while (u === 0) u = Math.random();
-                      while (v === 0) v = Math.random();
-                      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-                    })()))
-                  )
-                )
-            )
-          );
+          qCols = q.items.map((it) => {
+            const mid = (it.min + it.max) / 2;
+            const sd = Math.max(0.6, (it.max - it.min) / 5);
+            return latent.map((z) => {
+              let u = 0;
+              let v = 0;
+              while (u === 0) u = Math.random();
+              while (v === 0) v = Math.random();
+              const e = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+              return Math.round(Math.min(it.max, Math.max(it.min, mid + sd * (lamC * z + Math.sqrt(1 - lamC * lamC) * e))));
+            });
+          });
           alpha = cronbachAlpha(qCols);
           attempt++;
         } while ((!Number.isFinite(alpha) || alpha < aMin || alpha > aMax) && attempt < maxTries);
 
         if (!Number.isFinite(alpha) || alpha < aMin || alpha > aMax) {
           throw new Error(
-            `برای پرسشنامه «${q.name}» با ${k} گویه در بازه آلفای ${aMin} تا ${aMax} داده قابل قبول پیدا نشد؛ تعداد گویه‌ها را بیشتر کنید یا بازه را بازتر کنید.`
+            `برای متغیر «${q.name}» با ${k} گویه در بازه آلفای ${aMin} تا ${aMax} داده قابل قبول پیدا نشد؛ تعداد گویه‌ها را بیشتر کنید یا بازه را بازتر کنید.`
           );
         }
         qCols.forEach((c, i) => {
@@ -208,16 +234,16 @@ export default function AlphaTool() {
         });
       }
 
-      const dataRows: (number | null)[][] = Array.from({ length: nn }, (_, i) =>
-        cols.map((c) => c[i])
-      );
+      const dataRows: (number | null)[][] = Array.from({ length: nn }, (_, i) => cols.map((c) => c[i]));
       setColumns(colNames);
       setRows(dataRows);
-      setStatus({ text: `داده تولید شد: ${nn} نفر × ${allItemCount} گویه.`, kind: "ok" });
+      setStatus({ text: `داده تولید شد: ${nn} نفر × ${totalItems} گویه.`, kind: "ok" });
+      setModal({ ok: true, lines: [`داده تولید شد: ${nn} نفر × ${totalItems} گویه.`, "برای مشاهده جزئیات آلفا به بخش ۴ بروید."] });
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
+      setModal({ ok: false, lines: [(err as Error).message] });
     }
-  }, [n, alphaMin, alphaMax, questionnaires, allItemCount]);
+  }, [n, alphaMin, alphaMax, scales, totalItems]);
 
   const generateRef = useRef(generate);
   useEffect(() => {
@@ -227,6 +253,23 @@ export default function AlphaTool() {
     const t = setTimeout(() => generateRef.current(), 80);
     return () => clearTimeout(t);
   }, []);
+
+  // ---------- محاسبه آلفا (دکمه) ----------
+  const calculate = useCallback(() => {
+    setTick((t) => t + 1);
+    if (!rows.length) {
+      setStatus({ text: "داده‌ای برای محاسبه وجود ندارد.", kind: "err" });
+      setModal({ ok: false, lines: ["داده‌ای برای محاسبه وجود ندارد؛ ابتدا تولید کنید یا فایل اکسل وارد کنید."] });
+      return;
+    }
+    const res = computeResults(rows, columns, source, scales);
+    const lines = res.map(
+      (g) => `${g.name}: آلفا=${fmt(g.alpha)} (${g.interp.label})${g.k >= 2 ? ` | گویه‌ها=${g.k}` : ""}`
+    );
+    setModal({ ok: true, lines });
+    setStatus({ text: "آلفای کرونباخ محاسبه شد.", kind: "ok" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, columns, source, scales, tick]);
 
   // ---------- ایمپورت ----------
   const handleImport = async (file: File) => {
@@ -269,27 +312,30 @@ export default function AlphaTool() {
   };
 
   // ---------- نتایج ----------
-  const results = useMemo(() => {
-    if (!rows.length) return null;
-    // گروه‌بندی ستون‌ها بر اساس پرسشنامه (برای داده واقعی: همه ستون‌ها یک پرسشنامه «داده واردشده»)
+  function computeResults(
+    rowsArg: (number | null)[][],
+    colsArg: string[],
+    src: "generate" | "real",
+    sc: AlphaScale[]
+  ) {
+    if (!rowsArg.length) return [];
     const groups: { name: string; cols: number[][] }[] = [];
-    if (source === "real") {
+    if (src === "real") {
       groups.push({
         name: "داده واردشده (همه گویه‌ها)",
-        cols: columns.map((_, ci) => rows.map((r) => r[ci] as number)),
+        cols: colsArg.map((_, ci) => rowsArg.map((r) => r[ci] as number)),
       });
     } else {
       let colIdx = 0;
-      for (const q of questionnaires) {
+      for (const q of sc) {
         const cols: number[][] = [];
-        for (let i = 0; i < q.itemCount; i++) {
-          cols.push(rows.map((r) => r[colIdx + i] as number));
+        for (let i = 0; i < q.items.length; i++) {
+          cols.push(rowsArg.map((r) => r[colIdx + i] as number));
         }
-        colIdx += q.itemCount;
+        colIdx += q.items.length;
         groups.push({ name: q.name, cols });
       }
     }
-
     return groups.map((g) => {
       const k = g.cols.length;
       const items = g.cols.map((col, i) => {
@@ -297,7 +343,7 @@ export default function AlphaTool() {
         const restTotal = rest[0]?.map((_, ri) => rest.reduce((s, c) => s + (c[ri] ?? 0), 0)) ?? [];
         const corr = pearson(col, restTotal);
         return {
-          name: source === "real" ? columns[i] : `گویه ${i + 1}`,
+          name: src === "real" ? columns[i] : `گویه ${i + 1}`,
           mean: mean(col),
           sd: sampleStd(col),
           itemTotal: corr.r,
@@ -309,7 +355,13 @@ export default function AlphaTool() {
       const interp = alphaInterpretation(alpha);
       return { name: g.name, k, items, alpha, stdAlpha, interp };
     });
-  }, [rows, columns, source, questionnaires]);
+  }
+
+  const results = useMemo(
+    () => computeResults(rows, columns, source, scales),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, columns, source, scales, tick]
+  );
 
   // ---------- خروجی‌ها ----------
   const buildReport = () => {
@@ -318,17 +370,15 @@ export default function AlphaTool() {
     L.push("==================================");
     L.push(`تعداد موارد: ${rows.length} | منبع: ${source === "generate" ? "تولید تمرینی" : "داده واقعی"}`);
     L.push("");
-    if (!results) {
+    if (!results.length) {
       L.push("داده‌ای موجود نیست.");
       return L.join("\n");
     }
     results.forEach((g) => {
-      L.push(`پرسشنامه: ${g.name} (${g.k} گویه)`);
+      L.push(`متغیر: ${g.name} (${g.k} گویه)`);
       L.push("  گویه | میانگین | انحراف معیار | همبستگی گویه-کل | آلفا اگر حذف شود");
       g.items.forEach((it) => {
-        L.push(
-          `  ${it.name} | ${fmt(it.mean)} | ${fmt(it.sd)} | ${fmt(it.itemTotal)} | ${fmt(it.alphaIfDeleted)}`
-        );
+        L.push(`  ${it.name} | ${fmt(it.mean)} | ${fmt(it.sd)} | ${fmt(it.itemTotal)} | ${fmt(it.alphaIfDeleted)}`);
       });
       L.push(`  آلفای کرونباخ: ${fmt(g.alpha)} (${g.interp.label}) | آلفای استانداردشده: ${fmt(g.stdAlpha)}`);
       L.push("");
@@ -346,8 +396,8 @@ export default function AlphaTool() {
         XLSX.utils.aoa_to_sheet([columns, ...rows.map((r) => r.map((v) => (v == null ? "" : v)))]),
         "داده"
       );
-      if (results) {
-        const header = ["پرسشنامه", "گویه", "میانگین", "انحراف معیار", "همبستگی گویه-کل", "آلفا اگر حذف شود", "آلفای کل", "آلفای استاندارد", "تفسیر"];
+      if (results.length) {
+        const header = ["متغیر", "گویه", "میانگین", "انحراف معیار", "همبستگی گویه-کل", "آلفا اگر حذف شود", "آلفای کل", "آلفای استاندارد", "تفسیر"];
         const aoa: (string | number)[][] = [header];
         results.forEach((g) => {
           g.items.forEach((it, i) => {
@@ -381,14 +431,14 @@ export default function AlphaTool() {
   const downloadTemplate = () => {
     try {
       const headers: string[] = [];
-      questionnaires.forEach((q) => {
-        for (let i = 1; i <= q.itemCount; i++) headers.push(`${q.name} — گویه ${i}`);
+      scales.forEach((q) => {
+        for (let i = 1; i <= q.items.length; i++) headers.push(`${q.name} — گویه ${i}`);
       });
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([headers]), "قالب داده");
       const guide: (string | number)[][] = [
-        ["پرسشنامه", "تعداد گویه", "حداقل نمره گویه", "حداکثر نمره گویه"],
-        ...questionnaires.map((q) => [q.name, q.itemCount, q.itemMin, q.itemMax]),
+        ["متغیر", "تعداد گویه", "دامنه هر گویه (حداقل تا حداکثر)"],
+        ...scales.map((q) => [q.name, q.items.length, q.items.map((it) => `${it.min}-${it.max}`).join("، ")]),
       ];
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(guide), "راهنما");
       XLSX.writeFile(wb, "amarist-alpha-template.xlsx");
@@ -466,84 +516,107 @@ export default function AlphaTool() {
     <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-32 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900">
       <ToolHeader
         title="اندازه‌گیری و تحلیل آلفای کرونباخ"
-        subtitle="تحلیل تعقیبی قابلیت اعتماد پرسشنامه‌ها"
+        subtitle="تحلیل تعقیبی قابلیت اعتماد متغیرها"
         actions={
-          <a
-            href="/tools/sem"
-            className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-[12px] font-extrabold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
-          >
-            بازگشت به SEM
-          </a>
+          <div className="flex items-center gap-2">
+            {source === "generate" && (
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-[12px] font-extrabold text-white shadow-sm transition hover:bg-indigo-500"
+                onClick={generate}
+              >
+                <Play className="h-3.5 w-3.5" />
+                تولید داده و محاسبه آلفا
+              </button>
+            )}
+            <button
+              type="button"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-1.5 text-[12px] font-extrabold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
+              onClick={calculate}
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              محاسبه آلفا
+            </button>
+            <a
+              href="/tools/sem"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-stone-300 bg-white px-3 py-1.5 text-[12px] font-extrabold text-stone-600 transition hover:border-indigo-300 hover:text-indigo-600 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-300"
+            >
+              بازگشت به SEM
+            </a>
+          </div>
         }
       />
 
       <div className="mx-auto max-w-[1200px] px-4">
-        {/* ---------- ۱) تعریف پرسشنامه‌ها ---------- */}
+        {/* ---------- ۱) متغیرها و گویه‌ها ---------- */}
         <section className={`${cardCls} mt-6 ${sectionTones[0]}`}>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۱) تعریف پرسشنامه‌ها</h2>
-              <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                برای هر پرسشنامه مشخص کنید چند گویه دارد و نمره هر گویه از چند تا چند است.
-              </p>
-            </div>
-            <button type="button" className={btnLight} onClick={addQ}>
-              <Plus className="h-4 w-4" />
-              افزودن پرسشنامه
-            </button>
+          <div>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۱) متغیرها و گویه‌ها</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              متغیرهای تعریف‌شده در صفحه SEM اینجا آمده‌اند و نامشان قفل است. برای هر گویه، دامنه نمره را جداگانه
+              تعیین کنید؛ تعداد گویه‌ها را هم می‌توانید تغییر دهید.
+            </p>
           </div>
 
           <div className="mt-4 grid gap-3">
-            {questionnaires.map((q) => (
-              <div key={q.id} className="grid gap-3 rounded-2xl border border-stone-200 bg-white p-4 sm:grid-cols-[1fr_140px_120px_120px_44px] dark:border-stone-700 dark:bg-slate-800">
-                <div>
-                  <label className={labelCls}>نام پرسشنامه</label>
-                  <input
-                    className={inputCls}
-                    value={q.name}
-                    onChange={(e) => updateQ(q.id, { name: e.target.value })}
-                  />
+            {scales.map((q) => (
+              <div key={q.varId} className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="min-w-52 flex-1">
+                    <label className={labelCls}>نام متغیر (از SEM — قفل)</label>
+                    <input className={`${inputCls} opacity-70`} value={q.name} disabled title="نام متغیر از صفحه SEM می‌آید" />
+                  </div>
+                  <div className="flex items-end gap-2">
+                    <button type="button" className={btnLight} onClick={() => addItem(q.varId)}>
+                      <Plus className="h-4 w-4" />
+                      افزودن گویه
+                    </button>
+                  </div>
                 </div>
-                <div>
-                  <label className={labelCls}>تعداد گویه</label>
-                  <input
-                    type="number"
-                    min={2}
-                    className={inputCls}
-                    value={q.itemCount}
-                    onChange={(e) => updateQ(q.id, { itemCount: Math.max(2, Number(e.target.value)) })}
-                  />
+
+                <div className="mt-3 space-y-2">
+                  <div className="grid grid-cols-[1fr_110px_110px_40px] items-center gap-2 px-1 text-[11px] font-bold text-stone-500 dark:text-stone-400">
+                    <span>گویه</span>
+                    <span className="text-center">حداقل نمره</span>
+                    <span className="text-center">حداکثر نمره</span>
+                    <span />
+                  </div>
+                  {q.items.map((it, si) => (
+                    <div key={si} className="grid grid-cols-[1fr_110px_110px_40px] items-center gap-2">
+                      <input
+                        className={`${inputCls} opacity-60`}
+                        value={`گویه ${si + 1}`}
+                        disabled
+                      />
+                      <input
+                        type="number"
+                        dir="ltr"
+                        className={inputCls}
+                        value={it.min}
+                        onChange={(e) => setItemRange(q.varId, si, "min", Number(e.target.value))}
+                      />
+                      <input
+                        type="number"
+                        dir="ltr"
+                        className={inputCls}
+                        value={it.max}
+                        onChange={(e) => setItemRange(q.varId, si, "max", Number(e.target.value))}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeItem(q.varId, si)}
+                        disabled={q.items.length <= 2}
+                        className="flex h-9 w-9 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500 disabled:opacity-30 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-400"
+                        title="حذف گویه"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
                 </div>
-                <div>
-                  <label className={labelCls}>حداقل نمره گویه</label>
-                  <input
-                    type="number"
-                    dir="ltr"
-                    className={inputCls}
-                    value={q.itemMin}
-                    onChange={(e) => updateQ(q.id, { itemMin: Number(e.target.value) })}
-                  />
-                </div>
-                <div>
-                  <label className={labelCls}>حداکثر نمره گویه</label>
-                  <input
-                    type="number"
-                    dir="ltr"
-                    className={inputCls}
-                    value={q.itemMax}
-                    onChange={(e) => updateQ(q.id, { itemMax: Number(e.target.value) })}
-                  />
-                </div>
-                <div className="flex items-end">
-                  <button
-                    type="button"
-                    onClick={() => removeQ(q.id)}
-                    className="flex h-10 w-10 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400"
-                    title="حذف پرسشنامه"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
+                <p className={`${tinyCls} mt-2`}>
+                  {q.items.length} گویه · دامنه‌ها: {q.items.map((it) => `${it.min}-${it.max}`).join("، ")}
+                </p>
               </div>
             ))}
           </div>
@@ -564,7 +637,7 @@ export default function AlphaTool() {
             >
               <p className="font-extrabold text-stone-900 dark:text-stone-100">تولید داده تمرینی</p>
               <p className="mt-1 text-[12px] text-stone-500 dark:text-stone-400">
-                داده‌ای می‌سازد که آلفای هر پرسشنامه داخل بازه هدف بیفتد.
+                داده‌ای می‌سازد که آلفای هر متغیر داخل بازه هدف بیفتد.
               </p>
             </button>
             <button
@@ -621,6 +694,10 @@ export default function AlphaTool() {
                 تولید داده و محاسبه آلفا
               </button>
             )}
+            <button type="button" className={btnSecondary} onClick={calculate}>
+              <RefreshCw className="h-4 w-4" />
+              محاسبه آلفا
+            </button>
             <input
               ref={fileRef}
               type="file"
@@ -704,7 +781,7 @@ export default function AlphaTool() {
         {/* ---------- ۴) نتایج ---------- */}
         <section className={`${cardCls} mt-4 ${sectionTones[3]}`}>
           <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۴) نتایج آلفای کرونباخ</h2>
-          {!results ? (
+          {!results.length ? (
             <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
               بعد از تولید یا ورود داده، نتایج نمایش داده می‌شود.
             </div>
@@ -778,6 +855,9 @@ export default function AlphaTool() {
           )}
         </section>
       </div>
+
+      {/* ---------- مودال نتیجه ---------- */}
+      {modal && <ResultModal ok={modal.ok} lines={modal.lines} onClose={() => setModal(null)} />}
 
       {/* ---------- فوتر ثابت خروجی ---------- */}
       <div className="fixed inset-x-0 bottom-0 z-40 border-t border-stone-200 bg-white/95 shadow-[0_-6px_24px_rgba(24,32,51,0.08)] backdrop-blur dark:border-stone-700 dark:bg-slate-900/95">

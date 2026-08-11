@@ -17,6 +17,7 @@ function truncate(s: string, max: number): string {
 }
 
 type Pos = { cx: number; cy: number };
+type Side = "left" | "right" | "bottom";
 
 export default function PathDiagram({
   vars,
@@ -37,18 +38,23 @@ export default function PathDiagram({
   const colGap = 265 * scale;
   const subW = 145 * scale;
   const subH = 26 * scale;
-  const subCols = 2;
-  const subColGap = 10 * scale;
-  const subRowGap = 34 * scale;
+  const subGap = 34 * scale;
 
   const varsByRole: VariableSpec[][] = [
     vars.filter((v) => v.role === "exogenous"),
     vars.filter((v) => v.role === "mediator"),
     vars.filter((v) => v.role === "outcome"),
   ];
+  // سمت قرارگیری زیرمقیاس‌ها: ستون چپ → چپ، ستون راست → راست، ستون وسط → پایین
+  const sideOf = (v: VariableSpec): Side => {
+    const col = varsByRole.findIndex((arr) => arr.includes(v));
+    if (col === 0) return "left";
+    if (col === 2) return "right";
+    return "bottom";
+  };
 
   const nodePos = new Map<number, Pos>();
-  /** زیرمقیاس‌های متغیرهای جمع‌پذیر (فقط نمایشی — به گره کل وصل می‌شوند) */
+  /** زیرمقیاس‌های نمایشی متغیرهای جمع‌پذیر */
   const indicatorPos = new Map<number, Pos[]>();
   let W = 40;
   let H = 60;
@@ -62,41 +68,61 @@ export default function PathDiagram({
     for (const v of colVars) {
       const vNodes = nodes.filter((n) => n.varId === v.id);
       const nSub = v.subscales.length;
+      const side = sideOf(v);
+      const subsOnSide = side !== "bottom";
+
       if (nSub === 0) {
         const node = vNodes[0];
         nodePos.set(node.nodeId, { cx: x + nodeW / 2, cy: yCursor + nodeH / 2 });
         yCursor += nodeH + 40 * scale;
       } else if (v.hasTotal) {
-        // متغیر جمع‌پذیر: بیضی (گره کل) + زیرمقیاس‌های نمایشی زیر آن
         const total = vNodes[0];
         const cy = yCursor + nodeH / 2 + 6 * scale;
         nodePos.set(total.nodeId, { cx: x + nodeW / 2, cy });
-        const subRows = Math.ceil(nSub / subCols);
-        const totalRowW = subCols * subW + (subCols - 1) * subColGap;
-        const subsY = yCursor + nodeH + 26 * scale;
         const inds: Pos[] = [];
-        v.subscales.forEach((s, si) => {
-          const ci = si % subCols;
-          const ri = Math.floor(si / subCols);
-          const sx = x + (nodeW - totalRowW) / 2 + ci * (subW + subColGap);
-          const sy = subsY + ri * subRowGap;
-          inds.push({ cx: sx + subW / 2, cy: sy + subH / 2 });
-        });
+        if (subsOnSide) {
+          // زیرمقیاس‌ها در سمت چپ/راست، یک ستون عمودی هم‌قد گره
+          const subX = side === "left" ? x - subW - 26 * scale : x + nodeW + 26 * scale;
+          v.subscales.forEach((_, si) => {
+            inds.push({ cx: subX + subW / 2, cy: yCursor + 6 * scale + si * subGap });
+          });
+          const subBlockH = Math.max(nSub * subGap, nodeH);
+          yCursor += Math.max(nodeH + 40 * scale, subBlockH + 30 * scale);
+        } else {
+          const subsY = yCursor + nodeH + 26 * scale;
+          v.subscales.forEach((_, si) => {
+            const ci = si % 2;
+            const ri = Math.floor(si / 2);
+            const rowW = 2 * subW + 10 * scale;
+            const sx = x + (nodeW - rowW) / 2 + ci * (subW + 10 * scale);
+            inds.push({ cx: sx + subW / 2, cy: subsY + ri * subGap + subH / 2 });
+          });
+          const subRows = Math.ceil(nSub / 2);
+          yCursor = subsY + subRows * subGap + 10 * scale;
+        }
         indicatorPos.set(v.id, inds);
-        yCursor = subsY + subRows * subRowGap + 10 * scale;
       } else {
-        // متغیر غیرجمع‌پذیر: هر زیرمقیاس یک گره مستقل
-        const subRows = Math.ceil(nSub / subCols);
-        const totalRowW = subCols * subW + (subCols - 1) * subColGap;
+        // غیرجمع‌پذیر: هر زیرمقیاس گره مستقل
         const startY = yCursor;
-        vNodes.forEach((node, si) => {
-          const ci = si % subCols;
-          const ri = Math.floor(si / subCols);
-          const sx = x + (nodeW - totalRowW) / 2 + ci * (subW + subColGap);
-          const sy = startY + ri * subRowGap;
-          nodePos.set(node.nodeId, { cx: sx + subW / 2, cy: sy + subH / 2 });
-        });
-        yCursor = startY + subRows * subRowGap + 10 * scale;
+        if (subsOnSide) {
+          const subX = side === "left" ? x - subW - 26 * scale : x + nodeW + 26 * scale;
+          vNodes.forEach((node, si) => {
+            nodePos.set(node.nodeId, { cx: subX + subW / 2, cy: startY + si * subGap + subH / 2 });
+          });
+          const subBlockH = Math.max(nSub * subGap, subH);
+          yCursor = startY + subBlockH + 30 * scale;
+        } else {
+          const rowW = 2 * subW + 10 * scale;
+          vNodes.forEach((node, si) => {
+            const ci = si % 2;
+            const ri = Math.floor(si / 2);
+            const sx = x + (nodeW - rowW) / 2 + ci * (subW + 10 * scale);
+            const sy = startY + ri * subGap;
+            nodePos.set(node.nodeId, { cx: sx + subW / 2, cy: sy + subH / 2 });
+          });
+          const subRows = Math.ceil(nSub / 2);
+          yCursor = startY + subRows * subGap + 10 * scale;
+        }
       }
       colH = Math.max(colH, yCursor - 60);
     }
@@ -163,7 +189,6 @@ export default function PathDiagram({
           const r2 = r2Of(node.nodeId);
 
           if (node.kind === "total") {
-            // بیضی (مکنون) + زیرمقیاس‌های نمایشی
             const inds = indicatorPos.get(node.varId) ?? [];
             const v = vars.find((x) => x.id === node.varId);
             return (
@@ -179,7 +204,15 @@ export default function PathDiagram({
                 )}
                 {inds.map((sp, si) => (
                   <g key={si}>
-                    <line x1={cx} y1={cy + nodeH / 2} x2={sp.cx} y2={sp.cy - subH / 2} stroke="#cbd5e1" strokeWidth={1.1} markerEnd="url(#arrow-sub)" />
+                    <line
+                      x1={cx}
+                      y1={cy + nodeH / 2}
+                      x2={sp.cx}
+                      y2={sp.cy - subH / 2}
+                      stroke="#cbd5e1"
+                      strokeWidth={1.1}
+                      markerEnd="url(#arrow-sub)"
+                    />
                     <rect x={sp.cx - subW / 2} y={sp.cy - subH / 2} width={subW} height={subH} rx={6} fill={subFill} stroke={subStroke} strokeWidth={1} />
                     <text x={sp.cx} y={sp.cy + 3.5} textAnchor="middle" fontSize={9 * scale} fontWeight={600} fill="#475569">
                       {truncate(v?.subscales[si]?.name ?? "", 20)}

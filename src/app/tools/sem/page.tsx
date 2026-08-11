@@ -2,7 +2,6 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CheckCircle2,
   Copy,
   Download,
   FileSpreadsheet,
@@ -12,7 +11,6 @@ import {
   RefreshCw,
   Trash2,
   Upload,
-  XCircle,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { Document, Packer, Paragraph, TextRun } from "docx";
@@ -42,7 +40,9 @@ import {
   type VariableSpec,
 } from "@/lib/sem-generator";
 import ErrorBoundary from "@/components/error-boundary";
+import ExpandableSection from "@/components/expandable-section";
 import PathDiagram from "@/components/path-diagram";
+import ResultModal from "@/components/result-modal";
 import SectionNav from "@/components/section-nav";
 import ToolHeader from "@/components/tool-header";
 
@@ -54,7 +54,6 @@ const inputCls =
   "w-full rounded-xl border border-stone-300 bg-[#fbfdff] px-3 py-2 text-sm outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-100";
 const labelCls = "mb-1 block text-[12px] font-bold text-stone-600 dark:text-stone-300";
 const tinyCls = "mt-1 text-[11px] leading-5 text-stone-400 dark:text-stone-500";
-const cardCls = "rounded-2xl p-5 shadow-sm sm:p-6";
 const btnPrimary =
   "inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-extrabold text-white shadow-md shadow-indigo-600/20 transition hover:bg-indigo-500 active:translate-y-0 disabled:opacity-50";
 const btnSecondary =
@@ -131,57 +130,6 @@ function Cell({ value, onCommit }: { value: number | null; onCommit: (v: number 
         if (e.key === "Enter") (e.target as HTMLInputElement).blur();
       }}
     />
-  );
-}
-
-// ------------------------------------------------------------
-// مودال نتیجه تحلیل
-// ------------------------------------------------------------
-
-function ResultModal({
-  ok,
-  lines,
-  onClose,
-}: {
-  ok: boolean;
-  lines: string[];
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-    >
-      <div
-        className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-stone-700 dark:bg-slate-800"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-3">
-          {ok ? (
-            <CheckCircle2 className="h-8 w-8 text-emerald-600 dark:text-emerald-400" />
-          ) : (
-            <XCircle className="h-8 w-8 text-red-600 dark:text-red-400" />
-          )}
-          <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">
-            {ok ? "تحلیل با موفقیت انجام شد" : "تحلیل ناموفق بود"}
-          </h3>
-        </div>
-        <div className="mt-4 space-y-1.5 rounded-xl bg-stone-50 p-4 dark:bg-slate-900">
-          {lines.map((l, i) => (
-            <p key={i} className="text-[13px] leading-6 text-stone-700 dark:text-stone-300">
-              {l}
-            </p>
-          ))}
-        </div>
-        <div className="mt-4 flex justify-end">
-          <button type="button" className={btnPrimary} onClick={onClose}>
-            بستن
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -483,6 +431,15 @@ function SemTool() {
   const [source, setSource] = useState<"generate" | "real">("generate");
   const [vars, setVars] = useState<VariableSpec[]>(initialVars);
   const [inactiveArrowIds, setInactiveArrowIds] = useState<Set<string>>(() => new Set());
+
+  // همگام‌سازی متغیرها با localStorage تا صفحه آلفای کرونباخ از آن استفاده کند
+  useEffect(() => {
+    try {
+      localStorage.setItem("amarist-sem-vars", JSON.stringify(vars));
+    } catch {
+      // ignore
+    }
+  }, [vars]);
   const nodes = useMemo(() => buildModelNodes(vars), [vars]);
   const allArrows = useMemo(() => buildModelArrows(nodes), [nodes]);
   const arrows = useMemo(
@@ -537,6 +494,9 @@ function SemTool() {
   const [footerMsg, setFooterMsg] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>(null);
   const [showBigDiagram, setShowBigDiagram] = useState(false);
+  const [viewMode, setViewMode] = useState<"both" | "inputs" | "outputs">("both");
+  const [backupModal, setBackupModal] = useState(false);
+  const [backupName, setBackupName] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
 
@@ -975,33 +935,46 @@ function SemTool() {
   }, [vars, nodes, analysis, answerKey, bootResults, rows.length]);
 
   // ---------- بکاپ و بازیابی ----------
-  const backup = useCallback(() => {
-    try {
-      const data = {
-        version: 1,
-        source,
-        vars,
-        inactiveArrowIds: [...inactiveArrowIds],
-        constraints,
-        n,
-        columns,
-        rows,
-        colMap,
-      };
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "amarist-backup.json";
-      a.click();
-      URL.revokeObjectURL(url);
-      setStatus({ text: "بکاپ تنظیمات و داده دانلود شد.", kind: "ok" });
-      setFooterMsg("بکاپ دانلود شد ✓");
-      setTimeout(() => setFooterMsg(null), 4000);
-    } catch (err) {
-      setStatus({ text: (err as Error).message, kind: "err" });
-    }
-  }, [source, vars, inactiveArrowIds, constraints, n, columns, rows, colMap]);
+  const doBackup = useCallback(
+    (fileName: string) => {
+      try {
+        const safeName =
+          fileName.trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\.json$/i, "") || "بکاپ-آماریست";
+        const data = {
+          version: 1,
+          source,
+          vars,
+          inactiveArrowIds: [...inactiveArrowIds],
+          constraints,
+          n,
+          columns,
+          rows,
+          colMap,
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${safeName}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setStatus({ text: "بکاپ تنظیمات و داده دانلود شد.", kind: "ok" });
+        setFooterMsg("بکاپ دانلود شد ✓");
+        setTimeout(() => setFooterMsg(null), 4000);
+      } catch (err) {
+        setStatus({ text: (err as Error).message, kind: "err" });
+      }
+    },
+    [source, vars, inactiveArrowIds, constraints, n, columns, rows, colMap]
+  );
+
+  const openBackupModal = () => {
+    const now = new Date();
+    const pad = (x: number) => String(x).padStart(2, "0");
+    const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}`;
+    setBackupName(`بکاپ-آماریست-${stamp}`);
+    setBackupModal(true);
+  };
 
   const restore = async (file: File) => {
       try {
@@ -1149,40 +1122,42 @@ function SemTool() {
       />
 
       <div className="mx-auto max-w-[1280px] px-4">
-        {/* ---------- هیرو ---------- */}
-        <header className={`${cardCls} mt-6 border-stone-200 bg-white/80 shadow-lg shadow-stone-900/5 backdrop-blur dark:border-stone-700 dark:bg-slate-900/80`}>
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-md">
-              <RefreshCw className="h-6 w-6" />
-            </span>
-            <div>
-              <h1 className="text-2xl font-black tracking-tight text-stone-900 dark:text-stone-100 sm:text-3xl">
-                تحلیل مسیر و مدل معادلات ساختاری (SEM)
-              </h1>
-              <p className="mt-1 text-sm font-bold text-indigo-600 dark:text-indigo-400">{modeLabel}</p>
-            </div>
-          </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {["متغیر پنهان (مکنون)", "مدل اندازه‌گیری CFA", "جمع‌پذیر / غیرجمع‌پذیر", "میانجی‌گری با بوت‌استرپ", "شاخص‌های برازش CFI / RMSEA"].map((p) => (
-              <span
-                key={p}
-                className="inline-flex items-center rounded-full border border-stone-200 bg-[#f8fafc] px-3 py-1.5 text-xs font-bold text-stone-600 dark:border-stone-700 dark:bg-slate-800 dark:text-stone-300"
+        {/* ---------- تب‌های نمای صفحه ---------- */}
+        <div className="mt-5 flex justify-center">
+          <div className="inline-flex rounded-2xl border border-stone-200 bg-white p-1 shadow-sm dark:border-stone-700 dark:bg-slate-800" role="tablist" aria-label="نمای صفحه">
+            {[
+              { key: "inputs" as const, label: "ورودی‌ها" },
+              { key: "outputs" as const, label: "خروجی‌ها" },
+              { key: "both" as const, label: "هر دو (ساید‌بای‌ساید)" },
+            ].map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                role="tab"
+                aria-selected={viewMode === t.key}
+                onClick={() => setViewMode(t.key)}
+                className={`rounded-xl px-5 py-2 text-sm font-extrabold transition ${
+                  viewMode === t.key
+                    ? "bg-indigo-600 text-white shadow"
+                    : "text-stone-500 hover:text-indigo-600 dark:text-stone-400"
+                }`}
               >
-                {p}
-              </span>
+                {t.label}
+              </button>
             ))}
           </div>
-        </header>
-
-        <div className="lg:grid lg:grid-cols-2 lg:items-start lg:gap-5">
-        {/* ===== ستون ورودی‌ها (سمت راست) ===== */}
-        <div className="lg:max-h-[calc(100vh-9.5rem)] lg:overflow-y-auto lg:pe-2 lg:pb-6">
+        </div>
+        <div className={viewMode === "both" ? "lg:grid lg:grid-cols-2 lg:items-start lg:gap-5" : ""}>
+        {/* ===== ستون ورودی‌ها ===== */}
+        {viewMode !== "outputs" && (
+        <div className={viewMode === "both" ? "lg:max-h-[calc(100vh-9.5rem)] lg:overflow-y-auto lg:pe-2 lg:pb-6" : ""}>
         {/* ---------- ۱) منبع داده ---------- */}
-        <section id="source" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[0]}`}>
-          <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۱) منبع داده</h2>
-          <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-            انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود.
-          </p>
+        <ExpandableSection
+          id="source"
+          tone={sectionTones[0]}
+          title="۱) منبع داده"
+          desc="انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود."
+        >
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <button
               type="button"
@@ -1213,18 +1188,16 @@ function SemTool() {
               </p>
             </button>
           </div>
-        </section>
+        </ExpandableSection>
 
         {/* ---------- ۲) مشخصات متغیرها ---------- */}
-        <section id="variables" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[1]}`}>
+        <ExpandableSection
+          id="variables"
+          tone={sectionTones[1]}
+          title="۲) مشخصات متغیرها"
+          desc="نقش ← نام ← جمع‌پذیری (نمره کل) ← زیرمقیاس‌ها. متغیر جمع‌پذیر با نمره کل وارد مدل می‌شود؛ متغیر غیرجمع‌پذیر به‌صورت زیرمقیاس‌های مستقل با فلش‌های جداگانه وارد می‌شود."
+        >
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۲) مشخصات متغیرها</h2>
-              <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                نقش ← نام ← جمع‌پذیری (نمره کل) ← زیرمقیاس‌ها. متغیر جمع‌پذیر با نمره کل وارد مدل می‌شود؛ متغیر غیرجمع‌پذیر
-                به‌صورت زیرمقیاس‌های مستقل با فلش‌های جداگانه وارد می‌شود.
-              </p>
-            </div>
             <button type="button" className={btnLight} onClick={addVar}>
               <Plus className="h-4 w-4" />
               افزودن متغیر
@@ -1473,25 +1446,23 @@ function SemTool() {
               );
             })}
           </div>
-        </section>
+        </ExpandableSection>
 
         {/* ---------- ۳) ترسیم مدل ---------- */}
-        <section id="draw-model" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[2]}`}>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۳) ترسیم مدل</h2>
-              <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                هر فلش در یک خط جداگانه قابل فعال/غیرفعال کردن است. در متغیرهای غیرجمع‌پذیر، هر زیرمقیاس فلش مستقل خودش را
-                دارد. غیرفعال‌کردن فلش = صفر فرض‌شدن آن مسیر.
-              </p>
-            </div>
+        <ExpandableSection
+          id="draw-model"
+          tone={sectionTones[2]}
+          title="۳) ترسیم مدل"
+          desc="هر فلش در یک خط جداگانه قابل فعال/غیرفعال کردن است. در متغیرهای غیرجمع‌پذیر، هر زیرمقیاس فلش مستقل خودش را دارد. غیرفعال‌کردن فلش = صفر فرض‌شدن آن مسیر."
+        >
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <button type="button" className={btnSecondary} onClick={() => setShowBigDiagram(true)}>
               <RefreshCw className="h-4 w-4" />
               مشاهده بزرگ مدل
             </button>
           </div>
 
-          <div className="mt-4 grid gap-4 lg:grid-cols-[380px_1fr]">
+          <div className="mt-4 space-y-4">
             {/* لیست فلش‌ها — هر کدام در یک خط */}
             <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
               <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">
@@ -1543,16 +1514,16 @@ function SemTool() {
               </div>
             </div>
           </div>
-        </section>
+        </ExpandableSection>
 
         {/* ---------- ۴) قیود تولید ---------- */}
         {source === "generate" && (
-          <section id="constraints" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[3]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۴) قیود تولید داده</h2>
-            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-              مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار
-              باشد.
-            </p>
+          <ExpandableSection
+            id="constraints"
+            tone={sectionTones[3]}
+            title="۴) قیود تولید داده"
+            desc="مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار باشد."
+          >
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div>
@@ -1827,18 +1798,17 @@ function SemTool() {
                 </p>
               </div>
             </div>
-          </section>
+          </ExpandableSection>
         )}
 
         {/* ---------- ۵) جدول داده ---------- */}
-        <section id="data-table" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[4]}`}>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۵) جدول داده</h2>
-              <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                داده‌ها قابل ویرایش‌اند؛ ایمپورت و اکسپورت با اکسل انجام می‌شود.
-              </p>
-            </div>
+        <ExpandableSection
+          id="data-table"
+          tone={sectionTones[4]}
+          title="۵) جدول داده"
+          desc="داده‌ها قابل ویرایش‌اند؛ ایمپورت و اکسپورت با اکسل انجام می‌شود."
+        >
+          <div className="flex flex-wrap items-center justify-end gap-3">
             <div className="flex flex-wrap gap-2">
               <input
                 ref={fileRef}
@@ -1910,18 +1880,20 @@ function SemTool() {
               هنوز داده‌ای وجود ندارد. دکمه «تولید داده و تحلیل» (بالای صفحه) را بزنید یا فایل اکسل وارد کنید.
             </div>
           )}
-        </section>
+        </ExpandableSection>
+        </div>
+        )}
 
-        </div>{/* ===== پایان ستون ورودی‌ها ===== */}
-
-        {/* ===== ستون خروجی‌ها (سمت چپ) ===== */}
-        <div className="lg:max-h-[calc(100vh-9.5rem)] lg:overflow-y-auto lg:ps-2 lg:pb-6">
+        {/* ===== ستون خروجی‌ها ===== */}
+        {viewMode !== "inputs" && (
+        <div className={viewMode === "both" ? "lg:max-h-[calc(100vh-9.5rem)] lg:overflow-y-auto lg:ps-2 lg:pb-6" : ""}>
         {/* ---------- ۶) بررسی پیش‌فرض‌ها ---------- */}
-        <section id="assumptions" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[5]}`}>
-          <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۶) بررسی پیش‌فرض‌های تحلیل</h2>
-          <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-            شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود.
-          </p>
+        <ExpandableSection
+          id="assumptions"
+          tone={sectionTones[5]}
+          title="۶) بررسی پیش‌فرض‌های تحلیل"
+          desc="شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود."
+        >
 
           {!analysisValid ? (
             <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
@@ -2140,11 +2112,15 @@ function SemTool() {
               </div>
             </div>
           )}
-        </section>
+        </ExpandableSection>
 
         {/* ---------- ۷) نتایج ---------- */}
-        <section id="results" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[6]}`}>
-          <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۷) نتایج</h2>
+        <ExpandableSection
+          id="results"
+          tone={sectionTones[6]}
+          title="۷) نتایج"
+          desc="دیاگرام مدل، ضرایب مسیر، اثرات، R² و شاخص‌های برازش"
+        >
           {!analysisValid ? (
             <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
               {analysis
@@ -2381,9 +2357,9 @@ function SemTool() {
               )}
             </div>
           )}
-        </section>
-        </div>{/* ===== پایان ستون خروجی‌ها ===== */}
-        </div>{/* ===== پایان grid دوستونه ===== */}
+        </ExpandableSection>
+        </div>
+        )}
       </div>
 
       {/* ---------- مودال نمایش بزرگ دیاگرام ---------- */}
@@ -2405,6 +2381,56 @@ function SemTool() {
               </button>
             </div>
             <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysis?.sem} large />
+          </div>
+        </div>
+      )}
+
+      {/* ---------- مودال نام‌گذاری بکاپ ---------- */}
+      {backupModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setBackupModal(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-stone-700 dark:bg-slate-800"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">نام فایل بکاپ</h3>
+            <p className="mt-1 text-[12px] text-stone-500 dark:text-stone-400">
+              نام دلخواه وارد کنید؛ تاریخ و ساعت به‌صورت خودکار در نام پیش‌فرض آمده است. بکاپ شامل تنظیمات، متغیرها،
+              فلش‌ها، قیود و داده فعلی است.
+            </p>
+            <input
+              dir="ltr"
+              className={`${inputCls} mt-3`}
+              value={backupName}
+              onChange={(e) => setBackupName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  doBackup(backupName);
+                  setBackupModal(false);
+                }
+              }}
+              autoFocus
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button type="button" className={btnLight} onClick={() => setBackupModal(false)}>
+                انصراف
+              </button>
+              <button
+                type="button"
+                className={btnPrimary}
+                onClick={() => {
+                  doBackup(backupName);
+                  setBackupModal(false);
+                }}
+              >
+                <Download className="h-4 w-4" />
+                دانلود بکاپ
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2441,7 +2467,7 @@ function SemTool() {
               <Copy className="h-4 w-4" />
               کپی کل گزارش
             </button>
-            <button type="button" className={btnLight} onClick={backup}>
+            <button type="button" className={btnLight} onClick={openBackupModal}>
               <Download className="h-4 w-4" />
               بکاپ تنظیمات
             </button>
@@ -2469,6 +2495,7 @@ function SemTool() {
             )}
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

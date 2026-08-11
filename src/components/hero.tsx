@@ -1,10 +1,20 @@
 import { ArrowLeft, Check, Download, Sparkles } from "lucide-react";
 
-const bars = [
-  { cluster: "کنترل", label: "پیش", value: 52, height: "69%", color: "bg-stone-300" },
-  { cluster: "کنترل", label: "پس", value: 54, height: "72%", color: "bg-stone-300" },
-  { cluster: "درمان", label: "پیش", value: 53, height: "71%", color: "bg-gradient-to-t from-indigo-600 to-violet-500" },
-  { cluster: "درمان", label: "پس", value: 71, height: "95%", color: "bg-gradient-to-t from-indigo-600 to-violet-500" },
+const clusters = [
+  {
+    name: "گروه کنترل",
+    bars: [
+      { label: "پیش", value: 52, pct: 0.63, color: "bg-stone-300" },
+      { label: "پس", value: 54, pct: 0.66, color: "bg-stone-300" },
+    ],
+  },
+  {
+    name: "گروه درمان",
+    bars: [
+      { label: "پیش", value: 53, pct: 0.65, color: "bg-gradient-to-t from-indigo-600 to-violet-500" },
+      { label: "پس", value: 71, pct: 0.87, color: "bg-gradient-to-t from-indigo-600 to-violet-500" },
+    ],
+  },
 ];
 
 const trust = ["بدون ثبت‌نام", "ذخیره در مرورگر", "خروجی اکسل و CSV"];
@@ -82,26 +92,34 @@ export default function Hero() {
             </div>
 
             {/* نمودار میله‌ای */}
-            <div className="mt-5 flex items-end justify-center gap-8">
-              {[0, 1].map((cluster) => (
-                <div key={cluster} className="flex flex-col items-center gap-2">
-                  <div className="flex items-end justify-center gap-2.5">
-                    {bars
-                      .filter((b) => b.cluster === (cluster === 0 ? "کنترل" : "درمان"))
-                      .map((b) => (
-                        <div key={b.label} className="flex w-10 flex-col items-center gap-1.5">
-                          <span className="text-xs font-bold text-stone-700">{b.value}</span>
-                          <div
-                            className={`h-36 w-10 rounded-t-lg ${b.color} shadow-sm`}
-                            style={{ height: `calc(9rem * ${parseFloat(b.height) / 100})` }}
-                          />
-                          <span className="text-[11px] font-medium text-stone-500">{b.label}</span>
-                        </div>
-                      ))}
+            <div className="mt-5 flex items-start justify-center gap-10">
+              {clusters.map((cluster) => (
+                <div key={cluster.name} className="flex flex-col items-center gap-2">
+                  <div className="flex h-44 items-end gap-2.5">
+                    {cluster.bars.map((bar) => (
+                      <div
+                        key={bar.label}
+                        className="flex w-10 flex-col items-center gap-1.5"
+                      >
+                        <span className="text-xs font-bold text-stone-700">{bar.value}</span>
+                        <div
+                          className={`w-10 rounded-t-lg ${bar.color} shadow-sm`}
+                          style={{ height: `calc(11rem * ${bar.pct})` }}
+                        />
+                      </div>
+                    ))}
                   </div>
-                  <span className="text-xs font-bold text-stone-700">
-                    {cluster === 0 ? "گروه کنترل" : "گروه درمان"}
-                  </span>
+                  <div className="flex gap-2.5">
+                    {cluster.bars.map((bar) => (
+                      <span
+                        key={bar.label}
+                        className="w-10 text-center text-[11px] font-medium text-stone-500"
+                      >
+                        {bar.label}
+                      </span>
+                    ))}
+                  </div>
+                  <span className="text-xs font-bold text-stone-700">{cluster.name}</span>
                 </div>
               ))}
             </div>

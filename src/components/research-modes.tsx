@@ -16,6 +16,8 @@ type Mode = {
   followUp?: boolean;
   /** حالت‌های مدل‌سازی: برچسب‌های روش‌ها */
   tags?: string[];
+  /** اگر ابزار ساخته شده باشد، لینک ورود به ابزار */
+  href?: string;
 };
 
 type Category = {
@@ -63,6 +65,7 @@ const categories: Category[] = [
         description:
           "مقایسه‌ی اثر دو مداخله در دو گروه مستقل؛ مشخص کردن اینکه کدام درمان مؤثرتر است.",
         followUp: true,
+        href: "/tools/compare-treatments",
       },
     ],
   },
@@ -145,9 +148,18 @@ export default function ResearchModes() {
                       >
                         <mode.icon className="h-5 w-5" />
                       </span>
-                      <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700 ring-1 ring-amber-200">
-                        در دست ساخت
-                      </span>
+                      {mode.href ? (
+                        <a
+                          href={mode.href}
+                          className="rounded-full bg-indigo-600 px-3.5 py-1.5 text-[11px] font-bold text-white shadow-sm transition-colors hover:bg-indigo-500"
+                        >
+                          ورود به ابزار
+                        </a>
+                      ) : (
+                        <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700 ring-1 ring-amber-200">
+                          در دست ساخت
+                        </span>
+                      )}
                     </div>
                     <h4 className="mt-4 font-extrabold text-stone-900">
                       {mode.title}

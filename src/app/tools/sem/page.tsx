@@ -41,6 +41,7 @@ import {
   type SemAnswerKey,
   type VariableSpec,
 } from "@/lib/sem-generator";
+import ErrorBoundary from "@/components/error-boundary";
 import PathDiagram from "@/components/path-diagram";
 import SectionNav from "@/components/section-nav";
 import ToolHeader from "@/components/tool-header";
@@ -409,6 +410,7 @@ type BootResult = {
 };
 
 type Analysis = {
+  nodeIds: number[];
   nodeCols: number[][];
   sem: SemResults;
   corr: { r: number[][]; p: number[][] };
@@ -477,7 +479,7 @@ const initialVars: VariableSpec[] = [
   },
 ];
 
-export default function SemTool() {
+function SemTool() {
   const [source, setSource] = useState<"generate" | "real">("generate");
   const [vars, setVars] = useState<VariableSpec[]>(initialVars);
   const [inactiveArrowIds, setInactiveArrowIds] = useState<Set<string>>(() => new Set());
@@ -487,6 +489,23 @@ export default function SemTool() {
     () => allArrows.filter((a) => !inactiveArrowIds.has(a.id)),
     [allArrows, inactiveArrowIds]
   );
+
+  // متغیرهایی که هیچ فلش فعالی ندارند از مدل حذف می‌شوند (ایزوله)
+  const connectedVarIds = useMemo(() => {
+    const s = new Set<number>();
+    arrows.forEach((a) => {
+      s.add(a.fromVar);
+      s.add(a.toVar);
+    });
+    return s;
+  }, [arrows]);
+  const modelVars = useMemo(
+    () => vars.filter((v) => connectedVarIds.has(v.id)),
+    [vars, connectedVarIds]
+  );
+  const modelNodes = useMemo(() => buildModelNodes(modelVars), [modelVars]);
+  const modelArrows = arrows;
+  const isolatedVars = vars.filter((v) => !connectedVarIds.has(v.id));
   const [constraints, setConstraints] = useState<GenConstraints>({
     pathTargets: {},
     indirectTargets: {},
@@ -640,8 +659,8 @@ export default function SemTool() {
       if (!silent) setStatus({ text: `در حال اجرای بوت‌استرپ با ${bootN} نمونه...`, kind: "" });
       setTimeout(() => {
         try {
-          const sem = estimateSem(nodes, arrows, comps);
-          const raw = bootstrapIndirectEffects(nodes, arrows, comps, bootN);
+          const sem = estimateSem(modelNodes, modelArrows, comps);
+          const raw = bootstrapIndirectEffects(modelNodes, modelArrows, comps, bootN);
           const directOf = (fromVar: number, toVar: number) =>
             sem.effects.find((e) => e.fromVar === fromVar && e.toVar === toVar)?.direct ?? 0;
           const res: BootResult[] = raw.map((b) => ({
@@ -664,7 +683,7 @@ export default function SemTool() {
         }
       }, 30);
     },
-    [analysis, constraints.bootSamples, nodes, arrows]
+    [analysis, constraints.bootSamples, modelNodes, modelArrows]
   );
 
   // ---------- تحلیل ----------
@@ -681,11 +700,11 @@ export default function SemTool() {
       const c = colsArg ?? columns;
       try {
         if (!r.length) throw new Error("داده‌ای وجود ندارد.");
-        const { nodeCols, indicatorCols } = computeNodeCols(r, vars, nodes, cm);
+        const { nodeCols, indicatorCols } = computeNodeCols(r, vars, modelNodes, cm);
         if (nodeCols.some((col) => col.every((v) => !Number.isFinite(v)))) {
           throw new Error("حداقل یکی از گره‌ها داده معتبر ندارد؛ نگاشت ستون‌ها را بررسی کنید.");
         }
-        const sem = estimateSem(nodes, arrows, nodeCols);
+        const sem = estimateSem(modelNodes, modelArrows, nodeCols);
         const corr = correlationMatrixWithP(nodeCols);
         const maha = mahalanobisDistances(nodeCols);
         const mardia = mardiaTest(nodeCols);
@@ -693,7 +712,7 @@ export default function SemTool() {
           col,
           count: r.filter((row) => row[i] == null || !Number.isFinite(row[i])).length,
         }));
-        const normals = nodes.map((nd) => ({
+        const normals = modelNodes.map((nd) => ({
           name: nd.label,
           skew: skewness(nodeCols[nd.nodeId]),
           kurt: kurtosis(nodeCols[nd.nodeId]),
@@ -707,7 +726,7 @@ export default function SemTool() {
             loadings: pcaLoadings(indicatorCols[v.id]),
             subNames: v.subscales.map((s) => s.name),
           }));
-        setAnalysis({ nodeCols, sem, corr, maha, mardia, missing, normals, meas });
+        setAnalysis({ nodeIds: modelNodes.map((nd) => nd.nodeId), nodeCols, sem, corr, maha, mardia, missing, normals, meas });
         setBootResults(null);
         setStatus({ text: "تحلیل با موفقیت اجرا شد.", kind: "ok" });
         if (openModal) {
@@ -715,12 +734,12 @@ export default function SemTool() {
           setModal({
             ok: true,
             lines: [
-              `تعداد موارد: ${r.length} | تعداد گره‌های مدل: ${nodes.length}`,
+              `تعداد موارد: ${r.length} | تعداد گره‌های مدل: ${modelNodes.length}`,
               `مسیرهای معنادار: ${sigCount} از ${sem.paths.length}`,
               sem.fit.valid
                 ? `برازش: CFI=${fmt(sem.fit.cfi)} | RMSEA=${fmt(sem.fit.rmsea)} | χ²/df=${fmt(sem.fit.chi2df)} | SRMR=${fmt(sem.fit.srmr)}`
                 : `برازش: ${sem.fit.message ?? "نامشخص"}`,
-              nodes
+              modelNodes
                 .filter((nd) => nd.role !== "exogenous")
                 .map((nd) => `${nd.label}: R²=${fmt(sem.r2[nd.nodeId] ?? 0)}`)
                 .join(" | "),
@@ -734,7 +753,7 @@ export default function SemTool() {
         if (openModal) setModal({ ok: false, lines: [(err as Error).message] });
       }
     },
-    [rows, colMap, columns, vars, nodes, arrows, constraints.bootSamples, runBootstrap]
+    [rows, colMap, columns, vars, modelNodes, modelArrows, constraints.bootSamples, runBootstrap, setModal]
   );
 
   // ---------- تولید داده ----------
@@ -744,8 +763,8 @@ export default function SemTool() {
       if (!Number.isFinite(nn) || nn < 20) throw new Error("حجم نمونه باید عددی بزرگ‌تر از ۲۰ باشد.");
       const out = generateSemData({
         n: nn,
-        variables: vars,
-        arrows,
+        variables: modelVars,
+        arrows: modelArrows,
         constraints,
       });
       setColumns(out.columns);
@@ -759,7 +778,7 @@ export default function SemTool() {
       setStatus({ text: (err as Error).message, kind: "err" });
       setModal({ ok: false, lines: [(err as Error).message] });
     }
-  }, [n, vars, arrows, constraints, analyze]);
+  }, [n, modelVars, modelArrows, constraints, analyze, vars, setModal]);
 
   const generateRef = useRef(generate);
 
@@ -773,8 +792,7 @@ export default function SemTool() {
   }, []);
 
   // ---------- ایمپورت اکسل ----------
-  const handleImport = useCallback(
-    async (file: File) => {
+  const handleImport = async (file: File) => {
       try {
         const buf = await file.arrayBuffer();
         const wb = XLSX.read(buf, { type: "array" });
@@ -811,9 +829,7 @@ export default function SemTool() {
         setStatus({ text: (err as Error).message, kind: "err" });
         setModal({ ok: false, lines: [(err as Error).message] });
       }
-    },
-    [vars, analyze]
-  );
+  };
 
   // ---------- خروجی‌ها ----------
   const exportExcel = useCallback(() => {
@@ -987,8 +1003,7 @@ export default function SemTool() {
     }
   }, [source, vars, inactiveArrowIds, constraints, n, columns, rows, colMap]);
 
-  const restore = useCallback(
-    async (file: File) => {
+  const restore = async (file: File) => {
       try {
         const text = await file.text();
         const data = JSON.parse(text);
@@ -1012,9 +1027,7 @@ export default function SemTool() {
       } catch (err) {
         setStatus({ text: (err as Error).message, kind: "err" });
       }
-    },
-    []
-  );
+  };
 
   // ---------- ویرایش سلول ----------
   const updateCell = (rowIdx: number, colIdx: number, value: number | null) => {
@@ -1028,6 +1041,12 @@ export default function SemTool() {
       return next;
     });
   };
+
+  // اگر گره‌های مدل با تحلیل ذخیره‌شده یکی نباشند، تحلیل قدیمی است
+  const analysisValid =
+    !!analysis &&
+    analysis.nodeIds.length === modelNodes.length &&
+    analysis.nodeIds.every((id, i) => id === modelNodes[i].nodeId);
 
   const hasLatent = vars.some((v) => v.subscales.length > 0);
   const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان (مکنون)" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
@@ -1045,8 +1064,8 @@ export default function SemTool() {
           .forEach((o) => {
             const meds = medVars.filter(
               (m) =>
-                arrows.some((a) => a.fromVar === e.id && a.toVar === m) &&
-                arrows.some((a) => a.fromVar === m && a.toVar === o.id)
+                modelArrows.some((a) => a.fromVar === e.id && a.toVar === m) &&
+                modelArrows.some((a) => a.fromVar === m && a.toVar === o.id)
             );
             if (!meds.length) return;
             meds.forEach((m) => {
@@ -1072,7 +1091,7 @@ export default function SemTool() {
           })
       );
     return rowsList;
-  }, [vars, arrows]);
+  }, [vars, modelArrows]);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-44 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900">
@@ -1081,6 +1100,14 @@ export default function SemTool() {
         subtitle={modeLabel}
         actions={
           <div className="flex items-center gap-2">
+            <a
+              href="/tools/alpha"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[12px] font-extrabold text-emerald-700 transition hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300"
+              title="ابزار جداگانه اندازه‌گیری و تحلیل آلفای کرونباخ"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              آلفای کرونباخ
+            </a>
             <button
               type="button"
               className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-[12px] font-extrabold text-white shadow-sm transition hover:bg-indigo-500"
@@ -1101,13 +1128,21 @@ export default function SemTool() {
         }
       />
 
+      {/* ناوبری سمت راست: بخش‌های ورودی */}
       <SectionNav
+        side="right"
         sections={[
           { id: "source", label: "منبع داده", short: "منبع" },
           { id: "variables", label: "مشخصات متغیرها", short: "متغیرها" },
           { id: "draw-model", label: "ترسیم مدل", short: "مدل" },
           { id: "constraints", label: "قیود تولید", short: "قیود" },
           { id: "data-table", label: "جدول داده", short: "داده" },
+        ]}
+      />
+      {/* ناوبری سمت چپ: بخش‌های خروجی */}
+      <SectionNav
+        side="left"
+        sections={[
           { id: "assumptions", label: "بررسی پیش‌فرض‌ها", short: "پیش‌فرض" },
           { id: "results", label: "نتایج", short: "نتایج" },
         ]}
@@ -1139,6 +1174,9 @@ export default function SemTool() {
           </div>
         </header>
 
+        <div className="lg:grid lg:grid-cols-2 lg:items-start lg:gap-5">
+        {/* ===== ستون ورودی‌ها (سمت راست) ===== */}
+        <div className="lg:max-h-[calc(100vh-9.5rem)] lg:overflow-y-auto lg:pe-2 lg:pb-6">
         {/* ---------- ۱) منبع داده ---------- */}
         <section id="source" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[0]}`}>
           <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۱) منبع داده</h2>
@@ -1490,13 +1528,18 @@ export default function SemTool() {
                 نکته: وقتی همه فلش‌ها فعال‌اند مدل اشباع است (CFI=1، RMSEA=0)؛ با غیرفعال‌کردن یک فلش، برازش معنادار و
                 قابل آزمون می‌شود.
               </p>
+              {isolatedVars.length > 0 && (
+                <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-[12px] font-bold text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+                  ⚠ متغیرهای زیر هیچ فلش فعالی ندارند و از مدل حذف شده‌اند: {isolatedVars.map((v) => v.name).join("، ")}
+                </div>
+              )}
             </div>
 
             {/* پیش‌نمایش بزرگ */}
             <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
               <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">پیش‌نمایش مدل</p>
               <div className="mt-2">
-                <PathDiagram vars={vars} nodes={nodes} arrows={arrows} />
+                <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} />
               </div>
             </div>
           </div>
@@ -1869,6 +1912,10 @@ export default function SemTool() {
           )}
         </section>
 
+        </div>{/* ===== پایان ستون ورودی‌ها ===== */}
+
+        {/* ===== ستون خروجی‌ها (سمت چپ) ===== */}
+        <div className="lg:max-h-[calc(100vh-9.5rem)] lg:overflow-y-auto lg:ps-2 lg:pb-6">
         {/* ---------- ۶) بررسی پیش‌فرض‌ها ---------- */}
         <section id="assumptions" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[5]}`}>
           <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۶) بررسی پیش‌فرض‌های تحلیل</h2>
@@ -1876,9 +1923,11 @@ export default function SemTool() {
             شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود.
           </p>
 
-          {!analysis ? (
+          {!analysisValid ? (
             <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-              بعد از تولید یا ورود داده، نتایج این بخش نمایش داده می‌شود.
+              {analysis
+                ? "مدل تغییر کرده است؛ برای به‌روزرسانی نتایج، دوباره «اجرای تحلیل» را بزنید."
+                : "بعد از تولید یا ورود داده، نتایج این بخش نمایش داده می‌شود."}
             </div>
           ) : (
             <div className="mt-4 space-y-6">
@@ -2027,8 +2076,8 @@ export default function SemTool() {
                           {nodes.map((_, j) => {
                             if (i === j) return <td key={j} className="number-cell">1</td>;
                             if (i < j) return <td key={j} />;
-                            const r = analysis.corr.r[i][j];
-                            const p = analysis.corr.p[i][j];
+                            const r = analysis.corr.r?.[i]?.[j] ?? NaN;
+                            const p = analysis.corr.p?.[i]?.[j] ?? 1;
                             return (
                               <td key={j} className="number-cell">
                                 {fmt(r)}
@@ -2096,16 +2145,18 @@ export default function SemTool() {
         {/* ---------- ۷) نتایج ---------- */}
         <section id="results" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[6]}`}>
           <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">۷) نتایج</h2>
-          {!analysis ? (
+          {!analysisValid ? (
             <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-              بعد از تحلیل، دیاگرام مدل، ضرایب مسیر، اثرات، R² و شاخص‌های برازش اینجا نمایش داده می‌شود.
+              {analysis
+                ? "مدل تغییر کرده است؛ برای به‌روزرسانی نتایج، دوباره «اجرای تحلیل» را بزنید."
+                : "بعد از تحلیل، دیاگرام مدل، ضرایب مسیر، اثرات، R² و شاخص‌های برازش اینجا نمایش داده می‌شود."}
             </div>
           ) : (
             <div className="mt-4 space-y-6">
               <div>
                 <h3 className="font-extrabold text-stone-800 dark:text-stone-200">دیاگرام مدل</h3>
                 <div className="mt-2">
-                  <PathDiagram vars={vars} nodes={nodes} arrows={arrows} results={analysis.sem} />
+                  <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysis.sem} />
                 </div>
                 <button type="button" className={`${btnSecondary} mt-2`} onClick={() => setShowBigDiagram(true)}>
                   <RefreshCw className="h-4 w-4" />
@@ -2242,7 +2293,11 @@ export default function SemTool() {
               </div>
 
               <div>
-                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">R² گره‌های درون‌زا</h3>
+                <h3 className="font-extrabold text-stone-800 dark:text-stone-200">R² گره‌های درون‌زای مدل</h3>
+                <p className={tinyCls}>
+                  «گره» یعنی هر واحد واردشده در مدل: متغیر جمع‌پذیر با نمره کل یک گره است، و در متغیرهای غیرجمع‌پذیر هر
+                  زیرمقیاس مستقل یک گره جدا می‌شود. R² هر گره یعنی درصد واریانس آن که توسط پیش‌بین‌هایش تبیین می‌شود.
+                </p>
                 <div className="tool-table-wrap mt-2">
                   <table className="tool-table">
                     <thead>
@@ -2327,6 +2382,8 @@ export default function SemTool() {
             </div>
           )}
         </section>
+        </div>{/* ===== پایان ستون خروجی‌ها ===== */}
+        </div>{/* ===== پایان grid دوستونه ===== */}
       </div>
 
       {/* ---------- مودال نمایش بزرگ دیاگرام ---------- */}
@@ -2347,7 +2404,7 @@ export default function SemTool() {
                 بستن
               </button>
             </div>
-            <PathDiagram vars={vars} nodes={nodes} arrows={arrows} results={analysis?.sem} large />
+            <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysis?.sem} large />
           </div>
         </div>
       )}
@@ -2414,5 +2471,13 @@ export default function SemTool() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function SemPage() {
+  return (
+    <ErrorBoundary>
+      <SemTool />
+    </ErrorBoundary>
   );
 }

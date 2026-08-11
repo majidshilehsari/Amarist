@@ -295,14 +295,26 @@ export function vifForPredictors(predictors: number[][]): number[] {
   return vifs;
 }
 
-// ---------- بوت‌استرپ اثر غیرمستقیم ----------
+// ---------- بوت‌استرپ اثر غیرمستقیم (مسیرهای جداگانه + کل) ----------
+
+export type IndirectBootRow = {
+  from: number;
+  to: number;
+  /** میانجی‌های این مسیر خاص؛ null یعنی «کل اثر غیرمستقیم» (مجموع همه مسیرها) */
+  via: number[] | null;
+  indirect: number;
+  lo: number;
+  hi: number;
+  p: number;
+  sig: boolean;
+};
 
 export function bootstrapIndirectEffects(
   composites: number[][],
   roles: Role[],
   pathRows: PathRow[],
   nBoot: number
-): { from: number; to: number; indirect: number; lo: number; hi: number; p: number; sig: boolean }[] {
+): IndirectBootRow[] {
   const n = composites[0]?.length ?? 0;
   const fullRows: number[][] = [];
   for (let i = 0; i < n; i++) {
@@ -315,7 +327,22 @@ export function bootstrapIndirectEffects(
   const meds = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "mediator").map((x) => x.i);
   const exogs = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "exogenous").map((x) => x.i);
   const outs = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "outcome").map((x) => x.i);
-  const results: { from: number; to: number; indirect: number; lo: number; hi: number; p: number; sig: boolean }[] = [];
+  const results: IndirectBootRow[] = [];
+
+  const summarize = (effects: number[]): { lo: number; hi: number; p: number } => {
+    effects.sort((a, b) => a - b);
+    const lo = effects[Math.max(0, Math.floor(nn * 0.025))];
+    const hi = effects[Math.min(nn - 1, Math.floor(nn * 0.975))];
+    const p = clamp(
+      2 * Math.min(
+        effects.filter((x) => x <= 0).length / nn,
+        effects.filter((x) => x >= 0).length / nn
+      ),
+      0,
+      1
+    );
+    return { lo, hi, p };
+  };
 
   for (const e of exogs) {
     for (const o of outs) {
@@ -323,31 +350,56 @@ export function bootstrapIndirectEffects(
         (m) => active.some((p) => p.from === e && p.to === m) && active.some((p) => p.from === m && p.to === o)
       );
       if (!mList.length) continue;
-      const effects: number[] = [];
-      for (let b = 0; b < nBoot; b++) {
-        const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
-        const boot = (v: number) => idx.map((k) => fullRows[k][v]);
-        let indirect = 0;
-        for (const m of mList) {
+
+      // هر مسیر مجزا: X → M → Y
+      for (const m of mList) {
+        const effects: number[] = [];
+        for (let b = 0; b < nBoot; b++) {
+          const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
+          const boot = (v: number) => idx.map((k) => fullRows[k][v]);
           const a = ols([boot(e)], boot(m)).coefs[1] ?? 0;
-          const bCoef = ols([boot(e), boot(m)], boot(o)).coefs[2] ?? 0;
-          indirect += a * bCoef;
+          const c = ols([boot(e), boot(m)], boot(o)).coefs[2] ?? 0;
+          effects.push(a * c);
         }
-        effects.push(indirect);
+        const { lo, hi, p } = summarize(effects);
+        results.push({
+          from: e,
+          to: o,
+          via: [m],
+          indirect: mean(effects),
+          lo,
+          hi,
+          p,
+          sig: lo > 0 || hi < 0,
+        });
       }
-      effects.sort((a, b) => a - b);
-      const lo = effects[Math.max(0, Math.floor(nn * 0.025))];
-      const hi = effects[Math.min(nn - 1, Math.floor(nn * 0.975))];
-      const meanE = mean(effects);
-      const p = clamp(
-        2 * Math.min(
-          effects.filter((x) => x <= 0).length / nn,
-          effects.filter((x) => x >= 0).length / nn
-        ),
-        0,
-        1
-      );
-      results.push({ from: e, to: o, indirect: meanE, lo, hi, p, sig: lo > 0 || hi < 0 });
+
+      // کل اثر غیرمستقیم (مجموع همه مسیرها)
+      if (mList.length > 1) {
+        const effects: number[] = [];
+        for (let b = 0; b < nBoot; b++) {
+          const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
+          const boot = (v: number) => idx.map((k) => fullRows[k][v]);
+          let sum = 0;
+          for (const m of mList) {
+            const a = ols([boot(e)], boot(m)).coefs[1] ?? 0;
+            const c = ols([boot(e), boot(m)], boot(o)).coefs[2] ?? 0;
+            sum += a * c;
+          }
+          effects.push(sum);
+        }
+        const { lo, hi, p } = summarize(effects);
+        results.push({
+          from: e,
+          to: o,
+          via: null,
+          indirect: mean(effects),
+          lo,
+          hi,
+          p,
+          sig: lo > 0 || hi < 0,
+        });
+      }
     }
   }
   return results;

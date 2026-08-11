@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Copy,
   Download,
@@ -48,7 +48,7 @@ const inputCls =
   "w-full rounded-xl border border-stone-300 bg-[#fbfdff] px-3 py-2 text-sm outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100";
 const labelCls = "mb-1 block text-[12px] font-bold text-stone-600";
 const tinyCls = "mt-1 text-[11px] leading-5 text-stone-400";
-const cardCls = "rounded-2xl border border-stone-200 bg-white p-5 shadow-sm sm:p-6";
+const cardCls = "rounded-2xl border p-5 shadow-sm sm:p-6";
 const btnPrimary =
   "inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-extrabold text-white shadow-md shadow-indigo-600/20 transition hover:bg-indigo-500 active:translate-y-0";
 const btnSecondary =
@@ -56,12 +56,30 @@ const btnSecondary =
 const btnLight =
   "inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-2 text-sm font-bold text-stone-600 transition hover:bg-stone-100";
 
+/** رنگ‌های ملایم متفاوت برای هر بخش تا چشم خسته نشود */
+const sectionTones = [
+  "border-blue-200 bg-blue-50/40",
+  "border-violet-200 bg-violet-50/40",
+  "border-amber-200 bg-amber-50/40",
+  "border-emerald-200 bg-emerald-50/40",
+  "border-rose-200 bg-rose-50/40",
+  "border-sky-200 bg-sky-50/40",
+];
+
 function badge(ok: boolean, text: string): string {
   return `<span class="assumption-badge ${ok ? "assumption-ok" : "assumption-bad"}">${text}</span>`;
 }
 
 function badgeWarn(text: string): string {
   return `<span class="assumption-badge assumption-warn">${text}</span>`;
+}
+
+function starP(p: number): string {
+  if (!Number.isFinite(p)) return "";
+  if (p < 0.001) return "***";
+  if (p < 0.01) return "**";
+  if (p < 0.05) return "*";
+  return "";
 }
 
 // ------------------------------------------------------------
@@ -108,7 +126,9 @@ function autoMap(columns: string[], vars: VariableSpec[]): Record<number, (numbe
   const map: Record<number, (number | null)[]> = {};
   const used = new Set<number>();
   vars.forEach((v) => {
-    const slots = v.subscales.length ? v.subscales.map((s) => `${v.name} — ${s}`) : [v.name];
+    const slots = v.subscales.length
+      ? v.subscales.map((s) => `${v.name} — ${s.name}`)
+      : [v.name];
     const idxs: (number | null)[] = [];
     slots.forEach((slot) => {
       const target = normName(slot);
@@ -182,6 +202,15 @@ function buildReportText(
   const { sem, corr, maha, mardia, missing, normals, meas } = analysis;
   L.push(`تعداد موارد: ${n} | تعداد متغیرهای مدل: ${vars.length}`);
   L.push("");
+  L.push("دامنه نمره متغیرها:");
+  vars.forEach((v) => {
+    if (v.subscales.length) {
+      L.push(`  ${v.name}: ${v.subscales.map((s) => `${s.name} (${s.min} تا ${s.max})`).join("، ")}` + (v.hasTotal ? ` | نمره کل: ${v.totalMin} تا ${v.totalMax}` : ""));
+    } else {
+      L.push(`  ${v.name}: ${v.totalMin} تا ${v.totalMax}`);
+    }
+  });
+  L.push("");
   L.push("۱) داده‌های گمشده:");
   missing.forEach((m) => L.push(`  ${m.col}: ${m.count} مورد گمشده`));
   L.push("");
@@ -210,6 +239,7 @@ function buildReportText(
           .join("، ")
     );
   });
+  L.push("  ** p < 0.01 ، * p < 0.05");
   L.push("");
   L.push("۶) هم‌خطی و استقلال خطاها:");
   vars.forEach((v) => {
@@ -227,20 +257,28 @@ function buildReportText(
   sem.paths.forEach((pr) => {
     const from = vars[pr.from].name;
     const to = vars[pr.to].name;
-    L.push(`  ${from} ← ${to}: B=${fmt(pr.b)} | β=${fmt(pr.std)} | SE=${fmt(pr.se)} | t=${fmt(pr.t)} | p=${fmtP(pr.p)}`);
+    L.push(
+      `  ${from} ← ${to}: B=${fmt(pr.b)} | β=${fmt(pr.std)} | SE=${fmt(pr.se)} | t=${fmt(pr.t)} | p=${fmtP(pr.p)}${starP(pr.p)}`
+    );
   });
+  L.push("  * p < 0.05 ، ** p < 0.01 ، *** p < 0.001");
   L.push("");
-  L.push("۸) اثرات (بوت‌استرپ):");
+  L.push("۸) اثرات غیرمستقیم (بوت‌استرپ):");
   if (bootResults && bootResults.length) {
     bootResults.forEach((b) => {
+      const pathLabel = b.via
+        ? `${vars[b.from].name} ← ${b.via.map((m) => vars[m].name).join(" ← ")} ← ${vars[b.to].name}`
+        : `کل اثر غیرمستقیم: ${vars[b.from].name} ← ${vars[b.to].name}`;
       L.push(
-        `  ${vars[b.from].name} ← ${vars[b.to].name}: مستقیم=${fmt(b.direct)} | غیرمستقیم=${fmt(b.indirect)} (CI95: ${fmt(b.lo)} تا ${fmt(b.hi)}، p=${fmtP(b.p)}) | کل=${fmt(b.total)}`
+        `  ${pathLabel}: اثر=${fmt(b.indirect)} | CI95: ${fmt(b.lo)} تا ${fmt(b.hi)} | p=${fmtP(b.p)}${starP(b.p)}` +
+          (b.via === null ? ` | مستقیم=${fmt(b.direct)} | کل=${fmt(b.total)}` : "")
       );
     });
+    L.push("  فاصله اطمینان ۹۵٪ با روش بوت‌استرپ؛ عدم عبور از صفر = معناداری در سطح ۰/۰۵");
   } else {
     sem.effects.forEach((ef) => {
       L.push(
-        `  ${vars[ef.from].name} ← ${vars[ef.to].name}: مستقیم=${fmt(ef.direct)} | غیرمستقیم=${fmt(ef.indirect)} | کل=${fmt(ef.total)} (برای فاصله اطمینان، بوت‌استرپ را اجرا کنید)`
+        `  ${vars[ef.from].name} ← ${vars[ef.to].name}: مستقیم=${fmt(ef.direct)} | غیرمستقیم=${fmt(ef.indirect)} | کل=${fmt(ef.total)}`
       );
     });
   }
@@ -264,6 +302,7 @@ function buildReportText(
     meas.forEach((m) => {
       L.push(`  ${m.name}: آلفا=${fmt(m.alpha)} | بارها=${m.loadings.map((x) => fmt(x)).join("، ")}`);
     });
+    L.push("  معیار پذیرش آلفای کرونباخ ≥ 0.70");
   }
   if (answerKey) {
     L.push("");
@@ -282,6 +321,7 @@ function buildReportText(
 type BootResult = {
   from: number;
   to: number;
+  via: number[] | null;
   direct: number;
   indirect: number;
   lo: number;
@@ -340,14 +380,61 @@ function indirectPairs(vars: VariableSpec[], paths: PathRow[]): { from: number; 
 // کامپوننت اصلی
 // ------------------------------------------------------------
 
+const initialVars: VariableSpec[] = [
+  {
+    id: 0,
+    name: "طرحواره‌های ناسازگار اولیه",
+    role: "exogenous",
+    hasTotal: true,
+    totalMin: 5,
+    totalMax: 25,
+    subscales: [
+      { name: "حوزه اول: بریدگی و طرد", min: 1, max: 5 },
+      { name: "حوزه دوم: خودگردانی و عملکرد مختل", min: 1, max: 5 },
+      { name: "حوزه سوم: محدودیت‌های مختل", min: 1, max: 5 },
+      { name: "حوزه چهارم: دیگرجهت‌مندی", min: 1, max: 5 },
+      { name: "حوزه پنجم: گوش‌به‌زنگی بیش از حد و بازداری", min: 1, max: 5 },
+    ],
+  },
+  {
+    id: 1,
+    name: "اعتیاد به اینستاگرام",
+    role: "mediator",
+    hasTotal: true,
+    totalMin: 2,
+    totalMax: 10,
+    subscales: [
+      { name: "اثر اجتماعی", min: 1, max: 5 },
+      { name: "اجبار", min: 1, max: 5 },
+    ],
+  },
+  {
+    id: 2,
+    name: "نشخوار فکری",
+    role: "mediator",
+    hasTotal: true,
+    totalMin: 3,
+    totalMax: 15,
+    subscales: [
+      { name: "تأمل", min: 1, max: 5 },
+      { name: "درون‌نگری", min: 1, max: 5 },
+      { name: "در فکر فرو رفتن", min: 1, max: 5 },
+    ],
+  },
+  {
+    id: 3,
+    name: "احساس تنهایی",
+    role: "outcome",
+    hasTotal: true,
+    totalMin: 1,
+    totalMax: 5,
+    subscales: [{ name: "احساس تنهایی", min: 1, max: 5 }],
+  },
+];
+
 export default function SemTool() {
   const [source, setSource] = useState<"generate" | "real">("generate");
-  const [vars, setVars] = useState<VariableSpec[]>(() => [
-    { id: 0, name: "طرحواره‌های ناسازگار اولیه", role: "exogenous", hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 5, totalMax: 25, subscales: ["حوزه اول: بریدگی و طرد", "حوزه دوم: خودگردانی و عملکرد مختل", "حوزه سوم: محدودیت‌های مختل", "حوزه چهارم: دیگرجهت‌مندی", "حوزه پنجم: گوش‌به‌زنگی بیش از حد و بازداری"] },
-    { id: 1, name: "اعتیاد به اینستاگرام", role: "mediator", hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 2, totalMax: 10, subscales: ["اثر اجتماعی", "اجبار"] },
-    { id: 2, name: "نشخوار فکری", role: "mediator", hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 3, totalMax: 15, subscales: ["تأمل", "درون‌نگری", "در فکر فرو رفتن"] },
-    { id: 3, name: "احساس تنهایی", role: "outcome", hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 1, totalMax: 5, subscales: ["احساس تنهایی"] },
-  ]);
+  const [vars, setVars] = useState<VariableSpec[]>(initialVars);
   const [inactiveKeys, setInactiveKeys] = useState<Set<string>>(() => new Set());
   const allPaths = useMemo(() => buildPaths(vars), [vars]);
   const paths = useMemo(
@@ -387,30 +474,20 @@ export default function SemTool() {
     setVars((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
   };
 
-  const updateItemRange = (id: number, field: "itemMin" | "itemMax", value: number) => {
-    setVars((prev) =>
-      prev.map((v) => {
-        if (v.id !== id) return v;
-        const itemMin = field === "itemMin" ? value : v.itemMin;
-        const itemMax = field === "itemMax" ? value : v.itemMax;
-        const count = v.subscales.length || 1;
-        return {
-          ...v,
-          itemMin,
-          itemMax,
-          totalMin: itemMin * count,
-          totalMax: itemMax * count,
-        };
-      })
-    );
-  };
-
   const addVar = () => {
     setVars((prev) => {
       const id = prev.length ? Math.max(...prev.map((v) => v.id)) + 1 : 0;
       return [
         ...prev,
-        { id, name: `متغیر ${prev.length + 1}`, role: "outcome" as Role, hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 1, totalMax: 5, subscales: [] },
+        {
+          id,
+          name: `متغیر ${prev.length + 1}`,
+          role: "outcome" as Role,
+          hasTotal: false,
+          totalMin: 1,
+          totalMax: 5,
+          subscales: [],
+        },
       ];
     });
   };
@@ -421,28 +498,38 @@ export default function SemTool() {
 
   const addSubscale = (id: number) => {
     setVars((prev) =>
-      prev.map((v) => {
-        if (v.id !== id) return v;
-        const subscales = [...v.subscales, `زیرمقیاس ${v.subscales.length + 1}`];
-        const count = subscales.length || 1;
-        return { ...v, subscales, totalMin: v.itemMin * count, totalMax: v.itemMax * count };
-      })
+      prev.map((v) =>
+        v.id === id
+          ? { ...v, subscales: [...v.subscales, { name: `زیرمقیاس ${v.subscales.length + 1}`, min: 1, max: 5 }] }
+          : v
+      )
     );
   };
 
   const removeSubscale = (id: number, idx: number) => {
     setVars((prev) =>
-      prev.map((v) => {
-        if (v.id !== id) return v;
-        const subscales = v.subscales.filter((_, i) => i !== idx);
-        const count = subscales.length || 1;
-        return { ...v, subscales, totalMin: v.itemMin * count, totalMax: v.itemMax * count };
-      })
+      prev.map((v) =>
+        v.id === id ? { ...v, subscales: v.subscales.filter((_, i) => i !== idx) } : v
+      )
     );
   };
 
   const setSubscaleName = (id: number, idx: number, name: string) => {
-    setVars((prev) => prev.map((v) => (v.id === id ? { ...v, subscales: v.subscales.map((s, i) => (i === idx ? name : s)) } : v)));
+    setVars((prev) =>
+      prev.map((v) =>
+        v.id === id ? { ...v, subscales: v.subscales.map((s, i) => (i === idx ? { ...s, name } : s)) } : v
+      )
+    );
+  };
+
+  const setSubscaleRange = (id: number, idx: number, field: "min" | "max", value: number) => {
+    setVars((prev) =>
+      prev.map((v) =>
+        v.id === id
+          ? { ...v, subscales: v.subscales.map((s, i) => (i === idx ? { ...s, [field]: value } : s)) }
+          : v
+      )
+    );
   };
 
   const togglePath = (from: number, to: number) => {
@@ -478,22 +565,19 @@ export default function SemTool() {
         try {
           const sem = estimateSem(comps, vars.map((v) => v.role), paths);
           const raw = bootstrapIndirectEffects(comps, vars.map((v) => v.role), paths, bootN);
-          // نقطه‌تخمین اثر از داده اصلی، فاصله اطمینان از توزیع بوت‌استرپ
-          const res: BootResult[] = raw.map((b) => {
-            const eff = sem.effects.find((e) => e.from === b.from && e.to === b.to);
-            const indirect = eff?.indirect ?? b.indirect;
-            const direct = eff?.direct ?? 0;
-            return {
-              from: b.from,
-              to: b.to,
-              direct,
-              indirect,
-              lo: b.lo,
-              hi: b.hi,
-              p: b.p,
-              total: direct + indirect,
-            };
-          });
+          const directOf = (from: number, to: number) =>
+            sem.paths.find((p) => p.from === from && p.to === to)?.b ?? 0;
+          const res: BootResult[] = raw.map((b) => ({
+            from: b.from,
+            to: b.to,
+            via: b.via,
+            direct: b.via === null ? directOf(b.from, b.to) : 0,
+            indirect: b.indirect,
+            lo: b.lo,
+            hi: b.hi,
+            p: b.p,
+            total: b.via === null ? directOf(b.from, b.to) + b.indirect : NaN,
+          }));
           setBootResults(res);
           setBootBusy(false);
           setStatus({ text: `بوت‌استرپ با ${bootN} نمونه تکمیل شد.`, kind: "ok" });
@@ -538,7 +622,7 @@ export default function SemTool() {
             name: v.name,
             alpha: cronbachAlpha(indicatorCols[v.id]),
             loadings: pcaLoadings(indicatorCols[v.id]),
-            subNames: v.subscales,
+            subNames: v.subscales.map((s) => s.name),
           }));
         setAnalysis({ composites, sem, corr, maha, mardia, missing, normals, meas });
         setBootResults(null);
@@ -668,24 +752,31 @@ export default function SemTool() {
       vars.forEach((v) => {
         if (v.subscales.length) {
           v.subscales.forEach((s) => {
-            headers.push(`${v.name} — ${s}`);
-            sample1.push(v.itemMin);
-            sample2.push(v.itemMax);
+            headers.push(`${v.name} — ${s.name}`);
+            sample1.push(s.min);
+            sample2.push(s.max);
             empty.push(null);
           });
         } else {
           headers.push(v.name);
-          sample1.push(v.itemMin);
-          sample2.push(v.itemMax);
+          sample1.push(v.totalMin);
+          sample2.push(v.totalMax);
           empty.push(null);
         }
       });
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(
-        wb,
-        XLSX.utils.aoa_to_sheet([headers, sample1, sample2, empty, empty, empty]),
-        "قالب داده"
-      );
+      const ws = XLSX.utils.aoa_to_sheet([headers, sample1, sample2, empty, empty, empty]);
+      // راهنمای دامنه در یک شیت جدا
+      XLSX.utils.book_append_sheet(wb, ws, "قالب داده");
+      const guide = [
+        ["متغیر", "زیرمقیاس", "حداقل", "حداکثر"],
+        ...vars.flatMap((v) =>
+          v.subscales.length
+            ? v.subscales.map((s) => [v.name, s.name, s.min, s.max])
+            : [[v.name, "—", v.totalMin, v.totalMax]]
+        ),
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(guide), "راهنمای دامنه");
       XLSX.writeFile(wb, "amarist-sem-template.xlsx");
       setStatus({ text: "قالب داده دانلود شد؛ آن را پر کنید و دوباره ایمپورت کنید.", kind: "ok" });
     } catch (err) {
@@ -776,7 +867,6 @@ export default function SemTool() {
   const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
   const varName = (id: number) => vars.find((v) => v.id === id)?.name ?? `متغیر ${id + 1}`;
   const pairs = indirectPairs(vars, paths);
-  const bootSamples = constraints.bootSamples;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-44">
@@ -784,7 +874,7 @@ export default function SemTool() {
 
       <div className="mx-auto max-w-[1280px] px-4">
         {/* ---------- هیرو ---------- */}
-        <header className="mt-6 rounded-[22px] border border-stone-200 bg-white/80 p-6 shadow-lg shadow-stone-900/5 backdrop-blur sm:p-7">
+        <header className={`${cardCls} mt-6 border-stone-200 bg-white/80 shadow-lg shadow-stone-900/5 backdrop-blur`}>
           <div className="flex flex-wrap items-center gap-3">
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-md">
               <RefreshCw className="h-6 w-6" />
@@ -806,7 +896,7 @@ export default function SemTool() {
         </header>
 
         {/* ---------- ۱) منبع داده ---------- */}
-        <section className={`${cardCls} mt-4`}>
+        <section className={`${cardCls} mt-4 ${sectionTones[0]}`}>
           <h2 className="text-lg font-extrabold text-stone-900">۱) منبع داده</h2>
           <p className="mt-1 text-[13px] leading-6 text-stone-500">
             انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود.
@@ -815,7 +905,7 @@ export default function SemTool() {
             <button
               onClick={() => setSource("generate")}
               className={`rounded-2xl border-2 p-4 text-start transition ${
-                source === "generate" ? "border-indigo-600 bg-indigo-50" : "border-stone-200 bg-white hover:border-indigo-300"
+                source === "generate" ? "border-blue-600 bg-blue-100/60" : "border-stone-200 bg-white hover:border-blue-300"
               }`}
             >
               <p className="font-extrabold text-stone-900">تولید داده تمرینی</p>
@@ -826,7 +916,7 @@ export default function SemTool() {
             <button
               onClick={() => setSource("real")}
               className={`rounded-2xl border-2 p-4 text-start transition ${
-                source === "real" ? "border-indigo-600 bg-indigo-50" : "border-stone-200 bg-white hover:border-indigo-300"
+                source === "real" ? "border-blue-600 bg-blue-100/60" : "border-stone-200 bg-white hover:border-blue-300"
               }`}
             >
               <p className="font-extrabold text-stone-900">داده واقعی خودم</p>
@@ -838,12 +928,12 @@ export default function SemTool() {
         </section>
 
         {/* ---------- ۲) مشخصات متغیرها ---------- */}
-        <section className={`${cardCls} mt-4`}>
+        <section className={`${cardCls} mt-4 ${sectionTones[1]}`}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-extrabold text-stone-900">۲) مشخصات متغیرها</h2>
               <p className="mt-1 text-[13px] leading-6 text-stone-500">
-                نام، نقش (برون‌زا / میانجی / درون‌زا)، دامنه نمره و زیرمقیاس‌ها را مشخص کنید. نمره کل = مجموع زیرمقیاس‌ها.
+                ابتدا نقش، سپس نام متغیر، نمره کل و زیرمقیاس‌ها را مشخص کنید. هر زیرمقیاس دامنه نمره مستقل خودش را دارد.
               </p>
             </div>
             <button className={btnLight} onClick={addVar}>
@@ -853,176 +943,267 @@ export default function SemTool() {
           </div>
 
           <div className="mt-4 grid gap-4">
-            {vars.map((v) => (
-              <div key={v.id} className="rounded-2xl border border-stone-200 bg-[#fbfdff] p-4">
-                <div className="flex flex-wrap items-start gap-3">
-                  <div className="min-w-44 flex-1">
-                    <label className={labelCls}>نام متغیر</label>
-                    <input className={inputCls} value={v.name} onChange={(e) => updateVar(v.id, { name: e.target.value })} />
-                  </div>
-                  <div className="w-40">
-                    <label className={labelCls}>نقش</label>
-                    <select
-                      className={inputCls}
-                      value={v.role}
-                      onChange={(e) => updateVar(v.id, { role: e.target.value as Role })}
-                    >
-                      <option value="exogenous">برون‌زا (X)</option>
-                      <option value="mediator">میانجی (M)</option>
-                      <option value="outcome">درون‌زا (Y)</option>
-                    </select>
-                  </div>
-                  <div className="flex items-center gap-2 pt-6">
-                    <label className="flex cursor-pointer items-center gap-2 text-[13px] font-bold text-stone-700">
-                      <input
-                        type="checkbox"
-                        checked={v.hasTotal}
-                        onChange={(e) => updateVar(v.id, { hasTotal: e.target.checked })}
-                        className="h-4 w-4 accent-indigo-600"
-                      />
-                      نمره کل دارد
-                    </label>
+            {vars.map((v) => {
+              const sumMin = v.subscales.reduce((s, x) => s + x.min, 0);
+              const sumMax = v.subscales.reduce((s, x) => s + x.max, 0);
+              const totalMatches =
+                v.hasTotal && v.subscales.length > 0 && sumMin === v.totalMin && sumMax === v.totalMax;
+              return (
+                <div key={v.id} className="rounded-2xl border border-stone-200 bg-white p-4">
+                  {/* ردیف ۱: نقش و نام */}
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="w-44">
+                      <label className={labelCls}>نقش متغیر</label>
+                      <select
+                        className={inputCls}
+                        value={v.role}
+                        onChange={(e) => updateVar(v.id, { role: e.target.value as Role })}
+                      >
+                        <option value="exogenous">برون‌زا (X)</option>
+                        <option value="mediator">میانجی (M)</option>
+                        <option value="outcome">درون‌زا (Y)</option>
+                      </select>
+                    </div>
+                    <div className="min-w-52 flex-1">
+                      <label className={labelCls}>نام متغیر</label>
+                      <input className={inputCls} value={v.name} onChange={(e) => updateVar(v.id, { name: e.target.value })} />
+                    </div>
                     <button
                       onClick={() => removeVar(v.id)}
-                      className="flex h-9 w-9 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100"
+                      className="flex h-10 w-10 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100"
                       title="حذف متغیر"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
                   </div>
-                </div>
 
-                {/* دامنه نمره */}
-                <div className="mt-3 grid gap-3 sm:grid-cols-4">
-                  <div>
-                    <label className={labelCls}>حداقل نمره زیرمقیاس‌ها</label>
-                    <input type="number" className={inputCls} value={v.itemMin} onChange={(e) => updateItemRange(v.id, "itemMin", Number(e.target.value))} />
-                  </div>
-                  <div>
-                    <label className={labelCls}>حداکثر نمره زیرمقیاس‌ها</label>
-                    <input type="number" className={inputCls} value={v.itemMax} onChange={(e) => updateItemRange(v.id, "itemMax", Number(e.target.value))} />
-                  </div>
-                  <div>
-                    <label className={labelCls}>حداقل نمره کل</label>
-                    <input
-                      type="number"
-                      className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`}
-                      value={v.totalMin}
-                      disabled={!v.hasTotal}
-                      onChange={(e) => updateVar(v.id, { totalMin: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div>
-                    <label className={labelCls}>حداکثر نمره کل</label>
-                    <input
-                      type="number"
-                      className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`}
-                      value={v.totalMax}
-                      disabled={!v.hasTotal}
-                      onChange={(e) => updateVar(v.id, { totalMax: Number(e.target.value) })}
-                    />
-                  </div>
-                </div>
-                <p className={`${tinyCls} mt-1`}>
-                  دامنه نمره کل با تغییر دامنه زیرمقیاس‌ها یا تعداد آن‌ها خودکار محاسبه می‌شود (قابل ویرایش دستی).
-                </p>
-
-                {/* زیرمقیاس‌ها */}
-                <div className="mt-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-[12px] font-bold text-stone-600">
-                      زیرمقیاس‌ها ({v.subscales.length} عدد)
-                      {v.subscales.length > 0 && " — نمره کل = مجموع زیرمقیاس‌ها"}
-                    </label>
-                    <button className="text-[12px] font-bold text-indigo-600 hover:text-indigo-500" onClick={() => addSubscale(v.id)}>
-                      + افزودن زیرمقیاس
-                    </button>
-                  </div>
-                  {v.subscales.length === 0 && (
-                    <p className={`${tinyCls} mt-1`}>بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) در نظر گرفته می‌شود.</p>
-                  )}
-                  <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                    {v.subscales.map((s, si) => (
-                      <div key={si} className="flex items-center gap-2">
-                        <input className={inputCls} value={s} onChange={(e) => setSubscaleName(v.id, si, e.target.value)} />
-                        <button
-                          onClick={() => removeSubscale(v.id, si)}
-                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500"
-                          title="حذف زیرمقیاس"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                  {/* ردیف ۲: نمره کل دارد؟ */}
+                  <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3">
+                    <div className="flex flex-wrap items-center gap-6">
+                      <span className="text-sm font-extrabold text-stone-800">نمره کل دارد؟</span>
+                      <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700">
+                        <input
+                          type="radio"
+                          name={`hasTotal-${v.id}`}
+                          checked={v.hasTotal}
+                          onChange={() => updateVar(v.id, { hasTotal: true })}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                        بله
+                      </label>
+                      <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700">
+                        <input
+                          type="radio"
+                          name={`hasTotal-${v.id}`}
+                          checked={!v.hasTotal}
+                          onChange={() => updateVar(v.id, { hasTotal: false })}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                        خیر
+                      </label>
+                    </div>
+                    <div className="mt-2 grid max-w-md grid-cols-2 gap-3">
+                      <div>
+                        <label className={labelCls}>حداقل نمره کل</label>
+                        <input
+                          type="number"
+                          className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`}
+                          value={v.totalMin}
+                          disabled={!v.hasTotal}
+                          onChange={(e) => updateVar(v.id, { totalMin: Number(e.target.value) })}
+                        />
                       </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* نگاشت ستون‌ها در حالت واقعی */}
-                {source === "real" && (
-                  <div className="mt-3 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/50 p-3">
-                    <p className="text-[12px] font-bold text-indigo-700">نگاشت ستون‌های فایل به متغیر «{v.name}»</p>
-                    {v.subscales.length === 0 ? (
-                      <div className="mt-2 max-w-xs">
-                        <label className={labelCls}>ستون نمره / متغیر</label>
-                        <select
-                          className={inputCls}
-                          value={colMap[v.id]?.[0] ?? -1}
-                          onChange={(e) => updateColMap(v.id, 0, e.target.value === "-1" ? null : Number(e.target.value))}
-                        >
-                          <option value={-1}>— انتخاب نشده —</option>
-                          {columns.map((c, i) => (
-                            <option key={i} value={i}>{c}</option>
-                          ))}
-                        </select>
+                      <div>
+                        <label className={labelCls}>حداکثر نمره کل</label>
+                        <input
+                          type="number"
+                          className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`}
+                          value={v.totalMax}
+                          disabled={!v.hasTotal}
+                          onChange={(e) => updateVar(v.id, { totalMax: Number(e.target.value) })}
+                        />
                       </div>
-                    ) : (
-                      <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                        {v.subscales.map((s, si) => (
-                          <div key={si}>
-                            <label className={labelCls}>{s}</label>
-                            <select
-                              className={inputCls}
-                              value={colMap[v.id]?.[si] ?? -1}
-                              onChange={(e) => updateColMap(v.id, si, e.target.value === "-1" ? null : Number(e.target.value))}
-                            >
-                              <option value={-1}>— انتخاب نشده —</option>
-                              {columns.map((c, i) => (
-                                <option key={i} value={i}>{c}</option>
-                              ))}
-                            </select>
-                          </div>
-                        ))}
-                      </div>
+                    </div>
+                    {!v.hasTotal && (
+                      <p className={`${tinyCls} mt-1`}>
+                        فیلدهای نمره کل غیرفعال‌اند؛ برای متغیر تک‌نمره‌ای بدون نمره کل، تولید داده از همین دامنه (۱ تا ۵) استفاده می‌کند.
+                      </p>
                     )}
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {/* ردیف ۳: زیرمقیاس دارد؟ */}
+                  <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50/60 p-3">
+                    <div className="flex flex-wrap items-center gap-6">
+                      <span className="text-sm font-extrabold text-stone-800">زیرمقیاس دارد؟</span>
+                      <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700">
+                        <input
+                          type="radio"
+                          name={`hasSub-${v.id}`}
+                          checked={v.subscales.length > 0}
+                          onChange={() => {
+                            if (v.subscales.length === 0) addSubscale(v.id);
+                          }}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                        بله
+                      </label>
+                      <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700">
+                        <input
+                          type="radio"
+                          name={`hasSub-${v.id}`}
+                          checked={v.subscales.length === 0}
+                          onChange={() => updateVar(v.id, { subscales: [] })}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                        خیر
+                      </label>
+                    </div>
+
+                    {v.subscales.length > 0 ? (
+                      <>
+                        <div className="mt-3 space-y-2">
+                          <div className="grid grid-cols-[1fr_120px_120px_40px] items-center gap-2 px-1 text-[11px] font-bold text-stone-500">
+                            <span>نام زیرمقیاس</span>
+                            <span className="text-center">حداقل نمره</span>
+                            <span className="text-center">حداکثر نمره</span>
+                            <span />
+                          </div>
+                          {v.subscales.map((s, si) => (
+                            <div key={si} className="grid grid-cols-[1fr_120px_120px_40px] items-center gap-2">
+                              <input
+                                className={inputCls}
+                                value={s.name}
+                                placeholder="نام زیرمقیاس"
+                                onChange={(e) => setSubscaleName(v.id, si, e.target.value)}
+                              />
+                              <input
+                                type="number"
+                                dir="ltr"
+                                className={inputCls}
+                                value={s.min}
+                                onChange={(e) => setSubscaleRange(v.id, si, "min", Number(e.target.value))}
+                              />
+                              <input
+                                type="number"
+                                dir="ltr"
+                                className={inputCls}
+                                value={s.max}
+                                onChange={(e) => setSubscaleRange(v.id, si, "max", Number(e.target.value))}
+                              />
+                              <button
+                                onClick={() => removeSubscale(v.id, si)}
+                                className="flex h-9 w-9 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500"
+                                title="حذف زیرمقیاس"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap items-center gap-3 text-[12px]">
+                          <span className="rounded-full bg-indigo-50 px-3 py-1 font-bold text-indigo-700">
+                            جمع کل زیرمقیاس‌ها: حداقل {sumMin} — حداکثر {sumMax}
+                          </span>
+                          {v.hasTotal &&
+                            (totalMatches ? (
+                              <span className="rounded-full bg-emerald-100 px-3 py-1 font-bold text-emerald-700">
+                                ✓ نمره کل با جمع زیرمقیاس‌ها برابر است
+                              </span>
+                            ) : (
+                              <span className="rounded-full bg-amber-100 px-3 py-1 font-bold text-amber-700">
+                                ⚠ نمره کل ({v.totalMin} تا {v.totalMax}) با جمع زیرمقیاس‌ها ({sumMin} تا {sumMax}) برابر نیست
+                              </span>
+                            ))}
+                        </div>
+
+                        <button className={`${btnLight} mt-3`} onClick={() => addSubscale(v.id)}>
+                          <Plus className="h-4 w-4" />
+                          افزودن زیرمقیاس
+                        </button>
+                      </>
+                    ) : (
+                      <p className={`${tinyCls} mt-2`}>
+                        بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) در نظر گرفته می‌شود.
+                      </p>
+                    )}
+                  </div>
+
+                  {/* نگاشت ستون‌ها در حالت واقعی */}
+                  {source === "real" && (
+                    <div className="mt-3 rounded-xl border border-dashed border-indigo-200 bg-indigo-50/50 p-3">
+                      <p className="text-[12px] font-bold text-indigo-700">نگاشت ستون‌های فایل به متغیر «{v.name}»</p>
+                      {v.subscales.length === 0 ? (
+                        <div className="mt-2 max-w-xs">
+                          <label className={labelCls}>ستون نمره / متغیر</label>
+                          <select
+                            className={inputCls}
+                            value={colMap[v.id]?.[0] ?? -1}
+                            onChange={(e) => updateColMap(v.id, 0, e.target.value === "-1" ? null : Number(e.target.value))}
+                          >
+                            <option value={-1}>— انتخاب نشده —</option>
+                            {columns.map((c, i) => (
+                              <option key={i} value={i}>{c}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : (
+                        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {v.subscales.map((s, si) => (
+                            <div key={si}>
+                              <label className={labelCls}>{s.name}</label>
+                              <select
+                                className={inputCls}
+                                value={colMap[v.id]?.[si] ?? -1}
+                                onChange={(e) => updateColMap(v.id, si, e.target.value === "-1" ? null : Number(e.target.value))}
+                              >
+                                <option value={-1}>— انتخاب نشده —</option>
+                                {columns.map((c, i) => (
+                                  <option key={i} value={i}>{c}</option>
+                                ))}
+                              </select>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           {/* مسیرهای مدل */}
-          <div className="mt-4 rounded-2xl border border-stone-200 bg-[#fbfdff] p-4">
+          <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4">
             <p className="text-[12px] font-bold text-stone-600">مسیرهای مدل (فعال/غیرفعال)</p>
             <p className={tinyCls}>با غیرفعال کردن یک مسیر، آن مسیر صفر فرض می‌شود و شاخص‌های برازش معنادار می‌شوند.</p>
             <div className="mt-2 flex flex-wrap gap-2">
-              {paths.map((p, i) => (
-                <label
-                  key={i}
-                  className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-[12px] font-bold transition ${
-                    p.active ? "border-indigo-300 bg-indigo-50 text-indigo-800" : "border-stone-200 bg-white text-stone-400"
-                  }`}
-                >
-                  <input type="checkbox" checked={p.active} onChange={() => togglePath(p.from, p.to)} className="h-4 w-4 accent-indigo-600" />
-                  {varName(p.from)} ← {varName(p.to)}
-                </label>
-              ))}
+              {allPaths.map((p, i) => {
+                const active = !inactiveKeys.has(`${p.from}:${p.to}`);
+                return (
+                  <label
+                    key={i}
+                    className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-[12px] font-bold transition ${
+                      active ? "border-indigo-300 bg-indigo-50 text-indigo-800" : "border-stone-200 bg-white text-stone-400"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={active}
+                      onChange={() => togglePath(p.from, p.to)}
+                      className="h-4 w-4 accent-indigo-600"
+                    />
+                    {varName(p.from)} ← {varName(p.to)}
+                  </label>
+                );
+              })}
             </div>
           </div>
         </section>
 
         {/* ---------- ۳) قیود تولید ---------- */}
         {source === "generate" && (
-          <section className={`${cardCls} mt-4`}>
+          <section className={`${cardCls} mt-4 ${sectionTones[2]}`}>
             <h2 className="text-lg font-extrabold text-stone-900">۳) قیود تولید داده</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500">
               مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار باشد.
@@ -1133,12 +1314,14 @@ export default function SemTool() {
             {pairs.length > 0 && (
               <>
                 <h3 className="mt-5 font-extrabold text-stone-800">قیود اثرات غیرمستقیم (میانجی‌گری — با بوت‌استرپ)</h3>
-                <p className={tinyCls}>برای هر جفت برون‌زا ← درون‌زا، معناداری اثر غیرمستقیم از طریق میانجی‌ها تعیین می‌شود.</p>
+                <p className={tinyCls}>
+                  برای هر جفت برون‌زا ← درون‌زا، معناداری «کل» اثر غیرمستقیم (مجموع همه مسیرهای میانجی) تعیین می‌شود.
+                </p>
                 <div className="tool-table-wrap mt-3">
                   <table className="tool-table" style={{ minWidth: 480 }}>
                     <thead>
                       <tr>
-                        <th>مسیر غیرمستقیم</th>
+                        <th>مسیر غیرمستقیم (کل)</th>
                         <th>وضعیت</th>
                       </tr>
                     </thead>
@@ -1178,7 +1361,7 @@ export default function SemTool() {
                 { key: "enforceVif" as const, title: "عدم هم‌خطی چندگانه", desc: "VIF همه پیش‌بین‌ها کمتر از 5", conflict: false },
                 { key: "enforceDw" as const, title: "استقلال خطاها", desc: "دوربین-واتسون بین 1.5 تا 2.5", conflict: false },
               ].map((item) => (
-                <label key={item.key} className={`flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-[#fbfdff] p-3 ${item.conflict ? "opacity-60" : ""}`}>
+                <label key={item.key} className={`flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-white p-3 ${item.conflict ? "opacity-60" : ""}`}>
                   <input
                     type="checkbox"
                     checked={constraints[item.key] && !item.conflict}
@@ -1197,7 +1380,7 @@ export default function SemTool() {
             </div>
 
             <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-[#fbfdff] p-3">
+              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-white p-3">
                 <input
                   type="checkbox"
                   checked={constraints.r2Range != null}
@@ -1228,7 +1411,7 @@ export default function SemTool() {
                   </span>
                 </span>
               </label>
-              <div className="rounded-xl border border-stone-200 bg-[#fbfdff] p-3">
+              <div className="rounded-xl border border-stone-200 bg-white p-3">
                 <p className="text-sm font-extrabold text-stone-800">شاخص‌های برازش (اختیاری)</p>
                 <div className="mt-2 flex gap-3">
                   <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600">
@@ -1268,7 +1451,7 @@ export default function SemTool() {
         )}
 
         {/* ---------- ۴) جدول داده ---------- */}
-        <section className={`${cardCls} mt-4`}>
+        <section className={`${cardCls} mt-4 ${sectionTones[3]}`}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-extrabold text-stone-900">۴) جدول داده</h2>
@@ -1356,7 +1539,7 @@ export default function SemTool() {
         </section>
 
         {/* ---------- ۵) بررسی پیش‌فرض‌ها ---------- */}
-        <section className={`${cardCls} mt-4`}>
+        <section className={`${cardCls} mt-4 ${sectionTones[4]}`}>
           <h2 className="text-lg font-extrabold text-stone-900">۵) بررسی پیش‌فرض‌های تحلیل</h2>
           <p className="mt-1 text-[13px] leading-6 text-stone-500">
             شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود.
@@ -1433,16 +1616,22 @@ export default function SemTool() {
                       <tr><th>متغیر</th><th>دامنه نمره</th><th>کجی</th><th>کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
                     </thead>
                     <tbody>
-                      {analysis.normals.map((x, i) => (
-                        <tr key={i}>
-                          <td>{x.name}</td>
-                          <td className="number-cell">{vars[i].itemMin} تا {vars[i].itemMax}{vars[i].hasTotal ? ` (کل: ${vars[i].totalMin} تا ${vars[i].totalMax})` : ""}</td>
-                          <td className="number-cell">{fmt(x.skew)}</td>
-                          <td className="number-cell">{fmt(x.kurt)}</td>
-                          <td dangerouslySetInnerHTML={{ __html: Math.abs(x.skew) < 3 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
-                          <td dangerouslySetInnerHTML={{ __html: Math.abs(x.kurt) < 10 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
-                        </tr>
-                      ))}
+                      {analysis.normals.map((x, i) => {
+                        const v = vars[i];
+                        const rangeText = v.subscales.length
+                          ? v.subscales.map((s) => `${s.name}: ${s.min}-${s.max}`).join("، ") + (v.hasTotal ? ` | کل: ${v.totalMin}-${v.totalMax}` : "")
+                          : `${v.totalMin}-${v.totalMax}`;
+                        return (
+                          <tr key={i}>
+                            <td>{x.name}</td>
+                            <td className="text-start text-[11px]">{rangeText}</td>
+                            <td className="number-cell">{fmt(x.skew)}</td>
+                            <td className="number-cell">{fmt(x.kurt)}</td>
+                            <td dangerouslySetInnerHTML={{ __html: Math.abs(x.skew) < 3 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
+                            <td dangerouslySetInnerHTML={{ __html: Math.abs(x.kurt) < 10 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -1475,7 +1664,7 @@ export default function SemTool() {
               {/* ۵) خطی بودن */}
               <div>
                 <h3 className="font-extrabold text-stone-800">۵) خطی بودن روابط (ماتریس همبستگی پیرسون)</h3>
-                <p className={tinyCls}>** معناداری در سطح ۰/۰۱ و * معناداری در سطح ۰/۰۵. اعداد زیر قطر ماتریس قرار دارند.</p>
+                <p className={tinyCls}>اعداد زیر قطر ماتریس قرار دارند؛ ** معناداری در سطح ۰/۰۱ و * معناداری در سطح ۰/۰۵.</p>
                 <div className="tool-table-wrap mt-2">
                   <table className="tool-table">
                     <thead>
@@ -1507,6 +1696,7 @@ export default function SemTool() {
                     </tbody>
                   </table>
                 </div>
+                <p className={`${tinyCls} mt-1 text-stone-500`}>** p &lt; 0.01 ، * p &lt; 0.05 (دوطرفه)</p>
               </div>
 
               {/* ۶) هم‌خطی و استقلال خطاها */}
@@ -1546,7 +1736,7 @@ export default function SemTool() {
         </section>
 
         {/* ---------- ۶) نتایج ---------- */}
-        <section className={`${cardCls} mt-4`}>
+        <section className={`${cardCls} mt-4 ${sectionTones[5]}`}>
           <h2 className="text-lg font-extrabold text-stone-900">۶) نتایج</h2>
           {!analysis ? (
             <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400">
@@ -1573,7 +1763,7 @@ export default function SemTool() {
                       </thead>
                       <tbody>
                         {analysis.meas.map((m) => (
-                          <>
+                          <Fragment key={m.varId}>
                             <tr key={`${m.varId}-total`} style={{ background: "#f8fafc" }}>
                               <td rowSpan={m.subNames.length + 1} style={{ fontWeight: 900 }}>{m.name}</td>
                               <td style={{ fontWeight: 800 }}>نمره کل ({m.subNames.length} زیرمقیاس)</td>
@@ -1589,14 +1779,12 @@ export default function SemTool() {
                                 <td />
                               </tr>
                             ))}
-                          </>
+                          </Fragment>
                         ))}
                       </tbody>
                     </table>
                   </div>
-                  <p className={tinyCls}>
-                    آلفای کرونباخ روی زیرمقیاس‌های هر متغیر (همان نمره کل) محاسبه می‌شود؛ برای متغیر تک‌شاخصی قابل محاسبه نیست.
-                  </p>
+                  <p className={`${tinyCls} mt-1 text-stone-500`}>معیار پذیرش آلفای کرونباخ ≥ 0.70</p>
                 </div>
               )}
 
@@ -1618,7 +1806,7 @@ export default function SemTool() {
                           <td className="number-cell">{fmt(pr.b)}</td>
                           <td className="number-cell">{fmt(pr.se)}</td>
                           <td className="number-cell">{fmt(pr.t)}</td>
-                          <td className="number-cell">{fmtP(pr.p)}</td>
+                          <td className="number-cell">{fmtP(pr.p)}{starP(pr.p)}</td>
                           <td className="number-cell">{fmt(pr.std)}</td>
                           <td dangerouslySetInnerHTML={{ __html: pr.p < 0.05 ? badge(true, "معنی‌دار") : badge(false, "غیرمعنی‌دار") }} />
                         </tr>
@@ -1626,6 +1814,7 @@ export default function SemTool() {
                     </tbody>
                   </table>
                 </div>
+                <p className={`${tinyCls} mt-1 text-stone-500`}>* p &lt; 0.05 ، ** p &lt; 0.01 ، *** p &lt; 0.001</p>
               </div>
 
               {/* اثرات با بوت‌استرپ */}
@@ -1639,7 +1828,7 @@ export default function SemTool() {
                         type="number"
                         dir="ltr"
                         className={`${inputCls} !w-24 !py-1`}
-                        value={bootSamples}
+                        value={constraints.bootSamples}
                         onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })}
                       />
                     </label>
@@ -1654,33 +1843,41 @@ export default function SemTool() {
                   </div>
                 </div>
                 <p className={tinyCls}>
-                  فاصله اطمینان ۹۵٪ اثر غیرمستقیم با روش بوت‌استرپ (بازنمونه‌گیری با جایگذاری) محاسبه می‌شود؛ اگر بازه صفر را
-                  شامل نشود، میانجی‌گری معنی‌دار است.
+                  هر مسیر میانجی جداگانه گزارش می‌شود و «کل اثر غیرمستقیم» مجموع همه مسیرهاست. فاصله اطمینان ۹۵٪ با بوت‌استرپ؛
+                  اگر بازه صفر را شامل نشود، در سطح ۰/۰۵ معنادار است.
                 </p>
                 <div className="tool-table-wrap mt-2">
                   <table className="tool-table">
                     <thead>
-                      <tr><th>مسیر</th><th>اثر مستقیم</th><th>اثر غیرمستقیم</th><th>CI پایین ۹۵٪</th><th>CI بالا ۹۵٪</th><th>p بوت‌استرپ</th><th>اثر کل</th><th>نتیجه میانجی</th></tr>
+                      <tr><th>مسیر غیرمستقیم</th><th>اثر مستقیم</th><th>اثر غیرمستقیم</th><th>CI پایین ۹۵٪</th><th>CI بالا ۹۵٪</th><th>p بوت‌استرپ</th><th>اثر کل</th><th>نتیجه میانجی</th></tr>
                     </thead>
                     <tbody>
                       {bootResults === null && (
                         <tr><td colSpan={8} className="muted">{bootBusy ? "در حال محاسبه بوت‌استرپ..." : "برای محاسبه فاصله اطمینان، بوت‌استرپ را اجرا کنید (یا تحلیل را دوباره اجرا کنید)."}</td></tr>
                       )}
-                      {bootResults?.map((b, i) => (
-                        <tr key={i}>
-                          <td>{varName(b.from)} ← {varName(b.to)}</td>
-                          <td className="number-cell">{fmt(b.direct)}</td>
-                          <td className="number-cell">{fmt(b.indirect)}</td>
-                          <td className="number-cell">{fmt(b.lo)}</td>
-                          <td className="number-cell">{fmt(b.hi)}</td>
-                          <td className="number-cell">{fmtP(b.p)}</td>
-                          <td className="number-cell">{fmt(b.total)}</td>
-                          <td dangerouslySetInnerHTML={{ __html: b.indirect !== 0 && b.p < 0.05 ? badge(true, "میانجی معنی‌دار") : b.indirect === 0 ? badgeWarn("میانجی وجود ندارد") : badge(false, "میانجی غیرمعنی‌دار") }} />
-                        </tr>
-                      ))}
+                      {bootResults?.map((b, i) => {
+                        const isTotal = b.via === null;
+                        const viaNames = b.via ? b.via.map((m) => varName(m)).join(" ← ") : null;
+                        const label = isTotal
+                          ? `کل اثر غیرمستقیم: ${varName(b.from)} ← ${varName(b.to)}`
+                          : `${varName(b.from)} ← ${viaNames} ← ${varName(b.to)}`;
+                        return (
+                          <tr key={i} className={isTotal ? "bg-stone-50 font-bold" : ""}>
+                            <td>{label}</td>
+                            <td className="number-cell">{isTotal ? fmt(b.direct) : "—"}</td>
+                            <td className="number-cell">{fmt(b.indirect)}</td>
+                            <td className="number-cell">{fmt(b.lo)}</td>
+                            <td className="number-cell">{fmt(b.hi)}</td>
+                            <td className="number-cell">{fmtP(b.p)}{starP(b.p)}</td>
+                            <td className="number-cell">{isTotal ? fmt(b.total) : "—"}</td>
+                            <td dangerouslySetInnerHTML={{ __html: b.indirect !== 0 && b.p < 0.05 ? badge(true, "میانجی معنی‌دار") : b.indirect === 0 ? badgeWarn("میانجی وجود ندارد") : badge(false, "غیرمعنی‌دار") }} />
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
+                <p className={`${tinyCls} mt-1 text-stone-500`}>* p &lt; 0.05 ، ** p &lt; 0.01 ، *** p &lt; 0.001</p>
               </div>
 
               {/* R² */}
@@ -1710,25 +1907,28 @@ export default function SemTool() {
               <div>
                 <h3 className="font-extrabold text-stone-800">شاخص‌های برازش مدل</h3>
                 {analysis.sem.fit.valid ? (
-                  <div className="tool-table-wrap mt-2">
-                    <table className="tool-table">
-                      <thead>
-                        <tr><th>χ²</th><th>df</th><th>χ²/df</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>نتیجه کلی</th></tr>
-                      </thead>
-                      <tbody>
-                        <tr>
-                          <td className="number-cell">{fmt(analysis.sem.fit.chi2)}</td>
-                          <td className="number-cell">{analysis.sem.fit.df}</td>
-                          <td className="number-cell">{fmt(analysis.sem.fit.chi2df)}</td>
-                          <td className="number-cell">{fmt(analysis.sem.fit.cfi)}</td>
-                          <td className="number-cell">{fmt(analysis.sem.fit.tli)}</td>
-                          <td className="number-cell">{fmt(analysis.sem.fit.rmsea)}</td>
-                          <td className="number-cell">{fmt(analysis.sem.fit.srmr)}</td>
-                          <td dangerouslySetInnerHTML={{ __html: analysis.sem.fit.cfi >= 0.9 && analysis.sem.fit.rmsea <= 0.08 ? badge(true, "برازش خوب") : badge(false, "برازش ضعیف") }} />
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
+                  <>
+                    <div className="tool-table-wrap mt-2">
+                      <table className="tool-table">
+                        <thead>
+                          <tr><th>χ²</th><th>df</th><th>χ²/df</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>نتیجه کلی</th></tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            <td className="number-cell">{fmt(analysis.sem.fit.chi2)}</td>
+                            <td className="number-cell">{analysis.sem.fit.df}</td>
+                            <td className="number-cell">{fmt(analysis.sem.fit.chi2df)}</td>
+                            <td className="number-cell">{fmt(analysis.sem.fit.cfi)}</td>
+                            <td className="number-cell">{fmt(analysis.sem.fit.tli)}</td>
+                            <td className="number-cell">{fmt(analysis.sem.fit.rmsea)}</td>
+                            <td className="number-cell">{fmt(analysis.sem.fit.srmr)}</td>
+                            <td dangerouslySetInnerHTML={{ __html: analysis.sem.fit.cfi >= 0.9 && analysis.sem.fit.rmsea <= 0.08 ? badge(true, "برازش خوب") : badge(false, "برازش ضعیف") }} />
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className={`${tinyCls} mt-1 text-stone-500`}>معیار: CFI ≥ 0.90 ، RMSEA ≤ 0.08</p>
+                  </>
                 ) : (
                   <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.sem.fit.message}</p>
                 )}

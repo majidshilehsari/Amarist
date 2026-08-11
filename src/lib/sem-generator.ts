@@ -14,20 +14,24 @@ import {
   type SemResults,
 } from "./sem-stats";
 
+/** هر زیرمقیاس می‌تواند دامنه نمره مستقل خودش را داشته باشد */
+export type SubscaleSpec = {
+  name: string;
+  min: number;
+  max: number;
+};
+
 export type VariableSpec = {
   id: number;
   name: string;
   role: Role;
-  /** آیا نمره کل دارد؟ (نمره کل = مجموع زیرمقیاس‌ها) */
+  /** آیا نمره کل دارد؟ */
   hasTotal: boolean;
-  /** دامنه نمره زیرمقیاس‌ها (مشترک برای همه زیرمقیاس‌های این متغیر) */
-  itemMin: number;
-  itemMax: number;
-  /** دامنه نمره کل (فقط وقتی hasTotal) */
+  /** دامنه نمره کل (برای متغیر بدون زیرمقیاس، همین دامنه برای خود متغیر استفاده می‌شود) */
   totalMin: number;
   totalMax: number;
-  /** نام زیرمقیاس‌ها؛ اگر خالی باشد متغیر تک‌نمره‌ای (مشاهده‌شده) است */
-  subscales: string[];
+  /** زیرمقیاس‌ها؛ خالی یعنی متغیر تک‌نمره‌ای (مشاهده‌شده) */
+  subscales: SubscaleSpec[];
 };
 
 /** قید هر مسیر: معناداری هدف + بازه β استانداردشده (اختیاری) */
@@ -37,31 +41,21 @@ export type PathTarget = {
   betaMax: number | null;
 };
 
-/** قید اثر غیرمستقیم برای هر جفت برون‌زا → درون‌زا */
+/** قید اثر غیرمستقیم برای هر جفت برون‌زا → درون‌زا (روی «کل» اثر غیرمستقیم) */
 export type IndirectTarget = "sig" | "ns" | "any";
 
 export type GenConstraints = {
-  /** قید مسیرها به شکل «from:to» */
   pathTargets: Record<string, PathTarget>;
-  /** قید اثر غیرمستقیم به شکل «from:to» (برون‌زا:درون‌زا) */
   indirectTargets: Record<string, IndirectTarget>;
-  /** بازه R² متغیرهای درون‌زا */
   r2Range: { min: number; max: number } | null;
   cfiMin: number | null;
   rmseaMax: number | null;
-  /** درصد داده گمشده (۰ تا ۲۰) */
   missingPct: number;
-  /** درصد داده پرت (۰ تا ۱۰) */
   outlierPct: number;
-  /** رعایت نرمال بودن تک‌متغیری (کجی/کشیدگی) */
   enforceNormality: boolean;
-  /** رعایت خطی بودن (همبستگی‌های مسیردار معنادار باشند) */
   enforceLinearity: boolean;
-  /** رعایت عدم هم‌خطی (VIF < 5) */
   enforceVif: boolean;
-  /** رعایت استقلال خطاها (دوربین-واتسون بین ۱.۵ تا ۲.۵) */
   enforceDw: boolean;
-  /** تعداد نمونه‌های بوت‌استرپ برای اثر غیرمستقیم */
   bootSamples: number;
 };
 
@@ -95,6 +89,18 @@ function normKey(from: number, to: number): string {
   return `${from}:${to}`;
 }
 
+type Scale = { mn: number; mx: number; mean: number; sd: number };
+
+function scaleOf(v: VariableSpec, s?: SubscaleSpec): Scale {
+  const mn = s ? s.min : v.totalMin;
+  const mx = s ? s.max : v.totalMax;
+  return { mn, mx, mean: (mn + mx) / 2, sd: Math.max(0.6, (mx - mn) / 5) };
+}
+
+function toScale(sc: Scale, z: number): number {
+  return Math.round(clamp(sc.mean + z * sc.sd, sc.mn, sc.mx));
+}
+
 export function generateSemData(input: SemGenInput): SemGenOutput {
   const { variables, paths, n, constraints } = input;
   const activePaths = paths.filter((p) => p.active);
@@ -110,15 +116,6 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
   }
 
   const maxAttempts = 6000;
-  const scaleOf = (v: VariableSpec) => {
-    const mn = v.itemMin;
-    const mx = v.itemMax;
-    return { mn, mx, mean: (mn + mx) / 2, sd: Math.max(0.6, (mx - mn) / 5) };
-  };
-  const toScale = (v: VariableSpec, z: number) => {
-    const s = scaleOf(v);
-    return Math.round(clamp(s.mean + z * s.sd, s.mn, s.mx));
-  };
 
   type Attempt = {
     score: number;
@@ -202,27 +199,32 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     }
     if (bad) continue;
 
-    // ---------- ۳) شاخص‌ها با دامنه هر متغیر ----------
+    // ---------- ۳) شاخص‌ها با دامنه مستقل هر زیرمقیاس ----------
     const columns: string[] = [];
     const rows: (number | null)[][] = Array.from({ length: n }, () => []);
+    const colScales: Scale[] = [];
     const rawComposites: number[][] = variables.map(() => Array(n).fill(0));
 
     for (const v of variables) {
       const latent = L[v.id];
       const cols: number[][] = [];
       if (v.subscales.length) {
-        for (const sub of v.subscales) {
+        for (const s of v.subscales) {
+          const sc = scaleOf(v, s);
           const lam = rand(0.6, 0.85);
           const col = Array.from({ length: n }, (_, i) =>
-            toScale(v, lam * latent[i] + Math.sqrt(1 - lam * lam) * randomNormal(Math.random))
+            toScale(sc, lam * latent[i] + Math.sqrt(1 - lam * lam) * randomNormal(Math.random))
           );
           cols.push(col);
-          columns.push(`${v.name} — ${sub}`);
+          columns.push(`${v.name} — ${s.name}`);
+          colScales.push(sc);
         }
       } else {
-        const col = Array.from({ length: n }, (_, i) => toScale(v, latent[i]));
+        const sc = scaleOf(v);
+        const col = Array.from({ length: n }, (_, i) => toScale(sc, latent[i]));
         cols.push(col);
         columns.push(v.name);
+        colScales.push(sc);
       }
       cols.forEach((col) => rows.forEach((r, i) => r.push(col[i])));
       rawComposites[v.id] = Array.from({ length: n }, (_, i) => cols.reduce((s, c) => s + c[i], 0));
@@ -251,11 +253,8 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
       }
       chosen.forEach((r) => {
         const c = Math.floor(Math.random() * columns.length);
-        const v = variables.find(
-          (x) => columns[c].startsWith(x.name + " — ") || columns[c] === x.name
-        );
-        const s = v ? scaleOf(v) : { mn: 1, mx: 5 };
-        rows[r][c] = Math.random() < 0.5 ? s.mx + rand(1, 4) : s.mn - rand(1, 4);
+        const sc = colScales[c];
+        rows[r][c] = Math.random() < 0.5 ? sc.mx + rand(1, 4) : sc.mn - rand(1, 4);
       });
     }
 
@@ -284,7 +283,6 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     const sem = estimateSem(composites, variables.map((v) => v.role), paths);
     const margins: number[] = [];
 
-    // قید مسیرها
     for (const pr of sem.paths) {
       const t = constraints.pathTargets[normKey(pr.from, pr.to)];
       if (!t) continue;
@@ -299,8 +297,6 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     }
 
     if (constraints.r2Range) {
-      // بازه R² فقط روی متغیرهای نتیجه (Y) اعمال می‌شود؛
-      // R² میانجی‌ها با یک پیش‌بین برابر مجذور β است و قید جداگانه نمی‌خواهد.
       for (const o of outs) {
         const r2 = sem.r2[o.id] ?? 0;
         margins.push(r2 - constraints.r2Range.min, constraints.r2Range.max - r2);
@@ -309,7 +305,6 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     if (constraints.cfiMin != null && sem.fit.valid) margins.push(sem.fit.cfi - constraints.cfiMin);
     if (constraints.rmseaMax != null && sem.fit.valid) margins.push(constraints.rmseaMax - sem.fit.rmsea);
 
-    // نرمال بودن تک‌متغیری (روی نمره کل) — اگر داده پرت عمدی داریم، این قید منتفی است
     if (constraints.enforceNormality && constraints.outlierPct === 0) {
       for (const v of variables) {
         const s = skewness(composites[v.id]);
@@ -319,7 +314,6 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
       }
     }
 
-    // خطی بودن: همبستگی مسیرهای فعال معنادار باشند
     if (constraints.enforceLinearity) {
       const corr = correlationMatrixWithP(composites);
       for (const pr of activePaths) {
@@ -328,7 +322,6 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
       }
     }
 
-    // هم‌خطی و استقلال خطاها
     if (constraints.enforceVif) {
       for (const v of [...meds, ...outs]) {
         const vifs = sem.vifs[v.id] ?? [];
@@ -344,11 +337,17 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
 
     const scoreBase = margins.length ? Math.min(...margins) : Infinity;
 
-    // اثر غیرمستقیم با بوت‌استرپ — فقط وقتی بقیه قیود پاس شده‌اند (برای سرعت)
+    // اثر غیرمستقیم با بوت‌استرپ — فقط روی ردیف «کل» (via=null) و فقط وقتی بقیه قیود پاس شده‌اند
     let score = scoreBase;
     if (scoreBase >= 0 && Object.keys(constraints.indirectTargets).length > 0) {
-      const boot = bootstrapIndirectEffects(composites, variables.map((v) => v.role), paths, constraints.bootSamples);
+      const boot = bootstrapIndirectEffects(
+        composites,
+        variables.map((v) => v.role),
+        paths,
+        constraints.bootSamples
+      );
       for (const b of boot) {
+        if (b.via !== null) continue;
         const t = constraints.indirectTargets[normKey(b.from, b.to)];
         if (!t) continue;
         if (t === "sig") score = Math.min(score, 0.05 - b.p);

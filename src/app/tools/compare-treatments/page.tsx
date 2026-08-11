@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
-import { ArrowRight, Copy, Download, Play, RefreshCw, Sigma } from "lucide-react";
+import { Copy, Download, Play, RefreshCw, Sigma } from "lucide-react";
+import ToolHeader from "@/components/tool-header";
 import {
   GROUPS,
   GROUP_SIZE,
@@ -670,17 +670,11 @@ export default function CompareTreatmentsTool() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-16">
+      <ToolHeader title="تولید داده تمرینی — مقایسه اثربخشی دو درمان" subtitle="حالت «با مرحله پیگیری» — واریانس اندازه‌گیری مکرر" />
       <div className="mx-auto max-w-[1280px] px-4">
         {/* ---------- سربرگ ---------- */}
         <header className="mt-6 rounded-[22px] border border-stone-200 bg-white/80 p-6 shadow-lg shadow-stone-900/5 backdrop-blur sm:p-7">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-1.5 text-sm font-bold text-indigo-600 transition hover:text-indigo-500"
-          >
-            <ArrowRight className="h-4 w-4" />
-            بازگشت به صفحه اصلی
-          </Link>
-          <div className="mt-4 flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-rose-500 to-orange-500 text-white shadow-md">
               <Sigma className="h-6 w-6" strokeWidth={2.5} />
             </span>

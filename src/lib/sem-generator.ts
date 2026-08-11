@@ -3,7 +3,16 @@
 // ============================================================
 
 import { clamp, mean, randomNormal } from "./statistics";
-import { estimateSem, type Role, type PathRow, type SemResults } from "./sem-stats";
+import {
+  estimateSem,
+  bootstrapIndirectEffects,
+  correlationMatrixWithP,
+  kurtosis,
+  skewness,
+  type Role,
+  type PathRow,
+  type SemResults,
+} from "./sem-stats";
 
 export type VariableSpec = {
   id: number;
@@ -11,27 +20,53 @@ export type VariableSpec = {
   role: Role;
   /** آیا نمره کل دارد؟ (نمره کل = مجموع زیرمقیاس‌ها) */
   hasTotal: boolean;
+  /** دامنه نمره زیرمقیاس‌ها (مشترک برای همه زیرمقیاس‌های این متغیر) */
+  itemMin: number;
+  itemMax: number;
+  /** دامنه نمره کل (فقط وقتی hasTotal) */
+  totalMin: number;
+  totalMax: number;
   /** نام زیرمقیاس‌ها؛ اگر خالی باشد متغیر تک‌نمره‌ای (مشاهده‌شده) است */
   subscales: string[];
 };
 
+/** قید هر مسیر: معناداری هدف + بازه β استانداردشده (اختیاری) */
+export type PathTarget = {
+  sig: "sig" | "ns" | "any";
+  betaMin: number | null;
+  betaMax: number | null;
+};
+
+/** قید اثر غیرمستقیم برای هر جفت برون‌زا → درون‌زا */
+export type IndirectTarget = "sig" | "ns" | "any";
+
 export type GenConstraints = {
-  /** همه مسیرهای فعال معنی‌دار باشند (p<0.05) */
-  enforcePathSig: boolean;
-  /** اثر غیرمستقیم (میانجی) معنی‌دار باشد */
-  enforceIndirectSig: boolean;
-  /** بازه R² برای متغیرهای درونزاد */
+  /** قید مسیرها به شکل «from:to» */
+  pathTargets: Record<string, PathTarget>;
+  /** قید اثر غیرمستقیم به شکل «from:to» (برون‌زا:درون‌زا) */
+  indirectTargets: Record<string, IndirectTarget>;
+  /** بازه R² متغیرهای درون‌زا */
   r2Range: { min: number; max: number } | null;
-  /** حداقل CFI */
   cfiMin: number | null;
-  /** حداکثر RMSEA */
   rmseaMax: number | null;
+  /** درصد داده گمشده (۰ تا ۲۰) */
+  missingPct: number;
+  /** درصد داده پرت (۰ تا ۱۰) */
+  outlierPct: number;
+  /** رعایت نرمال بودن تک‌متغیری (کجی/کشیدگی) */
+  enforceNormality: boolean;
+  /** رعایت خطی بودن (همبستگی‌های مسیردار معنادار باشند) */
+  enforceLinearity: boolean;
+  /** رعایت عدم هم‌خطی (VIF < 5) */
+  enforceVif: boolean;
+  /** رعایت استقلال خطاها (دوربین-واتسون بین ۱.۵ تا ۲.۵) */
+  enforceDw: boolean;
+  /** تعداد نمونه‌های بوت‌استرپ برای اثر غیرمستقیم */
+  bootSamples: number;
 };
 
 export type SemGenInput = {
   n: number;
-  minScale: number;
-  maxScale: number;
   variables: VariableSpec[];
   paths: PathRow[];
   constraints: GenConstraints;
@@ -56,10 +91,13 @@ function rand(min: number, max: number): number {
   return min + Math.random() * (max - min);
 }
 
+function normKey(from: number, to: number): string {
+  return `${from}:${to}`;
+}
+
 export function generateSemData(input: SemGenInput): SemGenOutput {
-  const { variables, paths, n, minScale, maxScale, constraints } = input;
+  const { variables, paths, n, constraints } = input;
   const activePaths = paths.filter((p) => p.active);
-  const roles = (id: number) => variables.find((v) => v.id === id)!.role;
   const exogs = variables.filter((v) => v.role === "exogenous");
   const meds = variables.filter((v) => v.role === "mediator");
   const outs = variables.filter((v) => v.role === "outcome");
@@ -72,9 +110,15 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
   }
 
   const maxAttempts = 6000;
-  const meanScale = (minScale + maxScale) / 2;
-  const sdScale = Math.max(0.6, (maxScale - minScale) / 5.0);
-  const toScale = (z: number) => Math.round(clamp(meanScale + z * sdScale, minScale, maxScale));
+  const scaleOf = (v: VariableSpec) => {
+    const mn = v.itemMin;
+    const mx = v.itemMax;
+    return { mn, mx, mean: (mn + mx) / 2, sd: Math.max(0.6, (mx - mn) / 5) };
+  };
+  const toScale = (v: VariableSpec, z: number) => {
+    const s = scaleOf(v);
+    return Math.round(clamp(s.mean + z * s.sd, s.mn, s.mx));
+  };
 
   type Attempt = {
     score: number;
@@ -88,23 +132,25 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
   let best: Attempt | null = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    // ---------- ۱) ضرایب هدف (استانداردشده) ----------
+    // ---------- ۱) ضرایب هدف (استانداردشده) بر اساس قید مسیرها ----------
     const targets = new Map<string, number>();
     for (const pr of activePaths) {
-      const toRole = roles(pr.to);
-      const fromRole = roles(pr.from);
+      const t = constraints.pathTargets[normKey(pr.from, pr.to)] ?? {
+        sig: "any",
+        betaMin: null,
+        betaMax: null,
+      };
       let val: number;
-      if (constraints.enforcePathSig) {
-        if (toRole === "mediator") val = rand(0.32, 0.62);
-        else if (fromRole === "mediator") val = rand(0.22, 0.48);
-        else val = rand(0.12, 0.38);
+      if (t.sig === "ns") {
+        val = rand(-0.12, 0.12);
+      } else if (t.sig === "sig") {
+        val = rand(0.25, 0.5);
+        if (t.betaMin != null) val = Math.max(val, t.betaMin);
+        if (t.betaMax != null) val = Math.min(val, t.betaMax);
       } else {
-        const strong = Math.random() < 0.5;
-        if (toRole === "mediator") val = strong ? rand(0.32, 0.62) : rand(-0.28, 0.28);
-        else if (fromRole === "mediator") val = strong ? rand(0.22, 0.48) : rand(-0.28, 0.28);
-        else val = strong ? rand(0.12, 0.38) : rand(-0.28, 0.28);
+        val = Math.random() < 0.5 ? rand(-0.15, 0.45) : rand(0.1, 0.4);
       }
-      targets.set(`${pr.from}:${pr.to}`, val);
+      targets.set(normKey(pr.from, pr.to), val);
     }
 
     // ---------- ۲) نمرات نهفته ----------
@@ -119,7 +165,7 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
       const lin = Array(n).fill(0);
       let varLin = 0;
       for (const pr of preds) {
-        const a = targets.get(`${pr.from}:${pr.to}`) ?? 0;
+        const a = targets.get(normKey(pr.from, pr.to)) ?? 0;
         const x = L[pr.from];
         for (let i = 0; i < n; i++) lin[i] += a * x[i];
         varLin += a * a;
@@ -138,7 +184,7 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
       const preds = activePaths.filter((pr) => pr.to === o.id);
       const lin = Array(n).fill(0);
       for (const pr of preds) {
-        const b = targets.get(`${pr.from}:${pr.to}`) ?? 0;
+        const b = targets.get(normKey(pr.from, pr.to)) ?? 0;
         const x = L[pr.from];
         for (let i = 0; i < n; i++) lin[i] += b * x[i];
       }
@@ -156,45 +202,105 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     }
     if (bad) continue;
 
-    // ---------- ۳) شاخص‌ها و مقیاس‌سازی ----------
+    // ---------- ۳) شاخص‌ها با دامنه هر متغیر ----------
     const columns: string[] = [];
     const rows: (number | null)[][] = Array.from({ length: n }, () => []);
-    const composites: number[][] = variables.map(() => Array(n).fill(0));
+    const rawComposites: number[][] = variables.map(() => Array(n).fill(0));
 
     for (const v of variables) {
       const latent = L[v.id];
       const cols: number[][] = [];
       if (v.subscales.length) {
         for (const sub of v.subscales) {
-          const lam = rand(0.68, 0.85);
+          const lam = rand(0.6, 0.85);
           const col = Array.from({ length: n }, (_, i) =>
-            toScale(lam * latent[i] + Math.sqrt(1 - lam * lam) * randomNormal(Math.random))
+            toScale(v, lam * latent[i] + Math.sqrt(1 - lam * lam) * randomNormal(Math.random))
           );
           cols.push(col);
           columns.push(`${v.name} — ${sub}`);
         }
       } else {
-        const col = Array.from({ length: n }, (_, i) => toScale(latent[i]));
+        const col = Array.from({ length: n }, (_, i) => toScale(v, latent[i]));
         cols.push(col);
         columns.push(v.name);
       }
       cols.forEach((col) => rows.forEach((r, i) => r.push(col[i])));
-      composites[v.id] = Array.from({ length: n }, (_, i) => cols.reduce((s, c) => s + c[i], 0));
+      rawComposites[v.id] = Array.from({ length: n }, (_, i) => cols.reduce((s, c) => s + c[i], 0));
     }
 
-    // ---------- ۴) ارزیابی روی داده نهایی ----------
+    // ---------- ۴) اعمال داده گمشده و داده پرت ----------
+    if (constraints.missingPct > 0) {
+      const total = n * columns.length;
+      const count = Math.min(total, Math.round((constraints.missingPct / 100) * total));
+      const cells = new Set<number>();
+      while (cells.size < count) {
+        cells.add(Math.floor(Math.random() * total));
+      }
+      cells.forEach((cell) => {
+        const r = Math.floor(cell / columns.length);
+        const c = cell % columns.length;
+        rows[r][c] = null;
+      });
+    }
+
+    if (constraints.outlierPct > 0) {
+      const count = Math.round((constraints.outlierPct / 100) * n);
+      const chosen = new Set<number>();
+      while (chosen.size < count && chosen.size < n) {
+        chosen.add(Math.floor(Math.random() * n));
+      }
+      chosen.forEach((r) => {
+        const c = Math.floor(Math.random() * columns.length);
+        const v = variables.find(
+          (x) => columns[c].startsWith(x.name + " — ") || columns[c] === x.name
+        );
+        const s = v ? scaleOf(v) : { mn: 1, mx: 5 };
+        rows[r][c] = Math.random() < 0.5 ? s.mx + rand(1, 4) : s.mn - rand(1, 4);
+      });
+    }
+
+    // نمره کل = مجموع زیرمقیاس‌ها (با null → NaN)
+    const composites: number[][] = variables.map(() => Array(n).fill(NaN));
+    for (let r = 0; r < n; r++) {
+      let col = 0;
+      for (const v of variables) {
+        const nSub = v.subscales.length || 1;
+        let sum = 0;
+        let ok = true;
+        for (let s = 0; s < nSub; s++) {
+          const val = rows[r][col + s];
+          if (val == null || !Number.isFinite(val)) {
+            ok = false;
+            break;
+          }
+          sum += val;
+        }
+        composites[v.id][r] = ok ? sum : NaN;
+        col += nSub;
+      }
+    }
+
+    // ---------- ۵) ارزیابی روی داده نهایی ----------
     const sem = estimateSem(composites, variables.map((v) => v.role), paths);
     const margins: number[] = [];
 
-    if (constraints.enforcePathSig) {
-      for (const pr of sem.paths) margins.push(0.05 - pr.p);
-    }
-    if (constraints.enforceIndirectSig && meds.length) {
-      for (const ef of sem.effects) {
-        if (ef.indirect !== 0 && Number.isFinite(ef.pIndirect)) margins.push(0.05 - ef.pIndirect);
+    // قید مسیرها
+    for (const pr of sem.paths) {
+      const t = constraints.pathTargets[normKey(pr.from, pr.to)];
+      if (!t) continue;
+      if (t.sig === "sig") {
+        margins.push(0.05 - pr.p);
+        if (t.betaMin != null) margins.push(pr.std - t.betaMin);
+        if (t.betaMax != null) margins.push(t.betaMax - pr.std);
+      } else if (t.sig === "ns") {
+        margins.push(pr.p - 0.05);
+        margins.push(0.2 - Math.abs(pr.std));
       }
     }
+
     if (constraints.r2Range) {
+      // بازه R² فقط روی متغیرهای نتیجه (Y) اعمال می‌شود؛
+      // R² میانجی‌ها با یک پیش‌بین برابر مجذور β است و قید جداگانه نمی‌خواهد.
       for (const o of outs) {
         const r2 = sem.r2[o.id] ?? 0;
         margins.push(r2 - constraints.r2Range.min, constraints.r2Range.max - r2);
@@ -203,12 +309,57 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     if (constraints.cfiMin != null && sem.fit.valid) margins.push(sem.fit.cfi - constraints.cfiMin);
     if (constraints.rmseaMax != null && sem.fit.valid) margins.push(constraints.rmseaMax - sem.fit.rmsea);
 
-    const score = margins.length ? Math.min(...margins) : Infinity;
+    // نرمال بودن تک‌متغیری (روی نمره کل) — اگر داده پرت عمدی داریم، این قید منتفی است
+    if (constraints.enforceNormality && constraints.outlierPct === 0) {
+      for (const v of variables) {
+        const s = skewness(composites[v.id]);
+        const k = kurtosis(composites[v.id]);
+        if (Number.isFinite(s)) margins.push(3 - Math.abs(s));
+        if (Number.isFinite(k)) margins.push(10 - Math.abs(k));
+      }
+    }
+
+    // خطی بودن: همبستگی مسیرهای فعال معنادار باشند
+    if (constraints.enforceLinearity) {
+      const corr = correlationMatrixWithP(composites);
+      for (const pr of activePaths) {
+        const p = corr.p[pr.from][pr.to];
+        if (Number.isFinite(p)) margins.push(0.05 - p);
+      }
+    }
+
+    // هم‌خطی و استقلال خطاها
+    if (constraints.enforceVif) {
+      for (const v of [...meds, ...outs]) {
+        const vifs = sem.vifs[v.id] ?? [];
+        if (vifs.length) margins.push(5 - Math.max(...vifs));
+      }
+    }
+    if (constraints.enforceDw) {
+      for (const v of [...meds, ...outs]) {
+        const dw = sem.dw[v.id];
+        if (Number.isFinite(dw)) margins.push(dw - 1.5, 2.5 - dw);
+      }
+    }
+
+    const scoreBase = margins.length ? Math.min(...margins) : Infinity;
+
+    // اثر غیرمستقیم با بوت‌استرپ — فقط وقتی بقیه قیود پاس شده‌اند (برای سرعت)
+    let score = scoreBase;
+    if (scoreBase >= 0 && Object.keys(constraints.indirectTargets).length > 0) {
+      const boot = bootstrapIndirectEffects(composites, variables.map((v) => v.role), paths, constraints.bootSamples);
+      for (const b of boot) {
+        const t = constraints.indirectTargets[normKey(b.from, b.to)];
+        if (!t) continue;
+        if (t === "sig") score = Math.min(score, 0.05 - b.p);
+        else if (t === "ns") score = Math.min(score, b.p - 0.05);
+      }
+    }
 
     const pathTargets = activePaths.map((pr) => ({
       from: pr.from,
       to: pr.to,
-      target: targets.get(`${pr.from}:${pr.to}`) ?? 0,
+      target: targets.get(normKey(pr.from, pr.to)) ?? 0,
       actual: sem.paths.find((x) => x.from === pr.from && x.to === pr.to)?.std ?? NaN,
     }));
     r2Targets.forEach((r) => (r.actual = sem.r2[r.varId] ?? 0));
@@ -242,8 +393,17 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
 
   const scoreText = best ? (Number.isFinite(best.score) ? best.score.toFixed(3) : "-") : "-";
   const messages: string[] = [];
-  if (constraints.enforcePathSig) messages.push("همه مسیرها باید معنی‌دار باشند (p<0.05)");
-  if (constraints.enforceIndirectSig) messages.push("اثر غیرمستقیم باید معنی‌دار باشد");
+  const sigPaths = Object.entries(constraints.pathTargets)
+    .filter(([, t]) => t.sig === "sig")
+    .map(([k]) => `مسیر ${k} معنادار`);
+  const nsPaths = Object.entries(constraints.pathTargets)
+    .filter(([, t]) => t.sig === "ns")
+    .map(([k]) => `مسیر ${k} غیرمعنادار`);
+  messages.push(...sigPaths, ...nsPaths);
+  const sigInd = Object.entries(constraints.indirectTargets)
+    .filter(([, v]) => v === "sig")
+    .map(([k]) => `اثر غیرمستقیم ${k} معنادار`);
+  messages.push(...sigInd);
   if (constraints.r2Range) messages.push(`R² بین ${constraints.r2Range.min} تا ${constraints.r2Range.max}`);
   if (constraints.cfiMin != null) messages.push(`CFI حداقل ${constraints.cfiMin}`);
   if (constraints.rmseaMax != null) messages.push(`RMSEA حداکثر ${constraints.rmseaMax}`);

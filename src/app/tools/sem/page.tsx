@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowRight,
+  Copy,
   Download,
+  FileSpreadsheet,
+  FileText,
   Play,
   Plus,
   RefreshCw,
@@ -12,10 +13,12 @@ import {
   Upload,
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import { Document, Packer, Paragraph, TextRun } from "docx";
 import { fmt, fmtP } from "@/lib/statistics";
 import {
   cronbachAlpha,
   estimateSem,
+  bootstrapIndirectEffects,
   kurtosis,
   mahalanobisDistances,
   mardiaTest,
@@ -29,9 +32,13 @@ import {
 import {
   generateSemData,
   type GenConstraints,
+  type IndirectTarget,
+  type PathTarget,
   type SemAnswerKey,
   type VariableSpec,
 } from "@/lib/sem-generator";
+import PathDiagram from "@/components/path-diagram";
+import ToolHeader from "@/components/tool-header";
 
 // ------------------------------------------------------------
 // ثابت‌های استایل
@@ -103,7 +110,7 @@ function autoMap(columns: string[], vars: VariableSpec[]): Record<number, (numbe
   vars.forEach((v) => {
     const slots = v.subscales.length ? v.subscales.map((s) => `${v.name} — ${s}`) : [v.name];
     const idxs: (number | null)[] = [];
-    slots.forEach((slot, si) => {
+    slots.forEach((slot) => {
       const target = normName(slot);
       let found = columns.findIndex((c, i) => !used.has(i) && normName(c) === target);
       if (found < 0) found = columns.findIndex((c, i) => !used.has(i) && normName(c).includes(target));
@@ -114,7 +121,6 @@ function autoMap(columns: string[], vars: VariableSpec[]): Record<number, (numbe
       } else {
         idxs.push(null);
       }
-      void si;
     });
     map[v.id] = idxs;
   });
@@ -131,7 +137,7 @@ function computeComposites(
   colMap: Record<number, (number | null)[]>
 ): { composites: number[][]; indicatorCols: Record<number, number[][]> } {
   const n = rows.length;
-  const composites: number[][] = vars.map(() => Array(n).fill(0));
+  const composites: number[][] = vars.map(() => Array(n).fill(NaN));
   const indicatorCols: Record<number, number[][]> = {};
   vars.forEach((v) => {
     const idxs = colMap[v.id] ?? [];
@@ -156,13 +162,14 @@ function computeComposites(
 }
 
 // ------------------------------------------------------------
-// ساخت گزارش متنی (برای خروجی ورد/گزارش)
+// ساخت گزارش متنی (برای docx / txt / کپی)
 // ------------------------------------------------------------
 
 function buildReportText(
   vars: VariableSpec[],
   analysis: Analysis | null,
   answerKey: SemAnswerKey | null,
+  bootResults: BootResult[] | null,
   n: number
 ): string {
   const L: string[] = [];
@@ -182,9 +189,7 @@ function buildReportText(
   L.push(maha.valid ? `  تعداد داده پرت: ${maha.outliers.length}` : `  ${maha.message}`);
   L.push("");
   L.push("۳) نرمال بودن تک‌متغیری (معیار کلاین: |کجی|<3 و |کشیدگی|<10):");
-  normals.forEach((x) =>
-    L.push(`  ${x.name}: کجی=${fmt(x.skew)} | کشیدگی=${fmt(x.kurt)}`)
-  );
+  normals.forEach((x) => L.push(`  ${x.name}: کجی=${fmt(x.skew)} | کشیدگی=${fmt(x.kurt)}`));
   L.push("");
   L.push("۴) نرمال بودن چندمتغیری (مردیا):");
   L.push(
@@ -197,7 +202,12 @@ function buildReportText(
   corr.r.forEach((row, i) => {
     L.push(
       `  ${vars[i].name}: ` +
-        row.map((r, j) => (j <= i ? "" : `${vars[j].name}=${fmt(r)}${corr.p[i][j] < 0.01 ? "**" : corr.p[i][j] < 0.05 ? "*" : ""}`)).filter(Boolean).join("، ")
+        row
+          .map((r, j) =>
+            j > i ? `${vars[j].name}=${fmt(r)}${corr.p[i][j] < 0.01 ? "**" : corr.p[i][j] < 0.05 ? "*" : ""}` : ""
+          )
+          .filter(Boolean)
+          .join("، ")
     );
   });
   L.push("");
@@ -207,7 +217,9 @@ function buildReportText(
     const vifs = sem.vifs[v.id] ?? [];
     const dw = sem.dw[v.id];
     if (vifs.length) {
-      L.push(`  ${v.name}: VIF=${vifs.map((x) => fmt(x)).join("، ")} | دوربین-واتسون=${Number.isFinite(dw as number) ? fmt(dw as number) : "-"}`);
+      L.push(
+        `  ${v.name}: VIF=${vifs.map((x) => fmt(x)).join("، ")} | دوربین-واتسون=${Number.isFinite(dw as number) ? fmt(dw as number) : "-"}`
+      );
     }
   });
   L.push("");
@@ -215,17 +227,23 @@ function buildReportText(
   sem.paths.forEach((pr) => {
     const from = vars[pr.from].name;
     const to = vars[pr.to].name;
-    L.push(
-      `  ${from} ← ${to}: B=${fmt(pr.b)} | β=${fmt(pr.std)} | SE=${fmt(pr.se)} | t=${fmt(pr.t)} | p=${fmtP(pr.p)}`
-    );
+    L.push(`  ${from} ← ${to}: B=${fmt(pr.b)} | β=${fmt(pr.std)} | SE=${fmt(pr.se)} | t=${fmt(pr.t)} | p=${fmtP(pr.p)}`);
   });
   L.push("");
-  L.push("۸) اثرات (مستقیم / غیرمستقیم / کل):");
-  sem.effects.forEach((ef) => {
-    L.push(
-      `  ${vars[ef.from].name} ← ${vars[ef.to].name}: مستقیم=${fmt(ef.direct)} | غیرمستقیم=${fmt(ef.indirect)} (z=${fmt(ef.zIndirect)}، p=${fmtP(ef.pIndirect)}) | کل=${fmt(ef.total)}`
-    );
-  });
+  L.push("۸) اثرات (بوت‌استرپ):");
+  if (bootResults && bootResults.length) {
+    bootResults.forEach((b) => {
+      L.push(
+        `  ${vars[b.from].name} ← ${vars[b.to].name}: مستقیم=${fmt(b.direct)} | غیرمستقیم=${fmt(b.indirect)} (CI95: ${fmt(b.lo)} تا ${fmt(b.hi)}، p=${fmtP(b.p)}) | کل=${fmt(b.total)}`
+      );
+    });
+  } else {
+    sem.effects.forEach((ef) => {
+      L.push(
+        `  ${vars[ef.from].name} ← ${vars[ef.to].name}: مستقیم=${fmt(ef.direct)} | غیرمستقیم=${fmt(ef.indirect)} | کل=${fmt(ef.total)} (برای فاصله اطمینان، بوت‌استرپ را اجرا کنید)`
+      );
+    });
+  }
   L.push("");
   L.push("۹) R² متغیرهای درون‌زا:");
   vars.forEach((v) => {
@@ -242,7 +260,7 @@ function buildReportText(
   }
   if (meas.length) {
     L.push("");
-    L.push("۱۱) مدل اندازه‌گیری (آلفای کرونباخ و بارهای عاملی):");
+    L.push("۱۱) مدل اندازه‌گیری (آلفای کرونباخ نمره کل و بارهای عاملی):");
     meas.forEach((m) => {
       L.push(`  ${m.name}: آلفا=${fmt(m.alpha)} | بارها=${m.loadings.map((x) => fmt(x)).join("، ")}`);
     });
@@ -251,17 +269,26 @@ function buildReportText(
     L.push("");
     L.push("۱۲) کلید پاسخ (مقادیر هدف در برابر مقادیر واقعی):");
     answerKey.pathTargets.forEach((pt) => {
-      L.push(
-        `  ${vars[pt.from].name} ← ${vars[pt.to].name}: هدف=${fmt(pt.target)} | واقعی=${fmt(pt.actual)}`
-      );
+      L.push(`  ${vars[pt.from].name} ← ${vars[pt.to].name}: هدف=${fmt(pt.target)} | واقعی=${fmt(pt.actual)}`);
     });
   }
   return L.join("\n");
 }
 
 // ------------------------------------------------------------
-// تایپ تحلیل
+// تایپ‌ها
 // ------------------------------------------------------------
+
+type BootResult = {
+  from: number;
+  to: number;
+  direct: number;
+  indirect: number;
+  lo: number;
+  hi: number;
+  p: number;
+  total: number;
+};
 
 type Analysis = {
   composites: number[][];
@@ -289,39 +316,66 @@ function buildPaths(vars: VariableSpec[]): PathRow[] {
   return list;
 }
 
+function indirectPairs(vars: VariableSpec[], paths: PathRow[]): { from: number; to: number }[] {
+  const meds = vars.filter((v) => v.role === "mediator").map((v) => v.id);
+  const pairs: { from: number; to: number }[] = [];
+  vars
+    .filter((v) => v.role === "exogenous")
+    .forEach((e) =>
+      vars
+        .filter((v) => v.role === "outcome")
+        .forEach((o) => {
+          const hasMed = meds.some(
+            (m) =>
+              paths.some((p) => p.active && p.from === e.id && p.to === m) &&
+              paths.some((p) => p.active && p.from === m && p.to === o.id)
+          );
+          if (hasMed) pairs.push({ from: e.id, to: o.id });
+        })
+    );
+  return pairs;
+}
+
 // ------------------------------------------------------------
 // کامپوننت اصلی
 // ------------------------------------------------------------
 
 export default function SemTool() {
   const [source, setSource] = useState<"generate" | "real">("generate");
-  const [vars, setVars] = useState<VariableSpec[]>([
-    { id: 0, name: "طرحواره‌های ناسازگار اولیه", role: "exogenous", hasTotal: true, subscales: ["حوزه اول: بریدگی و طرد", "حوزه دوم: خودگردانی و عملکرد مختل", "حوزه سوم: محدودیت‌های مختل", "حوزه چهارم: دیگرجهت‌مندی", "حوزه پنجم: گوش‌به‌زنگی بیش از حد و بازداری"] },
-    { id: 1, name: "اعتیاد به اینستاگرام", role: "mediator", hasTotal: true, subscales: ["اثر اجتماعی", "اجبار"] },
-    { id: 2, name: "نشخوار فکری", role: "mediator", hasTotal: true, subscales: ["تأمل", "درون‌نگری", "در فکر فرو رفتن"] },
-    { id: 3, name: "احساس تنهایی", role: "outcome", hasTotal: true, subscales: ["احساس تنهایی"] },
+  const [vars, setVars] = useState<VariableSpec[]>(() => [
+    { id: 0, name: "طرحواره‌های ناسازگار اولیه", role: "exogenous", hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 5, totalMax: 25, subscales: ["حوزه اول: بریدگی و طرد", "حوزه دوم: خودگردانی و عملکرد مختل", "حوزه سوم: محدودیت‌های مختل", "حوزه چهارم: دیگرجهت‌مندی", "حوزه پنجم: گوش‌به‌زنگی بیش از حد و بازداری"] },
+    { id: 1, name: "اعتیاد به اینستاگرام", role: "mediator", hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 2, totalMax: 10, subscales: ["اثر اجتماعی", "اجبار"] },
+    { id: 2, name: "نشخوار فکری", role: "mediator", hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 3, totalMax: 15, subscales: ["تأمل", "درون‌نگری", "در فکر فرو رفتن"] },
+    { id: 3, name: "احساس تنهایی", role: "outcome", hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 1, totalMax: 5, subscales: ["احساس تنهایی"] },
   ]);
-  const [paths, setPaths] = useState<PathRow[]>(() => buildPaths([
-    { id: 0, name: "طرحواره‌های ناسازگار اولیه", role: "exogenous", hasTotal: true, subscales: ["حوزه اول: بریدگی و طرد", "حوزه دوم: خودگردانی و عملکرد مختل", "حوزه سوم: محدودیت‌های مختل", "حوزه چهارم: دیگرجهت‌مندی", "حوزه پنجم: گوش‌به‌زنگی بیش از حد و بازداری"] },
-    { id: 1, name: "اعتیاد به اینستاگرام", role: "mediator", hasTotal: true, subscales: ["اثر اجتماعی", "اجبار"] },
-    { id: 2, name: "نشخوار فکری", role: "mediator", hasTotal: true, subscales: ["تأمل", "درون‌نگری", "در فکر فرو رفتن"] },
-    { id: 3, name: "احساس تنهایی", role: "outcome", hasTotal: true, subscales: ["احساس تنهایی"] },
-  ]));
-  const [n, setN] = useState("250");
-  const [minScale, setMinScale] = useState("1");
-  const [maxScale, setMaxScale] = useState("5");
+  const [inactiveKeys, setInactiveKeys] = useState<Set<string>>(() => new Set());
+  const allPaths = useMemo(() => buildPaths(vars), [vars]);
+  const paths = useMemo(
+    () => allPaths.filter((p) => !inactiveKeys.has(`${p.from}:${p.to}`)),
+    [allPaths, inactiveKeys]
+  );
   const [constraints, setConstraints] = useState<GenConstraints>({
-    enforcePathSig: true,
-    enforceIndirectSig: true,
+    pathTargets: {},
+    indirectTargets: {},
     r2Range: { min: 0.3, max: 0.6 },
     cfiMin: null,
     rmseaMax: null,
+    missingPct: 0,
+    outlierPct: 0,
+    enforceNormality: true,
+    enforceLinearity: true,
+    enforceVif: true,
+    enforceDw: true,
+    bootSamples: 5000,
   });
+  const [n, setN] = useState("250");
   const [columns, setColumns] = useState<string[]>([]);
   const [rows, setRows] = useState<(number | null)[][]>([]);
   const [colMap, setColMap] = useState<Record<number, (number | null)[]>>({});
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [answerKey, setAnswerKey] = useState<SemAnswerKey | null>(null);
+  const [bootResults, setBootResults] = useState<BootResult[] | null>(null);
+  const [bootBusy, setBootBusy] = useState(false);
   const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({
     text: "هنوز تحلیلی اجرا نشده است.",
     kind: "",
@@ -330,58 +384,127 @@ export default function SemTool() {
 
   // ---------- تغییر متغیرها ----------
   const updateVar = (id: number, patch: Partial<VariableSpec>) => {
-    setVars((prev) => {
-      const next = prev.map((v) => (v.id === id ? { ...v, ...patch } : v));
-      setPaths(buildPaths(next));
-      return next;
-    });
+    setVars((prev) => prev.map((v) => (v.id === id ? { ...v, ...patch } : v)));
+  };
+
+  const updateItemRange = (id: number, field: "itemMin" | "itemMax", value: number) => {
+    setVars((prev) =>
+      prev.map((v) => {
+        if (v.id !== id) return v;
+        const itemMin = field === "itemMin" ? value : v.itemMin;
+        const itemMax = field === "itemMax" ? value : v.itemMax;
+        const count = v.subscales.length || 1;
+        return {
+          ...v,
+          itemMin,
+          itemMax,
+          totalMin: itemMin * count,
+          totalMax: itemMax * count,
+        };
+      })
+    );
   };
 
   const addVar = () => {
     setVars((prev) => {
       const id = prev.length ? Math.max(...prev.map((v) => v.id)) + 1 : 0;
-      const next = [
+      return [
         ...prev,
-        { id, name: `متغیر ${prev.length + 1}`, role: "outcome" as Role, hasTotal: true, subscales: [] },
+        { id, name: `متغیر ${prev.length + 1}`, role: "outcome" as Role, hasTotal: true, itemMin: 1, itemMax: 5, totalMin: 1, totalMax: 5, subscales: [] },
       ];
-      setPaths(buildPaths(next));
-      return next;
     });
   };
 
   const removeVar = (id: number) => {
-    setVars((prev) => {
-      const next = prev.filter((v) => v.id !== id);
-      setPaths(buildPaths(next));
+    setVars((prev) => prev.filter((v) => v.id !== id));
+  };
+
+  const addSubscale = (id: number) => {
+    setVars((prev) =>
+      prev.map((v) => {
+        if (v.id !== id) return v;
+        const subscales = [...v.subscales, `زیرمقیاس ${v.subscales.length + 1}`];
+        const count = subscales.length || 1;
+        return { ...v, subscales, totalMin: v.itemMin * count, totalMax: v.itemMax * count };
+      })
+    );
+  };
+
+  const removeSubscale = (id: number, idx: number) => {
+    setVars((prev) =>
+      prev.map((v) => {
+        if (v.id !== id) return v;
+        const subscales = v.subscales.filter((_, i) => i !== idx);
+        const count = subscales.length || 1;
+        return { ...v, subscales, totalMin: v.itemMin * count, totalMax: v.itemMax * count };
+      })
+    );
+  };
+
+  const setSubscaleName = (id: number, idx: number, name: string) => {
+    setVars((prev) => prev.map((v) => (v.id === id ? { ...v, subscales: v.subscales.map((s, i) => (i === idx ? name : s)) } : v)));
+  };
+
+  const togglePath = (from: number, to: number) => {
+    const k = `${from}:${to}`;
+    setInactiveKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
       return next;
     });
   };
 
-  const addSubscale = (id: number) => {
-    updateVar(id, {
-      subscales: [...(vars.find((v) => v.id === id)?.subscales ?? []), `زیرمقیاس ${(vars.find((v) => v.id === id)?.subscales.length ?? 0) + 1}`],
-    });
+  const setPathTarget = (key: string, patch: Partial<PathTarget>) => {
+    setConstraints((prev) => ({
+      ...prev,
+      pathTargets: { ...prev.pathTargets, [key]: { ...prev.pathTargets[key], ...patch } },
+    }));
   };
 
-  const removeSubscale = (id: number, idx: number) => {
-    const v = vars.find((x) => x.id === id);
-    if (!v) return;
-    updateVar(id, { subscales: v.subscales.filter((_, i) => i !== idx) });
+  const setIndirectTarget = (key: string, value: IndirectTarget) => {
+    setConstraints((prev) => ({ ...prev, indirectTargets: { ...prev.indirectTargets, [key]: value } }));
   };
 
-  const setSubscaleName = (id: number, idx: number, name: string) => {
-    const v = vars.find((x) => x.id === id);
-    if (!v) return;
-    updateVar(id, { subscales: v.subscales.map((s, i) => (i === idx ? name : s)) });
-  };
-
-  const togglePath = (from: number, to: number) => {
-    setPaths((prev) => prev.map((p) => (p.from === from && p.to === to ? { ...p, active: !p.active } : p)));
-  };
+  // ---------- بوت‌استرپ ----------
+  const runBootstrap = useCallback(
+    (compositesArg?: number[][], nBoot?: number) => {
+      const comps = compositesArg ?? analysis?.composites;
+      if (!comps) return;
+      const bootN = nBoot ?? constraints.bootSamples;
+      setBootBusy(true);
+      setStatus({ text: `در حال اجرای بوت‌استرپ با ${bootN} نمونه...`, kind: "" });
+      setTimeout(() => {
+        try {
+          const sem = estimateSem(comps, vars.map((v) => v.role), paths);
+          const raw = bootstrapIndirectEffects(comps, vars.map((v) => v.role), paths, bootN);
+          const directOf = (from: number, to: number) =>
+            sem.paths.find((p) => p.from === from && p.to === to)?.b ?? 0;
+          const res: BootResult[] = raw.map((b) => ({
+            from: b.from,
+            to: b.to,
+            direct: directOf(b.from, b.to),
+            indirect: b.indirect,
+            lo: b.lo,
+            hi: b.hi,
+            p: b.p,
+            total: directOf(b.from, b.to) + b.indirect,
+          }));
+          setBootResults(res);
+          setBootBusy(false);
+          setStatus({ text: `بوت‌استرپ با ${bootN} نمونه تکمیل شد.`, kind: "ok" });
+        } catch (err) {
+          setBootBusy(false);
+          setStatus({ text: (err as Error).message, kind: "err" });
+        }
+      }, 30);
+    },
+    [analysis, constraints.bootSamples, vars, paths]
+  );
 
   // ---------- تحلیل ----------
   const analyze = useCallback(
-    (rowsArg?: (number | null)[][], mapArg?: Record<number, (number | null)[]>, colsArg?: string[]) => {
+    (rowsArg?: (number | null)[][], mapArg?: Record<number, (number | null)[]>, colsArg?: string[], boot = true) => {
       const r = rowsArg ?? rows;
       const cm = mapArg ?? colMap;
       const c = colsArg ?? columns;
@@ -414,28 +537,23 @@ export default function SemTool() {
             subNames: v.subscales,
           }));
         setAnalysis({ composites, sem, corr, maha, mardia, missing, normals, meas });
+        setBootResults(null);
         setStatus({ text: "تحلیل با موفقیت اجرا شد.", kind: "ok" });
+        if (boot) runBootstrap(composites, constraints.bootSamples);
       } catch (err) {
         setStatus({ text: (err as Error).message, kind: "err" });
       }
     },
-    [rows, colMap, columns, vars, paths]
+    [rows, colMap, columns, vars, paths, constraints.bootSamples, runBootstrap]
   );
 
   // ---------- تولید داده ----------
   const generate = useCallback(() => {
     try {
       const nn = Math.round(Number(n));
-      const minS = Number(minScale);
-      const maxS = Number(maxScale);
       if (!Number.isFinite(nn) || nn < 20) throw new Error("حجم نمونه باید عددی بزرگ‌تر از ۲۰ باشد.");
-      if (!Number.isFinite(minS) || !Number.isFinite(maxS) || minS >= maxS) {
-        throw new Error("بازه مقیاس معتبر نیست.");
-      }
       const out = generateSemData({
         n: nn,
-        minScale: minS,
-        maxScale: maxS,
         variables: vars,
         paths,
         constraints,
@@ -445,11 +563,11 @@ export default function SemTool() {
       setColMap(autoMap(out.columns, vars));
       setAnswerKey(out.answerKey);
       setStatus({ text: `داده تولید شد (${out.answerKey.attempts} تلاش). تحلیل خودکار اجرا می‌شود.`, kind: "ok" });
-      analyze(out.rows, autoMap(out.columns, vars), out.columns);
+      analyze(out.rows, autoMap(out.columns, vars), out.columns, true);
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [n, minScale, maxScale, vars, paths, constraints, analyze]);
+  }, [n, vars, paths, constraints, analyze]);
 
   const generateRef = useRef(generate);
 
@@ -473,9 +591,7 @@ export default function SemTool() {
         const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null }) as unknown[][];
         if (!aoa.length) throw new Error("فایل اکسل خالی است.");
         const first = aoa[0] ?? [];
-        const hasHeader = first.some(
-          (v) => typeof v === "string" && !/^-?\d+(\.\d+)?$/.test(v.trim())
-        );
+        const hasHeader = first.some((v) => typeof v === "string" && !/^-?\d+(\.\d+)?$/.test(v.trim()));
         const headers: string[] = [];
         let dataRows = aoa;
         if (hasHeader) {
@@ -498,7 +614,7 @@ export default function SemTool() {
         setRows(parsed);
         setColMap(cm);
         setStatus({ text: `داده وارد شد: ${parsed.length} مورد × ${headers.length} ستون.`, kind: "ok" });
-        analyze(parsed, cm, headers);
+        analyze(parsed, cm, headers, true);
       } catch (err) {
         setStatus({ text: (err as Error).message, kind: "err" });
       }
@@ -506,27 +622,29 @@ export default function SemTool() {
     [vars, analyze]
   );
 
-  // ---------- خروجی ----------
+  // ---------- خروجی‌ها ----------
   const exportExcel = useCallback(() => {
     try {
       if (!rows.length) throw new Error("داده‌ای برای خروجی وجود ندارد.");
       const wb = XLSX.utils.book_new();
-      const dataAoa: (string | number | null)[][] = [
-        columns,
-        ...rows.map((r) => r.map((v) => (v == null ? "" : v))),
-      ];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(dataAoa), "داده");
-      if (analysis) {
-        const compAoa: (string | number | null)[][] = [
-          vars.map((v) => v.name),
-          ...Array.from({ length: rows.length }, (_, i) => vars.map((v) => analysis.composites[v.id][i])),
-        ];
-        XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(compAoa), "نمرات کل");
-      }
-      const report = buildReportText(vars, analysis, answerKey, rows.length);
       XLSX.utils.book_append_sheet(
         wb,
-        XLSX.utils.aoa_to_sheet(report.split("\n").map((l) => [l])),
+        XLSX.utils.aoa_to_sheet([columns, ...rows.map((r) => r.map((v) => (v == null ? "" : v)))]),
+        "داده"
+      );
+      if (analysis) {
+        XLSX.utils.book_append_sheet(
+          wb,
+          XLSX.utils.aoa_to_sheet([
+            vars.map((v) => v.name),
+            ...Array.from({ length: rows.length }, (_, i) => vars.map((v) => analysis.composites[v.id][i])),
+          ]),
+          "نمرات کل"
+        );
+      }
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.aoa_to_sheet(buildReportText(vars, analysis, answerKey, bootResults, rows.length).split("\n").map((l) => [l])),
         "گزارش"
       );
       XLSX.writeFile(wb, "amarist-sem.xlsx");
@@ -534,32 +652,75 @@ export default function SemTool() {
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [rows, columns, analysis, vars, answerKey]);
+  }, [rows, columns, analysis, vars, answerKey, bootResults]);
 
-  const exportCSV = useCallback(() => {
+  /** دانلود قالب داده با نظم تعیین‌شده — مشتری پر می‌کند و ایمپورت می‌کند */
+  const downloadTemplate = useCallback(() => {
     try {
-      if (!rows.length) throw new Error("داده‌ای برای خروجی وجود ندارد.");
-      const ws = XLSX.utils.aoa_to_sheet([
-        columns,
-        ...rows.map((r) => r.map((v) => (v == null ? "" : v))),
-      ]);
-      const csv = XLSX.utils.sheet_to_csv(ws);
-      const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "amarist-sem-data.csv";
-      a.click();
-      URL.revokeObjectURL(url);
-      setStatus({ text: "فایل CSV دانلود شد.", kind: "ok" });
+      const headers: string[] = [];
+      const sample1: (number | null)[] = [];
+      const sample2: (number | null)[] = [];
+      const empty: (number | null)[] = [];
+      vars.forEach((v) => {
+        if (v.subscales.length) {
+          v.subscales.forEach((s) => {
+            headers.push(`${v.name} — ${s}`);
+            sample1.push(v.itemMin);
+            sample2.push(v.itemMax);
+            empty.push(null);
+          });
+        } else {
+          headers.push(v.name);
+          sample1.push(v.itemMin);
+          sample2.push(v.itemMax);
+          empty.push(null);
+        }
+      });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(
+        wb,
+        XLSX.utils.aoa_to_sheet([headers, sample1, sample2, empty, empty, empty]),
+        "قالب داده"
+      );
+      XLSX.writeFile(wb, "amarist-sem-template.xlsx");
+      setStatus({ text: "قالب داده دانلود شد؛ آن را پر کنید و دوباره ایمپورت کنید.", kind: "ok" });
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [rows, columns]);
+  }, [vars]);
 
-  const exportReport = useCallback(() => {
+  const exportDocx = useCallback(async () => {
     try {
-      const text = buildReportText(vars, analysis, answerKey, rows.length);
+      const lines = buildReportText(vars, analysis, answerKey, bootResults, rows.length).split("\n");
+      const doc = new Document({
+        sections: [
+          {
+            children: lines.map(
+              (l) =>
+                new Paragraph({
+                  children: [new TextRun({ text: l, font: "Tahoma", size: 22 })],
+                  spacing: { after: 80 },
+                })
+            ),
+          },
+        ],
+      });
+      const blob = await Packer.toBlob(doc);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "amarist-sem-report.docx";
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus({ text: "گزارش docx دانلود شد.", kind: "ok" });
+    } catch (err) {
+      setStatus({ text: (err as Error).message, kind: "err" });
+    }
+  }, [vars, analysis, answerKey, bootResults, rows.length]);
+
+  const exportTxt = useCallback(() => {
+    try {
+      const text = buildReportText(vars, analysis, answerKey, bootResults, rows.length);
       const blob = new Blob(["\uFEFF" + text], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -567,11 +728,32 @@ export default function SemTool() {
       a.download = "amarist-sem-report.txt";
       a.click();
       URL.revokeObjectURL(url);
-      setStatus({ text: "گزارش دانلود شد (برای ورد قابل استفاده است).", kind: "ok" });
+      setStatus({ text: "گزارش txt دانلود شد.", kind: "ok" });
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
-  }, [vars, analysis, answerKey, rows.length]);
+  }, [vars, analysis, answerKey, bootResults, rows.length]);
+
+  const copyReport = useCallback(async () => {
+    try {
+      const text = buildReportText(vars, analysis, answerKey, bootResults, rows.length);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setStatus({ text: "کل گزارش کپی شد.", kind: "ok" });
+    } catch (err) {
+      setStatus({ text: (err as Error).message, kind: "err" });
+    }
+  }, [vars, analysis, answerKey, bootResults, rows.length]);
 
   // ---------- ویرایش سلول ----------
   const updateCell = (rowIdx: number, colIdx: number, value: number | null) => {
@@ -588,23 +770,18 @@ export default function SemTool() {
 
   const hasLatent = vars.some((v) => v.subscales.length > 0);
   const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
-
-  const possiblePaths = paths;
   const varName = (id: number) => vars.find((v) => v.id === id)?.name ?? `متغیر ${id + 1}`;
+  const pairs = indirectPairs(vars, paths);
+  const bootSamples = constraints.bootSamples;
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-16">
+    <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-44">
+      <ToolHeader title="تحلیل مسیر و مدل معادلات ساختاری (SEM)" subtitle={modeLabel} />
+
       <div className="mx-auto max-w-[1280px] px-4">
-        {/* ---------- سربرگ ---------- */}
+        {/* ---------- هیرو ---------- */}
         <header className="mt-6 rounded-[22px] border border-stone-200 bg-white/80 p-6 shadow-lg shadow-stone-900/5 backdrop-blur sm:p-7">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-1.5 text-sm font-bold text-indigo-600 transition hover:text-indigo-500"
-          >
-            <ArrowRight className="h-4 w-4" />
-            بازگشت به صفحه اصلی
-          </Link>
-          <div className="mt-4 flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-sky-500 to-indigo-600 text-white shadow-md">
               <RefreshCw className="h-6 w-6" />
             </span>
@@ -616,7 +793,7 @@ export default function SemTool() {
             </div>
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
-            {["متغیر پنهان (در صورت وجود زیرمقیاس)", "مدل اندازه‌گیری CFA", "اثر مستقیم / غیرمستقیم / کل", "میانجی‌گری (Sobel)", "شاخص‌های برازش CFI / RMSEA"].map((p) => (
+            {["متغیر پنهان (در صورت وجود زیرمقیاس)", "مدل اندازه‌گیری CFA", "اثر مستقیم / غیرمستقیم / کل", "میانجی‌گری با بوت‌استرپ", "شاخص‌های برازش CFI / RMSEA"].map((p) => (
               <span key={p} className="inline-flex items-center rounded-full border border-stone-200 bg-[#f8fafc] px-3 py-1.5 text-xs font-bold text-stone-600">
                 {p}
               </span>
@@ -639,7 +816,7 @@ export default function SemTool() {
             >
               <p className="font-extrabold text-stone-900">تولید داده تمرینی</p>
               <p className="mt-1 text-[12px] leading-6 text-stone-500">
-                با رعایت قیود انتخابی شما (معنی‌داری مسیرها، R²، اثر میانجی) داده شبیه‌سازی‌شده ساخته می‌شود.
+                با رعایت قیود انتخابی شما (معنی‌داری مسیرها، اثر میانجی، R² و...) داده شبیه‌سازی‌شده ساخته می‌شود.
               </p>
             </button>
             <button
@@ -650,13 +827,10 @@ export default function SemTool() {
             >
               <p className="font-extrabold text-stone-900">داده واقعی خودم</p>
               <p className="mt-1 text-[12px] leading-6 text-stone-500">
-                فایل اکسل یا CSV را در قدم ۴ وارد کنید؛ ستون‌ها را به متغیرها نسبت دهید.
+                فایل اکسل را در قدم ۴ وارد کنید؛ ستون‌ها را به متغیرها نسبت دهید.
               </p>
             </button>
           </div>
-          <p className={`${tinyCls} mt-3`}>
-            نکته: اگر داده‌ی تولیدشده را نگه دارید و به حالت «واقعی» بروید، می‌توانید همان داده را به‌عنوان داده واقعی تحلیل کنید.
-          </p>
         </section>
 
         {/* ---------- ۲) مشخصات متغیرها ---------- */}
@@ -665,7 +839,7 @@ export default function SemTool() {
             <div>
               <h2 className="text-lg font-extrabold text-stone-900">۲) مشخصات متغیرها</h2>
               <p className="mt-1 text-[13px] leading-6 text-stone-500">
-                نام، نقش (برون‌زا / میانجی / درون‌زا)، وجود نمره کل و زیرمقیاس‌ها را مشخص کنید. تمرکز فعلی بر میانجی‌گری است؛ تعدیل‌گر در آینده اضافه می‌شود.
+                نام، نقش (برون‌زا / میانجی / درون‌زا)، دامنه نمره و زیرمقیاس‌ها را مشخص کنید. نمره کل = مجموع زیرمقیاس‌ها.
               </p>
             </div>
             <button className={btnLight} onClick={addVar}>
@@ -680,11 +854,7 @@ export default function SemTool() {
                 <div className="flex flex-wrap items-start gap-3">
                   <div className="min-w-44 flex-1">
                     <label className={labelCls}>نام متغیر</label>
-                    <input
-                      className={inputCls}
-                      value={v.name}
-                      onChange={(e) => updateVar(v.id, { name: e.target.value })}
-                    />
+                    <input className={inputCls} value={v.name} onChange={(e) => updateVar(v.id, { name: e.target.value })} />
                   </div>
                   <div className="w-40">
                     <label className={labelCls}>نقش</label>
@@ -718,6 +888,42 @@ export default function SemTool() {
                   </div>
                 </div>
 
+                {/* دامنه نمره */}
+                <div className="mt-3 grid gap-3 sm:grid-cols-4">
+                  <div>
+                    <label className={labelCls}>حداقل نمره زیرمقیاس‌ها</label>
+                    <input type="number" className={inputCls} value={v.itemMin} onChange={(e) => updateItemRange(v.id, "itemMin", Number(e.target.value))} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>حداکثر نمره زیرمقیاس‌ها</label>
+                    <input type="number" className={inputCls} value={v.itemMax} onChange={(e) => updateItemRange(v.id, "itemMax", Number(e.target.value))} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>حداقل نمره کل</label>
+                    <input
+                      type="number"
+                      className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`}
+                      value={v.totalMin}
+                      disabled={!v.hasTotal}
+                      onChange={(e) => updateVar(v.id, { totalMin: Number(e.target.value) })}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelCls}>حداکثر نمره کل</label>
+                    <input
+                      type="number"
+                      className={`${inputCls} ${v.hasTotal ? "" : "opacity-50"}`}
+                      value={v.totalMax}
+                      disabled={!v.hasTotal}
+                      onChange={(e) => updateVar(v.id, { totalMax: Number(e.target.value) })}
+                    />
+                  </div>
+                </div>
+                <p className={`${tinyCls} mt-1`}>
+                  دامنه نمره کل با تغییر دامنه زیرمقیاس‌ها یا تعداد آن‌ها خودکار محاسبه می‌شود (قابل ویرایش دستی).
+                </p>
+
+                {/* زیرمقیاس‌ها */}
                 <div className="mt-3">
                   <div className="flex items-center justify-between">
                     <label className="text-[12px] font-bold text-stone-600">
@@ -729,18 +935,12 @@ export default function SemTool() {
                     </button>
                   </div>
                   {v.subscales.length === 0 && (
-                    <p className={`${tinyCls} mt-1`}>
-                      بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) در نظر گرفته می‌شود.
-                    </p>
+                    <p className={`${tinyCls} mt-1`}>بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) در نظر گرفته می‌شود.</p>
                   )}
                   <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     {v.subscales.map((s, si) => (
                       <div key={si} className="flex items-center gap-2">
-                        <input
-                          className={inputCls}
-                          value={s}
-                          onChange={(e) => setSubscaleName(v.id, si, e.target.value)}
-                        />
+                        <input className={inputCls} value={s} onChange={(e) => setSubscaleName(v.id, si, e.target.value)} />
                         <button
                           onClick={() => removeSubscale(v.id, si)}
                           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500"
@@ -801,19 +1001,14 @@ export default function SemTool() {
             <p className="text-[12px] font-bold text-stone-600">مسیرهای مدل (فعال/غیرفعال)</p>
             <p className={tinyCls}>با غیرفعال کردن یک مسیر، آن مسیر صفر فرض می‌شود و شاخص‌های برازش معنادار می‌شوند.</p>
             <div className="mt-2 flex flex-wrap gap-2">
-              {possiblePaths.map((p, i) => (
+              {paths.map((p, i) => (
                 <label
                   key={i}
                   className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-[12px] font-bold transition ${
                     p.active ? "border-indigo-300 bg-indigo-50 text-indigo-800" : "border-stone-200 bg-white text-stone-400"
                   }`}
                 >
-                  <input
-                    type="checkbox"
-                    checked={p.active}
-                    onChange={() => togglePath(p.from, p.to)}
-                    className="h-4 w-4 accent-indigo-600"
-                  />
+                  <input type="checkbox" checked={p.active} onChange={() => togglePath(p.from, p.to)} className="h-4 w-4 accent-indigo-600" />
                   {varName(p.from)} ← {varName(p.to)}
                 </label>
               ))}
@@ -828,45 +1023,176 @@ export default function SemTool() {
             <p className="mt-1 text-[13px] leading-6 text-stone-500">
               مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار باشد.
             </p>
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div>
                 <label className={labelCls}>حجم نمونه</label>
                 <input type="number" className={inputCls} value={n} onChange={(e) => setN(e.target.value)} />
               </div>
               <div>
-                <label className={labelCls}>حداقل مقیاس</label>
-                <input type="number" className={inputCls} value={minScale} onChange={(e) => setMinScale(e.target.value)} />
+                <label className={labelCls}>تعداد نمونه‌های بوت‌استرپ</label>
+                <input
+                  type="number"
+                  className={inputCls}
+                  value={constraints.bootSamples}
+                  onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })}
+                />
+                <p className={tinyCls}>پیش‌فرض: 5000</p>
               </div>
               <div>
-                <label className={labelCls}>حداکثر مقیاس</label>
-                <input type="number" className={inputCls} value={maxScale} onChange={(e) => setMaxScale(e.target.value)} />
+                <label className={labelCls}>درصد داده گمشده</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={20}
+                  className={inputCls}
+                  value={constraints.missingPct}
+                  onChange={(e) => setConstraints({ ...constraints, missingPct: Number(e.target.value) })}
+                />
+              </div>
+              <div>
+                <label className={labelCls}>درصد داده پرت</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={10}
+                  className={inputCls}
+                  value={constraints.outlierPct}
+                  onChange={(e) => setConstraints({ ...constraints, outlierPct: Number(e.target.value) })}
+                />
               </div>
             </div>
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-[#fbfdff] p-3">
-                <input
-                  type="checkbox"
-                  checked={constraints.enforcePathSig}
-                  onChange={(e) => setConstraints({ ...constraints, enforcePathSig: e.target.checked })}
-                  className="mt-1 h-4 w-4 accent-indigo-600"
-                />
-                <span>
-                  <span className="block text-sm font-extrabold text-stone-800">همه مسیرهای فعال معنی‌دار باشند</span>
-                  <span className={tinyCls}>p مقدار همه ضرایب مسیر کوچک‌تر از ۰/۰۵ باشد.</span>
-                </span>
-              </label>
-              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-[#fbfdff] p-3">
-                <input
-                  type="checkbox"
-                  checked={constraints.enforceIndirectSig}
-                  onChange={(e) => setConstraints({ ...constraints, enforceIndirectSig: e.target.checked })}
-                  className="mt-1 h-4 w-4 accent-indigo-600"
-                />
-                <span>
-                  <span className="block text-sm font-extrabold text-stone-800">اثر غیرمستقیم (میانجی) معنی‌دار باشد</span>
-                  <span className={tinyCls}>آزمون سوبل برای مسیرهای میانجی معنی‌دار باشد.</span>
-                </span>
-              </label>
+
+            {/* قید مسیرها */}
+            <h3 className="mt-5 font-extrabold text-stone-800">قیود مسیرهای مستقیم (بر اساس متغیرهای واردشده)</h3>
+            <p className={tinyCls}>
+              برای هر مسیر مشخص کنید معنی‌دار باشد، نباشد یا مهم نباشد؛ بازه β استانداردشده اختیاری است (پیش‌فرض: همه معنی‌دار).
+            </p>
+            <div className="tool-table-wrap mt-3">
+              <table className="tool-table" style={{ minWidth: 720 }}>
+                <thead>
+                  <tr>
+                    <th>مسیر</th>
+                    <th>وضعیت</th>
+                    <th>β حداقل</th>
+                    <th>β حداکثر</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paths.filter((p) => p.active).map((p) => {
+                    const key = `${p.from}:${p.to}`;
+                    const t = constraints.pathTargets[key] ?? { sig: "sig", betaMin: null, betaMax: null };
+                    return (
+                      <tr key={key}>
+                        <td style={{ fontWeight: 900 }}>{varName(p.from)} ← {varName(p.to)}</td>
+                        <td>
+                          <select
+                            className={`${inputCls} !py-1.5`}
+                            value={t.sig}
+                            onChange={(e) => setPathTarget(key, { sig: e.target.value as PathTarget["sig"] })}
+                          >
+                            <option value="sig">معنی‌دار باشد</option>
+                            <option value="ns">معنی‌دار نباشد</option>
+                            <option value="any">مهم نیست</option>
+                          </select>
+                        </td>
+                        <td>
+                          <input
+                            type="number"
+                            step={0.05}
+                            dir="ltr"
+                            className={`${inputCls} !py-1.5`}
+                            placeholder="—"
+                            value={t.betaMin ?? ""}
+                            onChange={(e) => setPathTarget(key, { betaMin: e.target.value === "" ? null : Number(e.target.value) })}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            type="number"
+                            step={0.05}
+                            dir="ltr"
+                            className={`${inputCls} !py-1.5`}
+                            placeholder="—"
+                            value={t.betaMax ?? ""}
+                            onChange={(e) => setPathTarget(key, { betaMax: e.target.value === "" ? null : Number(e.target.value) })}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* قید اثر غیرمستقیم */}
+            {pairs.length > 0 && (
+              <>
+                <h3 className="mt-5 font-extrabold text-stone-800">قیود اثرات غیرمستقیم (میانجی‌گری — با بوت‌استرپ)</h3>
+                <p className={tinyCls}>برای هر جفت برون‌زا ← درون‌زا، معناداری اثر غیرمستقیم از طریق میانجی‌ها تعیین می‌شود.</p>
+                <div className="tool-table-wrap mt-3">
+                  <table className="tool-table" style={{ minWidth: 480 }}>
+                    <thead>
+                      <tr>
+                        <th>مسیر غیرمستقیم</th>
+                        <th>وضعیت</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {pairs.map((pr) => {
+                        const key = `${pr.from}:${pr.to}`;
+                        const val = constraints.indirectTargets[key] ?? "sig";
+                        return (
+                          <tr key={key}>
+                            <td style={{ fontWeight: 900 }}>{varName(pr.from)} ← … ← {varName(pr.to)}</td>
+                            <td>
+                              <select
+                                className={`${inputCls} !py-1.5`}
+                                value={val}
+                                onChange={(e) => setIndirectTarget(key, e.target.value as IndirectTarget)}
+                              >
+                                <option value="sig">معنی‌دار باشد</option>
+                                <option value="ns">معنی‌دار نباشد</option>
+                                <option value="any">مهم نیست</option>
+                              </select>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            {/* پیش‌فرض‌ها */}
+            <h3 className="mt-5 font-extrabold text-stone-800">پیش‌فرض‌های آماری (همگی قابل تنظیم)</h3>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              {[
+                { key: "enforceNormality" as const, title: "نرمال بودن تک‌متغیری", desc: "کجی < 3 و کشیدگی < 10 (معیار کلاین) برای همه متغیرها", conflict: constraints.outlierPct > 0 },
+                { key: "enforceLinearity" as const, title: "خطی بودن روابط", desc: "همبستگی همه مسیرهای فعال معنادار باشد", conflict: false },
+                { key: "enforceVif" as const, title: "عدم هم‌خطی چندگانه", desc: "VIF همه پیش‌بین‌ها کمتر از 5", conflict: false },
+                { key: "enforceDw" as const, title: "استقلال خطاها", desc: "دوربین-واتسون بین 1.5 تا 2.5", conflict: false },
+              ].map((item) => (
+                <label key={item.key} className={`flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-[#fbfdff] p-3 ${item.conflict ? "opacity-60" : ""}`}>
+                  <input
+                    type="checkbox"
+                    checked={constraints[item.key] && !item.conflict}
+                    disabled={item.conflict}
+                    onChange={(e) => setConstraints({ ...constraints, [item.key]: e.target.checked })}
+                    className="mt-1 h-4 w-4 accent-indigo-600"
+                  />
+                  <span>
+                    <span className="block text-sm font-extrabold text-stone-800">{item.title}</span>
+                    <span className={tinyCls}>
+                      {item.conflict ? "با وجود داده پرت عمدی، این قید به‌صورت خودکار غیرفعال است (داده پرت و نرمال بودن با هم سازگار نیستند)." : item.desc}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </div>
+
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
               <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-[#fbfdff] p-3">
                 <input
                   type="checkbox"
@@ -875,11 +1201,12 @@ export default function SemTool() {
                   className="mt-1 h-4 w-4 accent-indigo-600"
                 />
                 <span className="w-full">
-                  <span className="block text-sm font-extrabold text-stone-800">بازه R² متغیرهای درون‌زا</span>
+                  <span className="block text-sm font-extrabold text-stone-800">بازه R² متغیرهای نتیجه (Y)</span>
                   <span className="mt-1 flex gap-2">
                     <input
                       type="number"
                       step={0.05}
+                      dir="ltr"
                       className={`${inputCls} !py-1`}
                       disabled={constraints.r2Range == null}
                       value={constraints.r2Range?.min ?? 0.3}
@@ -888,6 +1215,7 @@ export default function SemTool() {
                     <input
                       type="number"
                       step={0.05}
+                      dir="ltr"
                       className={`${inputCls} !py-1`}
                       disabled={constraints.r2Range == null}
                       value={constraints.r2Range?.max ?? 0.6}
@@ -897,14 +1225,15 @@ export default function SemTool() {
                 </span>
               </label>
               <div className="rounded-xl border border-stone-200 bg-[#fbfdff] p-3">
-                <p className="text-sm font-extrabold text-stone-800">شاخص‌های برازش (اختیاری — فقط وقتی مسیری غیرفعال باشد اثر دارد)</p>
+                <p className="text-sm font-extrabold text-stone-800">شاخص‌های برازش (اختیاری)</p>
                 <div className="mt-2 flex gap-3">
                   <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600">
                     CFI ≥
                     <input
                       type="number"
                       step={0.01}
-                      className={`${inputCls} !w-24 !py-1`}
+                      dir="ltr"
+                      className={`${inputCls} !w-20 !py-1`}
                       value={constraints.cfiMin ?? 0.9}
                       onChange={(e) => setConstraints({ ...constraints, cfiMin: Number(e.target.value) })}
                     />
@@ -914,13 +1243,21 @@ export default function SemTool() {
                     <input
                       type="number"
                       step={0.01}
-                      className={`${inputCls} !w-24 !py-1`}
+                      dir="ltr"
+                      className={`${inputCls} !w-20 !py-1`}
                       value={constraints.rmseaMax ?? 0.08}
                       onChange={(e) => setConstraints({ ...constraints, rmseaMax: Number(e.target.value) })}
                     />
                   </label>
                 </div>
-                <p className={tinyCls}>مقدار «خاموش» این قیود را می‌توان با خالی نکردن فیلد کنترل کرد؛ فعلاً همیشه فعال‌اند.</p>
+                <p className={tinyCls}>با خالی‌کردن فیلد، قید غیرفعال می‌شود.</p>
+              </div>
+              <div className="rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 p-3">
+                <p className="text-sm font-extrabold text-emerald-800">پیش‌فرض‌های واقع‌گرایانه</p>
+                <p className={`${tinyCls} mt-1 text-emerald-700`}>
+                  ضرایب مسیر، بارهای عاملی (0.6 تا 0.85) و R² در محدوده‌های متعارف پژوهش‌های واقعی ساخته می‌شوند تا خروجی برای
+                  داوری و آموزش قابل قبول باشد.
+                </p>
               </div>
             </div>
           </section>
@@ -932,14 +1269,14 @@ export default function SemTool() {
             <div>
               <h2 className="text-lg font-extrabold text-stone-900">۴) جدول داده</h2>
               <p className="mt-1 text-[13px] leading-6 text-stone-500">
-                داده‌ها در همین جدول قابل ویرایش‌اند؛ ایمپورت و اکسپورت فوری با اکسل و CSV.
+                داده‌ها قابل ویرایش‌اند؛ ایمپورت و اکسپورت با اکسل انجام می‌شود.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
               <input
                 ref={fileRef}
                 type="file"
-                accept=".xlsx,.xls,.csv"
+                accept=".xlsx,.xls"
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
@@ -949,14 +1286,15 @@ export default function SemTool() {
               />
               <button className={btnSecondary} onClick={() => fileRef.current?.click()}>
                 <Upload className="h-4 w-4" />
-                ایمپورت اکسل / CSV
+                ایمپورت اکسل
+              </button>
+              <button className={btnSecondary} onClick={downloadTemplate}>
+                <FileSpreadsheet className="h-4 w-4" />
+                دانلود قالب داده
               </button>
               <button className={btnSecondary} onClick={exportExcel}>
                 <Download className="h-4 w-4" />
                 اکسپورت اکسل
-              </button>
-              <button className={btnLight} onClick={exportCSV}>
-                CSV
               </button>
             </div>
           </div>
@@ -982,7 +1320,7 @@ export default function SemTool() {
           </div>
 
           {rows.length > 0 ? (
-            <div className="tool-table-wrap mt-4">
+            <div className="tool-table-wrap tool-table-scroll mt-4">
               <table className="tool-table" style={{ minWidth: Math.max(720, columns.length * 90) }}>
                 <thead>
                   <tr>
@@ -1029,9 +1367,7 @@ export default function SemTool() {
               {/* ۱) داده گمشده */}
               <div>
                 <h3 className="font-extrabold text-stone-800">۱) داده‌های گمشده</h3>
-                <p className={tinyCls}>
-                  در مدل معادلات ساختاری داده‌ها باید کامل باشند؛ تحلیل با حذف لیستی موارد ناقص انجام می‌شود.
-                </p>
+                <p className={tinyCls}>در مدل معادلات ساختاری داده‌ها باید کامل باشند؛ تحلیل با حذف لیستی موارد ناقص انجام می‌شود.</p>
                 <div className="tool-table-wrap mt-2">
                   <table className="tool-table">
                     <thead>
@@ -1053,9 +1389,7 @@ export default function SemTool() {
               {/* ۲) داده پرت */}
               <div>
                 <h3 className="font-extrabold text-stone-800">۲) داده پرت چندمتغیری (فاصله ماهالانوبیس)</h3>
-                <p className={tinyCls}>
-                  فاصله ماهالانوبیس برای هر مورد با توزیع کای‌دو (درجه آزادی = تعداد متغیرها) مقایسه می‌شود؛ p کمتر از ۰/۰۵ نشانه داده پرت است.
-                </p>
+                <p className={tinyCls}>فاصله ماهالانوبیس برای هر مورد با توزیع کای‌دو مقایسه می‌شود؛ p کمتر از ۰/۰۵ نشانه داده پرت است.</p>
                 {analysis.maha.valid ? (
                   <>
                     <div className="tool-table-wrap mt-2">
@@ -1088,18 +1422,17 @@ export default function SemTool() {
               {/* ۳) نرمال بودن تک‌متغیری */}
               <div>
                 <h3 className="font-extrabold text-stone-800">۳) نرمال بودن تک‌متغیری (کجی و کشیدگی)</h3>
-                <p className={tinyCls}>
-                  بر اساس نظر کلاین (۲۰۲۳): قدرمطلق کجی کوچک‌تر از ۳ و قدرمطلق کشیدگی کوچک‌تر از ۱۰.
-                </p>
+                <p className={tinyCls}>بر اساس نظر کلاین (۲۰۲۳): قدرمطلق کجی کوچک‌تر از ۳ و قدرمطلق کشیدگی کوچک‌تر از ۱۰.</p>
                 <div className="tool-table-wrap mt-2">
                   <table className="tool-table">
                     <thead>
-                      <tr><th>متغیر</th><th>کجی</th><th>کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
+                      <tr><th>متغیر</th><th>دامنه نمره</th><th>کجی</th><th>کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
                     </thead>
                     <tbody>
                       {analysis.normals.map((x, i) => (
                         <tr key={i}>
                           <td>{x.name}</td>
+                          <td className="number-cell">{vars[i].itemMin} تا {vars[i].itemMax}{vars[i].hasTotal ? ` (کل: ${vars[i].totalMin} تا ${vars[i].totalMax})` : ""}</td>
                           <td className="number-cell">{fmt(x.skew)}</td>
                           <td className="number-cell">{fmt(x.kurt)}</td>
                           <td dangerouslySetInnerHTML={{ __html: Math.abs(x.skew) < 3 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
@@ -1114,9 +1447,7 @@ export default function SemTool() {
               {/* ۴) مردیا */}
               <div>
                 <h3 className="font-extrabold text-stone-800">۴) نرمال بودن چندمتغیری (ضریب مردیا)</h3>
-                <p className={tinyCls}>
-                  بر اساس پیشنهاد بلانچ (۲۰۱۲): نسبت بحرانی ضریب کشیدگی استانداردشده مردیا کوچک‌تر از ۵.
-                </p>
+                <p className={tinyCls}>بر اساس پیشنهاد بلانچ (۲۰۱۲): نسبت بحرانی ضریب کشیدگی استانداردشده مردیا کوچک‌تر از ۵.</p>
                 {analysis.mardia.valid ? (
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
@@ -1140,7 +1471,7 @@ export default function SemTool() {
               {/* ۵) خطی بودن */}
               <div>
                 <h3 className="font-extrabold text-stone-800">۵) خطی بودن روابط (ماتریس همبستگی پیرسون)</h3>
-                <p className={tinyCls}>** معناداری در سطح ۰/۰۱ و * معناداری در سطح ۰/۰۵.</p>
+                <p className={tinyCls}>** معناداری در سطح ۰/۰۱ و * معناداری در سطح ۰/۰۵. اعداد زیر قطر ماتریس قرار دارند.</p>
                 <div className="tool-table-wrap mt-2">
                   <table className="tool-table">
                     <thead>
@@ -1157,7 +1488,7 @@ export default function SemTool() {
                           <td style={{ fontWeight: 900 }}>{v.name}</td>
                           {vars.map((_, j) => {
                             if (i === j) return <td key={j} className="number-cell">1</td>;
-                            if (i > j) return <td key={j} />;
+                            if (i < j) return <td key={j} />;
                             const r = analysis.corr.r[i][j];
                             const p = analysis.corr.p[i][j];
                             return (
@@ -1177,9 +1508,7 @@ export default function SemTool() {
               {/* ۶) هم‌خطی و استقلال خطاها */}
               <div>
                 <h3 className="font-extrabold text-stone-800">۶) عدم هم‌خطی چندگانه و استقلال خطاها</h3>
-                <p className={tinyCls}>
-                  معیار: VIF کمتر از ۲ و آماره دوربین-واتسون بین ۱/۵ تا ۲/۵ (تلورانس = 1/VIF).
-                </p>
+                <p className={tinyCls}>معیار: VIF کمتر از ۵ و آماره دوربین-واتسون بین ۱/۵ تا ۲/۵ (تلورانس = 1/VIF).</p>
                 <div className="tool-table-wrap mt-2">
                   <table className="tool-table">
                     <thead>
@@ -1190,10 +1519,8 @@ export default function SemTool() {
                         if (v.role === "exogenous") return null;
                         const vifs = analysis.sem.vifs[v.id] ?? [];
                         const dw = analysis.sem.dw[v.id] ?? NaN;
-                        const preds = paths
-                          .filter((p) => p.active && p.to === v.id)
-                          .map((p) => varName(p.from));
-                        const vifOk = vifs.every((x) => x < 2);
+                        const preds = paths.filter((p) => p.active && p.to === v.id).map((p) => varName(p.from));
+                        const vifOk = vifs.every((x) => x < 5);
                         const dwOk = !Number.isFinite(dw) || (dw >= 1.5 && dw <= 2.5);
                         return (
                           <tr key={v.id}>
@@ -1219,38 +1546,53 @@ export default function SemTool() {
           <h2 className="text-lg font-extrabold text-stone-900">۶) نتایج</h2>
           {!analysis ? (
             <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400">
-              بعد از تحلیل، ضرایب مسیر، اثرات، R² و شاخص‌های برازش اینجا نمایش داده می‌شود.
+              بعد از تحلیل، دیاگرام مدل، ضرایب مسیر، اثرات، R² و شاخص‌های برازش اینجا نمایش داده می‌شود.
             </div>
           ) : (
             <div className="mt-4 space-y-6">
+              {/* دیاگرام مدل */}
+              <div>
+                <h3 className="font-extrabold text-stone-800">دیاگرام مدل</h3>
+                <div className="mt-2">
+                  <PathDiagram vars={vars} paths={paths} results={analysis.sem} />
+                </div>
+              </div>
+
               {/* مدل اندازه‌گیری */}
               {analysis.meas.length > 0 && (
                 <div>
-                  <h3 className="font-extrabold text-stone-800">مدل اندازه‌گیری (CFA ساده — آلفای کرونباخ و بارهای عاملی)</h3>
+                  <h3 className="font-extrabold text-stone-800">مدل اندازه‌گیری (آلفای کرونباخ نمره کل و بارهای عاملی)</h3>
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
-                        <tr><th>متغیر پنهان</th><th>زیرمقیاس</th><th>بار عاملی</th><th>آلفای کرونباخ</th><th>نتیجه</th></tr>
+                        <tr><th>متغیر پنهان</th><th>شاخص</th><th>بار عاملی</th><th>آلفای کرونباخ (نمره کل)</th><th>نتیجه</th></tr>
                       </thead>
                       <tbody>
-                        {analysis.meas.map((m) =>
-                          m.subNames.map((s, si) => (
-                            <tr key={`${m.varId}-${si}`}>
-                              {si === 0 && <td rowSpan={m.subNames.length} style={{ fontWeight: 900 }}>{m.name}</td>}
-                              <td>{s}</td>
-                              <td className="number-cell">{fmt(m.loadings[si])}</td>
-                              {si === 0 && (
-                                <td rowSpan={m.subNames.length} className="number-cell">{fmt(m.alpha)}</td>
-                              )}
-                              {si === 0 && (
-                                <td rowSpan={m.subNames.length} dangerouslySetInnerHTML={{ __html: m.alpha >= 0.7 ? badge(true, "قابل قبول") : badge(false, "ضعیف") }} />
-                              )}
+                        {analysis.meas.map((m) => (
+                          <>
+                            <tr key={`${m.varId}-total`} style={{ background: "#f8fafc" }}>
+                              <td rowSpan={m.subNames.length + 1} style={{ fontWeight: 900 }}>{m.name}</td>
+                              <td style={{ fontWeight: 800 }}>نمره کل ({m.subNames.length} زیرمقیاس)</td>
+                              <td className="number-cell">—</td>
+                              <td className="number-cell">{fmt(m.alpha)}</td>
+                              <td dangerouslySetInnerHTML={{ __html: m.alpha >= 0.7 ? badge(true, "قابل قبول") : badge(false, "ضعیف") }} />
                             </tr>
-                          ))
-                        )}
+                            {m.subNames.map((s, si) => (
+                              <tr key={`${m.varId}-${si}`}>
+                                <td>{s}</td>
+                                <td className="number-cell">{fmt(m.loadings[si])}</td>
+                                <td className="number-cell">—</td>
+                                <td />
+                              </tr>
+                            ))}
+                          </>
+                        ))}
                       </tbody>
                     </table>
                   </div>
+                  <p className={tinyCls}>
+                    آلفای کرونباخ روی زیرمقیاس‌های هر متغیر (همان نمره کل) محاسبه می‌شود؛ برای متغیر تک‌شاخصی قابل محاسبه نیست.
+                  </p>
                 </div>
               )}
 
@@ -1282,27 +1624,54 @@ export default function SemTool() {
                 </div>
               </div>
 
-              {/* اثرات */}
+              {/* اثرات با بوت‌استرپ */}
               <div>
-                <h3 className="font-extrabold text-stone-800">اثرات مستقیم، غیرمستقیم و کل (آزمون سوبل)</h3>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="font-extrabold text-stone-800">اثرات مستقیم، غیرمستقیم و کل (بوت‌استرپ)</h3>
+                  <div className="flex items-center gap-2">
+                    <label className="flex items-center gap-1.5 text-[12px] font-bold text-stone-600">
+                      تعداد نمونه:
+                      <input
+                        type="number"
+                        dir="ltr"
+                        className={`${inputCls} !w-24 !py-1`}
+                        value={bootSamples}
+                        onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })}
+                      />
+                    </label>
+                    <button
+                      className={btnLight}
+                      disabled={bootBusy}
+                      onClick={() => runBootstrap()}
+                    >
+                      <RefreshCw className={`h-4 w-4 ${bootBusy ? "animate-spin" : ""}`} />
+                      {bootBusy ? "در حال اجرا..." : "اجرای بوت‌استرپ"}
+                    </button>
+                  </div>
+                </div>
+                <p className={tinyCls}>
+                  فاصله اطمینان ۹۵٪ اثر غیرمستقیم با روش بوت‌استرپ (بازنمونه‌گیری با جایگذاری) محاسبه می‌شود؛ اگر بازه صفر را
+                  شامل نشود، میانجی‌گری معنی‌دار است.
+                </p>
                 <div className="tool-table-wrap mt-2">
                   <table className="tool-table">
                     <thead>
-                      <tr><th>مسیر</th><th>اثر مستقیم</th><th>اثر غیرمستقیم</th><th>z سوبل</th><th>p سوبل</th><th>اثر کل</th><th>نتیجه میانجی</th></tr>
+                      <tr><th>مسیر</th><th>اثر مستقیم</th><th>اثر غیرمستقیم</th><th>CI پایین ۹۵٪</th><th>CI بالا ۹۵٪</th><th>p بوت‌استرپ</th><th>اثر کل</th><th>نتیجه میانجی</th></tr>
                     </thead>
                     <tbody>
-                      {analysis.sem.effects.length === 0 && (
-                        <tr><td colSpan={7} className="muted">اثری قابل محاسبه نیست.</td></tr>
+                      {bootResults === null && (
+                        <tr><td colSpan={8} className="muted">{bootBusy ? "در حال محاسبه بوت‌استرپ..." : "برای محاسبه فاصله اطمینان، بوت‌استرپ را اجرا کنید (یا تحلیل را دوباره اجرا کنید)."}</td></tr>
                       )}
-                      {analysis.sem.effects.map((ef, i) => (
+                      {bootResults?.map((b, i) => (
                         <tr key={i}>
-                          <td>{varName(ef.from)} ← {varName(ef.to)}</td>
-                          <td className="number-cell">{fmt(ef.direct)}</td>
-                          <td className="number-cell">{fmt(ef.indirect)}</td>
-                          <td className="number-cell">{fmt(ef.zIndirect)}</td>
-                          <td className="number-cell">{fmtP(ef.pIndirect)}</td>
-                          <td className="number-cell">{fmt(ef.total)}</td>
-                          <td dangerouslySetInnerHTML={{ __html: ef.indirect !== 0 && ef.pIndirect < 0.05 ? badge(true, "میانجی معنی‌دار") : ef.indirect === 0 ? badgeWarn("میانجی وجود ندارد") : badge(false, "میانجی غیرمعنی‌دار") }} />
+                          <td>{varName(b.from)} ← {varName(b.to)}</td>
+                          <td className="number-cell">{fmt(b.direct)}</td>
+                          <td className="number-cell">{fmt(b.indirect)}</td>
+                          <td className="number-cell">{fmt(b.lo)}</td>
+                          <td className="number-cell">{fmt(b.hi)}</td>
+                          <td className="number-cell">{fmtP(b.p)}</td>
+                          <td className="number-cell">{fmt(b.total)}</td>
+                          <td dangerouslySetInnerHTML={{ __html: b.indirect !== 0 && b.p < 0.05 ? badge(true, "میانجی معنی‌دار") : b.indirect === 0 ? badgeWarn("میانجی وجود ندارد") : badge(false, "میانجی غیرمعنی‌دار") }} />
                         </tr>
                       ))}
                     </tbody>
@@ -1391,30 +1760,35 @@ export default function SemTool() {
             </div>
           )}
         </section>
+      </div>
 
-        {/* ---------- ۷) خروجی نهایی ---------- */}
-        <section className={`${cardCls} mt-4`}>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-extrabold text-stone-900">۷) خروجی نهایی</h2>
-              <p className="mt-1 text-[13px] leading-6 text-stone-500">
-                فایل اکسل شامل سه شیت «داده»، «نمرات کل» و «گزارش» است. گزارش متنی برای استفاده در ورد نیز قابل دانلود است.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <button className={btnSecondary} onClick={exportExcel}>
-                <Download className="h-4 w-4" />
-                دانلود اکسل کامل
-              </button>
-              <button className={btnLight} onClick={exportCSV}>
-                دانلود CSV داده
-              </button>
-              <button className={btnLight} onClick={exportReport}>
-                دانلود گزارش (ورد)
-              </button>
-            </div>
+      {/* ---------- فوتر ثابت خروجی ---------- */}
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-stone-200 bg-white/95 shadow-[0_-6px_24px_rgba(24,32,51,0.08)] backdrop-blur">
+        <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-2 px-4 py-2.5">
+          <span className="text-sm font-extrabold text-stone-800">خروجی نهایی</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <button className={btnPrimary} onClick={exportExcel}>
+              <Download className="h-4 w-4" />
+              اکسل کامل
+            </button>
+            <button className={btnSecondary} onClick={downloadTemplate}>
+              <FileSpreadsheet className="h-4 w-4" />
+              قالب داده
+            </button>
+            <button className={btnLight} onClick={exportDocx}>
+              <FileText className="h-4 w-4" />
+              گزارش docx
+            </button>
+            <button className={btnLight} onClick={exportTxt}>
+              <FileText className="h-4 w-4" />
+              گزارش txt
+            </button>
+            <button className={btnLight} onClick={copyReport}>
+              <Copy className="h-4 w-4" />
+              کپی گزارش
+            </button>
           </div>
-        </section>
+        </div>
       </div>
     </div>
   );

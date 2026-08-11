@@ -295,13 +295,62 @@ export function vifForPredictors(predictors: number[][]): number[] {
   return vifs;
 }
 
-// ---------- سوبل ----------
+// ---------- بوت‌استرپ اثر غیرمستقیم ----------
 
-export function sobel(a: number, seA: number, b: number, seB: number): { z: number; p: number } {
-  const se = Math.sqrt(b * b * seA * seA + a * a * seB * seB);
-  const z = se > 0 ? (a * b) / se : NaN;
-  const p = Number.isFinite(z) ? clamp(2 * (1 - normalCDF(Math.abs(z))), 0, 1) : NaN;
-  return { z, p };
+export function bootstrapIndirectEffects(
+  composites: number[][],
+  roles: Role[],
+  pathRows: PathRow[],
+  nBoot: number
+): { from: number; to: number; indirect: number; lo: number; hi: number; p: number; sig: boolean }[] {
+  const n = composites[0]?.length ?? 0;
+  const fullRows: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    const r = composites.map((c) => c[i]);
+    if (r.every(Number.isFinite)) fullRows.push(r);
+  }
+  const nn = fullRows.length;
+  if (nn < 10) return [];
+  const active = pathRows.filter((pr) => pr.active);
+  const meds = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "mediator").map((x) => x.i);
+  const exogs = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "exogenous").map((x) => x.i);
+  const outs = roles.map((r, i) => ({ r, i })).filter((x) => x.r === "outcome").map((x) => x.i);
+  const results: { from: number; to: number; indirect: number; lo: number; hi: number; p: number; sig: boolean }[] = [];
+
+  for (const e of exogs) {
+    for (const o of outs) {
+      const mList = meds.filter(
+        (m) => active.some((p) => p.from === e && p.to === m) && active.some((p) => p.from === m && p.to === o)
+      );
+      if (!mList.length) continue;
+      const effects: number[] = [];
+      for (let b = 0; b < nBoot; b++) {
+        const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
+        const boot = (v: number) => idx.map((k) => fullRows[k][v]);
+        let indirect = 0;
+        for (const m of mList) {
+          const a = ols([boot(e)], boot(m)).coefs[1] ?? 0;
+          const bCoef = ols([boot(e), boot(m)], boot(o)).coefs[2] ?? 0;
+          indirect += a * bCoef;
+        }
+        effects.push(indirect);
+      }
+      effects.sort((a, b) => a - b);
+      const lo = effects[Math.max(0, Math.floor(nn * 0.025))];
+      const hi = effects[Math.min(nn - 1, Math.floor(nn * 0.975))];
+      const meanE = mean(effects);
+      const p = clamp(
+        2 * Math.min(
+          effects.filter((x) => x <= 0).length / nn,
+          effects.filter((x) => x >= 0).length / nn
+        ),
+        0,
+        1
+      );
+      results.push({ from: e, to: o, indirect: meanE, lo, hi, p, sig: lo > 0 || hi < 0 });
+    }
+  }
+  return results;
 }
 
 // ---------- قابلیت اعتماد و بارهای عاملی ----------

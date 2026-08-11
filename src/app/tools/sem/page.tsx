@@ -478,18 +478,22 @@ export default function SemTool() {
         try {
           const sem = estimateSem(comps, vars.map((v) => v.role), paths);
           const raw = bootstrapIndirectEffects(comps, vars.map((v) => v.role), paths, bootN);
-          const directOf = (from: number, to: number) =>
-            sem.paths.find((p) => p.from === from && p.to === to)?.b ?? 0;
-          const res: BootResult[] = raw.map((b) => ({
-            from: b.from,
-            to: b.to,
-            direct: directOf(b.from, b.to),
-            indirect: b.indirect,
-            lo: b.lo,
-            hi: b.hi,
-            p: b.p,
-            total: directOf(b.from, b.to) + b.indirect,
-          }));
+          // نقطه‌تخمین اثر از داده اصلی، فاصله اطمینان از توزیع بوت‌استرپ
+          const res: BootResult[] = raw.map((b) => {
+            const eff = sem.effects.find((e) => e.from === b.from && e.to === b.to);
+            const indirect = eff?.indirect ?? b.indirect;
+            const direct = eff?.direct ?? 0;
+            return {
+              from: b.from,
+              to: b.to,
+              direct,
+              indirect,
+              lo: b.lo,
+              hi: b.hi,
+              p: b.p,
+              total: direct + indirect,
+            };
+          });
           setBootResults(res);
           setBootBusy(false);
           setStatus({ text: `بوت‌استرپ با ${bootN} نمونه تکمیل شد.`, kind: "ok" });

@@ -76,6 +76,16 @@ body {
   color: #1e1b4b;
 }
 
+/* همه عناصر کلیک‌پذیر دست‌مانند */
+button:not(:disabled),
+[role="button"],
+label:has(input[type="radio"]),
+label:has(input[type="checkbox"]),
+select,
+input[type="file"] {
+  cursor: pointer;
+}
+
 /* ---------- جدول‌های ابزارها ---------- */
 .tool-table-wrap {
   width: 100%;

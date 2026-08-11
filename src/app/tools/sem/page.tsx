@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -441,7 +442,8 @@ function buildReportText(
   analysis: Analysis | null,
   answerKey: SemAnswerKey | null,
   bootResults: BootResult[] | null,
-  n: number
+  n: number,
+  alphaReportTextRef?: string
 ): string {
   const L: string[] = [];
   L.push("گزارش آماری — آماریست (SEM / تحلیل مسیر)");
@@ -561,6 +563,10 @@ function buildReportText(
     answerKey.pathTargets.forEach((pt) => {
       L.push(`  ${nodeLabel(pt.fromNode)} ← ${nodeLabel(pt.toNode)}: هدف=${fmt(pt.target)} | واقعی=${fmt(pt.actual)}`);
     });
+  }
+  if (alphaReportTextRef) {
+    L.push("");
+    L.push(alphaReportTextRef);
   }
   return L.join("\n");
 }
@@ -906,6 +912,39 @@ function SemTool() {
   const [activeStep, setActiveStep] = useState(0);
   const [completed, setCompleted] = useState<Record<string, boolean>>({});
   const [wantAlpha, setWantAlpha] = useState(true);
+  const [alphaScales, setAlphaScales] = useState<
+    { varId: number; name: string; items: { min: number; max: number }[] }[]
+  >(() => {
+    try {
+      const raw = localStorage.getItem("amarist-sem-vars");
+      if (raw) {
+        const arr = JSON.parse(raw) as { id: number; name: string }[];
+        if (Array.isArray(arr) && arr.length) {
+          return arr.map((v) => ({
+            varId: v.id,
+            name: v.name,
+            items: Array.from({ length: 6 }, () => ({ min: 1, max: 5 })),
+          }));
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return initialVars.map((v) => ({
+      varId: v.id,
+      name: v.name,
+      items: Array.from({ length: Math.max(2, v.subscales.length || 1) }, () => ({ min: 1, max: 5 })),
+    }));
+  });
+  const [alphaN, setAlphaN] = useState("120");
+  const [alphaMin, setAlphaMin] = useState("0.7");
+  const [alphaMax, setAlphaMax] = useState("0.9");
+  const [alphaCols, setAlphaCols] = useState<string[]>([]);
+  const [alphaRows, setAlphaRows] = useState<(number | null)[][]>([]);
+  const [alphaResult, setAlphaResult] = useState<
+    { name: string; k: number; alpha: number; stdAlpha: number; items: { name: string; mean: number; sd: number; itemTotal: number; alphaIfDeleted: number }[] }[] | null
+  >(null);
+  const [alphaStatus, setAlphaStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({ text: "", kind: "" });
   const [backupModal, setBackupModal] = useState(false);
   const [backupName, setBackupName] = useState("");
   const [backupScope, setBackupScope] = useState<"all" | "one">("all");
@@ -957,10 +996,13 @@ function SemTool() {
       { id: "variables", label: "مشخصات متغیرها", short: "متغیرها" },
       { id: "draw", label: "ترسیم مدل", short: "مدل" },
     ];
-    if (source === "generate") list.push({ id: "constraints", label: "قیود تولید داده", short: "قیود" });
+    if (source === "generate") {
+      list.push({ id: "constraints", label: "قیود تولید داده", short: "قیود" });
+      list.push({ id: "diagnose", label: "تشخیص", short: "تشخیص" });
+    }
     list.push(
-      { id: "diagnose", label: "تشخیص", short: "تشخیص" },
       { id: "data", label: "جدول داده‌ها", short: "داده" },
+      { id: "analysis", label: "تحلیل", short: "تحلیل" },
       { id: "assumptions", label: "بررسی پیش‌فرض‌ها", short: "پیش‌فرض" },
       { id: "descriptive", label: "یافته‌های توصیفی", short: "توصیفی" },
       { id: "diagram", label: "دیاگرام مدل", short: "دیاگرام" },
@@ -1002,23 +1044,15 @@ function SemTool() {
     const cur = Math.min(activeStep, steps.length - 1);
     const stepId = steps[cur]?.id ?? "";
     if (stepId === "diagnose") {
-      // اعتبارسنجی + مودال تصمیم
-      if (!rows.length) {
-        setModal({
-          ok: false,
-          lines: [
-            "هنوز داده‌ای وجود ندارد.",
-            source === "generate"
-              ? "از دکمه «تولید داده و تحلیل» استفاده کنید."
-              : "ابتدا در مرحله «جدول داده‌ها» فایل اکسل را وارد کنید.",
-          ],
-        });
-        return;
+      // مودال تولید داده
+      if (rows.length) {
+        setDiagnoseModal(true);
+      } else {
+        setDiagnoseModal(true);
       }
-      setDiagnoseModal(true);
       return;
     }
-    if (stepId === "data" && !analysisValid && rows.length) {
+    if (stepId === "data" || stepId === "analysis") {
       // قبل از رفتن به مراحل تحلیل‌محور، اعتبارسنجی داده
       const problems = validateData();
       if (problems.length) {
@@ -1291,15 +1325,6 @@ function SemTool() {
     );
   };
 
-  const toggleArrow = (arrowId: string) => {
-    setInactiveArrowIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(arrowId)) next.delete(arrowId);
-      else next.add(arrowId);
-      return next;
-    });
-  };
-
   const setPathTarget = (key: string, patch: Partial<PathTarget>) => {
     setConstraints((prev) => ({
       ...prev,
@@ -1515,10 +1540,26 @@ function SemTool() {
           "نمرات کل / گره‌ها"
         );
       }
+      if (alphaRows.length) {
+        XLSX.utils.book_append_sheet(
+          wb,
+          XLSX.utils.aoa_to_sheet([alphaCols, ...alphaRows.map((r) => r.map((v) => (v == null ? "" : v)))]),
+          "داده آلفا"
+        );
+        if (alphaResult) {
+          const aoa: (string | number)[][] = [["متغیر", "گویه", "میانگین", "SD", "گویه-کل", "آلفا اگر حذف شود", "آلفای کل"]];
+          alphaResult.forEach((g) => {
+            g.items.forEach((it, i) => {
+              aoa.push([g.name, it.name, Number(it.mean.toFixed(2)), Number(it.sd.toFixed(2)), Number(it.itemTotal.toFixed(3)), Number(it.alphaIfDeleted.toFixed(3)), i === 0 ? Number(g.alpha.toFixed(3)) : ""]);
+            });
+          });
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), "نتایج آلفا");
+        }
+      }
       XLSX.utils.book_append_sheet(
         wb,
         XLSX.utils.aoa_to_sheet(
-          buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length)
+          buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length, alphaReportText())
             .split("\n")
             .map((l) => [l])
         ),
@@ -1597,7 +1638,7 @@ function SemTool() {
 
   const exportTxt = () => {
     try {
-      const text = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length);
+      const text = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length, alphaReportText());
       const blob = new Blob(["\uFEFF" + text], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -1613,7 +1654,7 @@ function SemTool() {
 
   const copyReport = async () => {
     try {
-      const text = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length);
+      const text = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length, alphaReportText());
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
       } else {
@@ -1629,6 +1670,151 @@ function SemTool() {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
   };
+
+  // ---------- توابع آلفای کرونباخ ----------
+  const addAlphaItem = (varId: number) => {
+    setAlphaScales((prev) =>
+      prev.map((q) =>
+        q.varId === varId
+          ? { ...q, items: [...q.items, { min: q.items[0]?.min ?? 1, max: q.items[0]?.max ?? 5 }] }
+          : q
+      )
+    );
+  };
+  const removeAlphaItem = (varId: number, idx: number) => {
+    setAlphaScales((prev) =>
+      prev.map((q) =>
+        q.varId === varId ? { ...q, items: q.items.filter((_, i) => i !== idx) } : q
+      )
+    );
+  };
+  const setAlphaItemRange = (varId: number, idx: number, field: "min" | "max", value: number) => {
+    setAlphaScales((prev) =>
+      prev.map((q) =>
+        q.varId === varId
+          ? { ...q, items: q.items.map((it, i) => (i === idx ? { ...it, [field]: value } : it)) }
+          : q
+      )
+    );
+  };
+
+  const generateAlpha = () => {
+    try {
+      const nn = Math.round(Number(alphaN));
+      const aMin = Number(alphaMin);
+      const aMax = Number(alphaMax);
+      if (!Number.isFinite(nn) || nn < 10) throw new Error("حجم نمونه باید حداقل ۱۰ باشد.");
+      if (!Number.isFinite(aMin) || !Number.isFinite(aMax) || aMin >= aMax || aMin < 0 || aMax > 1) {
+        throw new Error("بازه آلفای هدف معتبر نیست.");
+      }
+      const totalItems = alphaScales.reduce((s, q) => s + q.items.length, 0);
+      if (!totalItems) throw new Error("حداقل یک متغیر با گویه تعریف کنید.");
+      const targetAlpha = Math.min(0.97, aMax + 0.05);
+      const cols: number[][] = [];
+      const colNames: string[] = [];
+      for (const q of alphaScales) {
+        const k = q.items.length;
+        if (k < 2) throw new Error(`متغیر «${q.name}» باید حداقل ۲ گویه داشته باشد.`);
+        const lam = Math.max(0.35, Math.min(0.95, Math.sqrt(targetAlpha / (k - (k - 1) * targetAlpha))));
+        let attempt = 0;
+        let alpha = NaN;
+        let qCols: number[][] = [];
+        do {
+          const latent = Array.from({ length: nn }, () => {
+            let u = 0;
+            let v = 0;
+            while (u === 0) u = Math.random();
+            while (v === 0) v = Math.random();
+            return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+          });
+          qCols = q.items.map((it) => {
+            const mid = (it.min + it.max) / 2;
+            const sd = Math.max(0.6, (it.max - it.min) / 5);
+            return latent.map((z) => {
+              let u = 0;
+              let v = 0;
+              while (u === 0) u = Math.random();
+              while (v === 0) v = Math.random();
+              const e = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+              return Math.round(Math.min(it.max, Math.max(it.min, mid + sd * (lam * z + Math.sqrt(1 - lam * lam) * e))));
+            });
+          });
+          alpha = cronbachAlpha(qCols);
+          attempt++;
+        } while ((!Number.isFinite(alpha) || alpha < aMin || alpha > aMax) && attempt < 250);
+        if (!Number.isFinite(alpha) || alpha < aMin || alpha > aMax) {
+          throw new Error(
+            `برای متغیر «${q.name}» با ${k} گویه در بازه آلفای ${aMin} تا ${aMax} داده قابل قبول پیدا نشد؛ گویه‌ها را بیشتر کنید یا بازه را بازتر کنید.`
+          );
+        }
+        qCols.forEach((c, i) => {
+          cols.push(c);
+          colNames.push(`${q.name} — گویه ${i + 1}`);
+        });
+      }
+      setAlphaCols(colNames);
+      setAlphaRows(Array.from({ length: nn }, (_, i) => cols.map((c) => c[i])));
+      computeAlphaResult(cols, colNames);
+      setAlphaStatus({ text: `داده آلفا تولید شد: ${nn} نفر × ${totalItems} گویه.`, kind: "ok" });
+    } catch (err) {
+      setAlphaStatus({ text: (err as Error).message, kind: "err" });
+      setModal({ ok: false, lines: [(err as Error).message] });
+    }
+  };
+
+  const computeAlphaResult = (colsArg?: number[][], colNamesArg?: string[]) => {
+    const cols = colsArg ?? alphaCols.map((_, ci) => alphaRows.map((r) => r[ci] as number));
+    const names = colNamesArg ?? alphaCols;
+    if (!cols.length || !cols[0].length) {
+      setAlphaStatus({ text: "داده‌ای برای محاسبه آلفا وجود ندارد.", kind: "err" });
+      return;
+    }
+    // گروه‌بندی بر اساس پیشوند نام (متغیر)
+    const groups: { name: string; cols: number[][] }[] = [];
+    names.forEach((n, ci) => {
+      const varName = n.split(" — ")[0];
+      let g = groups.find((x) => x.name === varName);
+      if (!g) {
+        g = { name: varName, cols: [] };
+        groups.push(g);
+      }
+      g.cols.push(cols[ci]);
+    });
+    const result = groups.map((g) => {
+      const k = g.cols.length;
+      const items = g.cols.map((col, i) => {
+        const rest = g.cols.filter((_, j) => j !== i);
+        const restTotal = rest[0]?.map((_, ri) => rest.reduce((acc, c) => acc + (c[ri] ?? 0), 0)) ?? [];
+        return {
+          name: names[cols.indexOf(col)] ?? `گویه ${i + 1}`,
+          mean: mean(col),
+          sd: sampleStd(col),
+          itemTotal: restTotal.length ? pearsonCorr(col, restTotal) : NaN,
+          alphaIfDeleted: cronbachAlpha(rest),
+        };
+      });
+      return { name: g.name, k, alpha: cronbachAlpha(g.cols), stdAlpha: stdAlphaOf(g.cols), items };
+    });
+    setAlphaResult(result);
+    setAlphaStatus({ text: "آلفای کرونباخ محاسبه شد.", kind: "ok" });
+  };
+
+  const alphaReportText = useCallback((): string => {
+    if (!alphaResult || !alphaResult.length) return "";
+    const L: string[] = [];
+    L.push("");
+    L.push("بررسی پایایی (آلفای کرونباخ)");
+    L.push("-------------------------------");
+    L.push(`تعداد موارد: ${alphaRows.length} | منبع: تولید تمرینی (بازه هدف ${alphaMin} تا ${alphaMax})`);
+    alphaResult.forEach((g) => {
+      L.push(`متغیر: ${g.name} (${g.k} گویه)`);
+      g.items.forEach((it) => {
+        L.push(`  ${it.name}: میانگین=${fmt(it.mean)} | SD=${fmt(it.sd)} | گویه-کل=${fmt(it.itemTotal)} | آلفا-اگر-حذف=${fmt(it.alphaIfDeleted)}`);
+      });
+      L.push(`  آلفای کرونباخ: ${fmt(g.alpha)} | استانداردشده: ${fmt(g.stdAlpha)}`);
+    });
+    return L.join("\n");
+  }, [alphaResult, alphaRows, alphaMin, alphaMax]);
 
   // ---------- بکاپ پروژه‌ها ----------
   const openBackupModal = () => {
@@ -1743,6 +1929,53 @@ function SemTool() {
     return rowsList;
   }, [vars, modelArrows]);
 
+  // ---------- گزینه‌های مدل (بر اساس میانجی‌ها) ----------
+  const medVars = useMemo(
+    () => vars.filter((v) => v.role === "mediator" && connectedVarIds.has(v.id)),
+    [vars, connectedVarIds]
+  );
+  const modelOptions = useMemo(() => {
+    if (!medVars.length) return [];
+    const options: { id: string; label: string; desc: string; meds: number[] }[] = [
+      {
+        id: "full",
+        label: "مدل کامل",
+        desc: "همه میانجی‌ها در مدل فعال‌اند",
+        meds: medVars.map((m) => m.id),
+      },
+    ];
+    medVars.forEach((m) => {
+      options.push({
+        id: `med-${m.id}`,
+        label: `مدل با میانجی «${m.name}»`,
+        desc: "فقط این میانجی در مدل فعال است",
+        meds: [m.id],
+      });
+    });
+    return options;
+  }, [medVars]);
+
+  const selectedModelId = useMemo(() => {
+    if (!medVars.length) return "full";
+    const activeMeds = medVars.filter((m) =>
+      allArrows.some((a) => !inactiveArrowIds.has(a.id) && (a.fromVar === m.id || a.toVar === m.id))
+    );
+    if (activeMeds.length === medVars.length) return "full";
+    if (activeMeds.length === 1) return `med-${activeMeds[0].id}`;
+    return "custom";
+  }, [medVars, allArrows, inactiveArrowIds]);
+
+  const selectModel = (opt: { id: string; meds: number[] }) => {
+    const inactive = new Set<string>();
+    allArrows.forEach((a) => {
+      const touchesMed = medVars.some((m) => m.id === a.fromVar || m.id === a.toVar);
+      if (touchesMed && !opt.meds.some((mid) => mid === a.fromVar || mid === a.toVar)) {
+        inactive.add(a.id);
+      }
+    });
+    setInactiveArrowIds(inactive);
+  };
+
   // ---------- یافته‌های توصیفی درختی ----------
   const descriptive = useMemo(() => {
     if (!analysis) return null;
@@ -1792,6 +2025,20 @@ function SemTool() {
         <div className="mx-auto flex max-w-[1280px] items-center gap-3 px-4 py-1.5">
           <div className="min-w-0 flex-1 overflow-x-auto">
             <ProgressStepper steps={steps} statuses={stepStatuses} onSelect={goToStep} />
+            <div className="mt-1 flex flex-wrap items-center gap-3 text-[10px] font-bold text-stone-400 dark:text-stone-500">
+              <span className="flex items-center gap-1">
+                <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" /> کامل شده
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="h-2.5 w-2.5 rounded-full bg-amber-400" /> در انتظار
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="h-2.5 w-2.5 rounded-full bg-red-400" /> نیازمند تحلیل
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="h-2.5 w-2.5 rounded-full bg-indigo-600" /> مرحله فعلی
+              </span>
+            </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <button
@@ -1799,10 +2046,10 @@ function SemTool() {
               disabled={currentStep === 0}
               onClick={goPrev}
               title="مرحله قبلی"
-              className="flex h-9 items-center gap-1 rounded-xl border border-stone-300 bg-white px-2.5 text-[11px] font-extrabold text-stone-600 transition hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-30 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-300"
+              className="flex h-9 items-center gap-1 rounded-xl border border-stone-300 bg-white px-3 text-[11px] font-extrabold text-stone-600 transition hover:border-indigo-300 hover:text-indigo-600 disabled:opacity-30 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-300"
             >
               <ChevronRight className="h-4 w-4" />
-              {currentStep > 0 ? (steps[currentStep - 1].short ?? steps[currentStep - 1].label) : "شروع"}
+              مرحله قبل
             </button>
             <span className="rounded-full bg-indigo-600 px-3 py-1.5 text-[11px] font-black text-white shadow-md shadow-indigo-600/25">
               مرحله {currentStep + 1} از {steps.length}
@@ -1812,9 +2059,9 @@ function SemTool() {
               disabled={currentStep >= steps.length - 1}
               onClick={goNext}
               title="مرحله بعدی"
-              className="flex h-9 items-center gap-1 rounded-xl bg-indigo-600 px-2.5 text-[11px] font-extrabold text-white shadow-md shadow-indigo-600/25 transition hover:bg-indigo-500 disabled:opacity-30"
+              className="flex h-9 items-center gap-1 rounded-xl bg-indigo-600 px-3 text-[11px] font-extrabold text-white shadow-md shadow-indigo-600/25 transition hover:bg-indigo-500 disabled:opacity-30"
             >
-              {currentStep < steps.length - 1 ? (steps[currentStep + 1].short ?? steps[currentStep + 1].label) : "پایان"}
+              مرحله بعد
               <ChevronLeft className="h-4 w-4" />
             </button>
           </div>
@@ -1838,9 +2085,15 @@ function SemTool() {
               {projects.map((p) => (
                 <div
                   key={p.id}
-                  className={`rounded-2xl border-2 p-4 transition ${
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => switchProject(p.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") switchProject(p.id);
+                  }}
+                  className={`cursor-pointer rounded-2xl border-2 p-4 transition ${
                     p.id === projectId
-                      ? "border-indigo-500 bg-indigo-50 dark:border-indigo-400 dark:bg-indigo-950/40"
+                      ? "border-indigo-500 bg-indigo-50 shadow-md shadow-indigo-500/20 dark:border-indigo-400 dark:bg-indigo-950/40"
                       : "border-stone-200 bg-white hover:border-indigo-300 dark:border-stone-700 dark:bg-slate-800"
                   }`}
                 >
@@ -1855,18 +2108,13 @@ function SemTool() {
                     {p.data.vars.length} متغیر · {p.data.rows.length} ردیف داده · به‌روزرسانی:{" "}
                     {new Date(p.updatedAt).toLocaleDateString("fa-IR")}
                   </p>
-                  <div className="mt-3 flex gap-2">
+                  <div className="mt-3 flex justify-end">
                     <button
                       type="button"
-                      className={`${btnLight} flex-1 ${p.id === projectId ? "opacity-60" : ""}`}
-                      disabled={p.id === projectId}
-                      onClick={() => switchProject(p.id)}
-                    >
-                      {p.id === projectId ? "پروژه فعلی" : "باز کردن"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => deleteProject(p.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteProject(p.id);
+                      }}
                       className="flex h-9 w-9 items-center justify-center rounded-xl border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400"
                       title="حذف پروژه"
                     >
@@ -2174,34 +2422,41 @@ function SemTool() {
             <div className="mt-4 space-y-4">
               <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
                 <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">
-                  فلش‌های مدل ({arrows.length} فعال از {allArrows.length})
+                  انتخاب مدل ({modelOptions.length} حالت)
                 </p>
-                <div className="mt-2 max-h-80 space-y-1.5 overflow-y-auto pe-1">
-                  {allArrows.map((a) => {
-                    const active = !inactiveArrowIds.has(a.id);
-                    const f = nodeLabel(a.fromNode);
-                    const t = nodeLabel(a.toNode);
+                <p className={`${tinyCls} mt-1`}>
+                  بر اساس تعداد میانجی‌های شما ({medVars.length} میانجی)، حالت‌های زیر قابل انتخاب است. فقط یکی از مدل‌ها
+                  را انتخاب کنید؛ ادامه تحلیل بر اساس همان مدل پیش می‌رود. (مدل کامل اشباع است: CFI=1، RMSEA=0)
+                </p>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {modelOptions.map((opt) => {
+                    const selected = selectedModelId === opt.id;
                     return (
-                      <label
-                        key={a.id}
-                        className={`flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[11.5px] font-bold transition ${
-                          active
-                            ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
-                            : "border-stone-200 bg-stone-50 text-stone-400 line-through dark:border-stone-700 dark:bg-slate-900 dark:text-stone-500"
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => selectModel(opt)}
+                        className={`cursor-pointer rounded-xl border-2 p-3 text-start transition ${
+                          selected
+                            ? "border-indigo-500 bg-indigo-50 shadow-md shadow-indigo-500/20 dark:border-indigo-400 dark:bg-indigo-950/40"
+                            : "border-stone-200 bg-white hover:border-indigo-300 dark:border-stone-700 dark:bg-slate-800"
                         }`}
                       >
-                        <input type="checkbox" checked={active} onChange={() => toggleArrow(a.id)} className="h-3.5 w-3.5 shrink-0 accent-emerald-600" />
-                        <span className="truncate">
-                          {f} ← {t}
-                        </span>
-                      </label>
+                        <p className="font-extrabold text-stone-800 dark:text-stone-200">
+                          {selected && "✓ "}
+                          {opt.label}
+                        </p>
+                        <p className={`${tinyCls} mt-0.5`}>{opt.desc}</p>
+                      </button>
                     );
                   })}
                 </div>
-                <p className={`${tinyCls} mt-2`}>
-                  وقتی همه فلش‌ها فعال‌اند مدل اشباع است (CFI=1، RMSEA=0)؛ با غیرفعال‌کردن یک فلش، برازش معنادار و قابل
-                  آزمون می‌شود.
-                </p>
+                {selectedModelId === "custom" && (
+                  <p className={`${tinyCls} mt-2 text-amber-700 dark:text-amber-400`}>
+                    ترکیب فعلی فلش‌ها با هیچ‌یک از حالت‌های استاندارد یکی نیست؛ برای پیش‌فرض‌های آماده یکی از حالت‌های بالا
+                    را انتخاب کنید.
+                  </p>
+                )}
               </div>
 
               <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
@@ -2471,25 +2726,9 @@ function SemTool() {
             )}
 
             <div className="mt-5 flex flex-wrap items-center gap-3">
-              {source === "generate" && (
-                <button type="button" className={btnPrimary} onClick={generate}>
-                  <Play className="h-4 w-4" />
-                  {rows.length ? "تولید مجدد داده و تحلیل" : "تولید داده و تحلیل"}
-                </button>
-              )}
-              <button type="button" className={btnSecondary} onClick={() => analyze(undefined, undefined, undefined, true, true)}>
-                <RefreshCw className="h-4 w-4" />
-                {analysisValid ? "اجرای مجدد تحلیل" : "اجرای تحلیل"}
-              </button>
-              <button
-                type="button"
-                className={btnLight}
-                onClick={() => {
-                  markDone("diagnose");
-                  setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
-                }}
-              >
-                ادامه بدون تغییر داده‌ها
+              <button type="button" className={btnPrimary} onClick={generate}>
+                <Play className="h-4 w-4" />
+                {rows.length ? "تولید مجدد داده و تحلیل" : "تولید داده و تحلیل"}
               </button>
               <span
                 className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
@@ -2617,6 +2856,71 @@ function SemTool() {
                 هنوز داده‌ای وجود ندارد؛ در مرحله «تشخیص» داده تولید کنید یا فایل اکسل وارد کنید.
               </div>
             )}
+          </section>
+        )}
+
+        {/* ============ مرحله: تحلیل ============ */}
+        {currentStep === stepIdx("analysis") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">تحلیل</h2>
+              <HelpButtons section="diagnose" />
+            </div>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              داده آماده است؛ با «اجرای تحلیل» مدل روی داده فعلی برآورد می‌شود و مراحل بعدی (پیش‌فرض‌ها، توصیفی،
+              دیاگرام، استنباطی) فعال می‌شوند.
+            </p>
+
+            <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4 text-[13px] leading-6 text-stone-700 dark:border-stone-700 dark:bg-slate-800 dark:text-stone-300">
+              {rows.length ? (
+                <>
+                  <p>
+                    <b>وضعیت داده:</b> {rows.length} ردیف × {columns.length} ستون
+                    {source === "generate" ? ` (n=${n})` : " (واردشده)"}
+                  </p>
+                  <p>
+                    <b>وضعیت تحلیل:</b>{" "}
+                    {analysisValid
+                      ? analysis.sem.fit.valid
+                        ? `اجرا شده — CFI=${fmt(analysis.sem.fit.cfi)}، RMSEA=${fmt(analysis.sem.fit.rmsea)}`
+                        : "اجرا شده (برازش نامعتبر)"
+                      : "اجرا نشده"}
+                  </p>
+                  {inputsChangedSinceAnalysis && analysisValid && (
+                    <p className="mt-1 rounded-lg bg-amber-50 p-2 font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                      ⚠ در بخش‌های قبل تغییری ایجاد شده است؛ برای اطمینان، تحلیل را دوباره اجرا کنید.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p>
+                  <b>وضعیت داده:</b> هنوز داده‌ای وجود ندارد؛ ابتدا در «جدول داده‌ها» داده تولید یا وارد کنید.
+                </p>
+              )}
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                className={btnPrimary}
+                disabled={!rows.length}
+                onClick={() => analyze(undefined, undefined, undefined, true, true)}
+              >
+                <RefreshCw className="h-4 w-4" />
+                {analysisValid ? "اجرای مجدد تحلیل" : "اجرای تحلیل"}
+              </button>
+              <span
+                className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
+                  status.kind === "ok"
+                    ? "font-bold text-emerald-700 dark:text-emerald-400"
+                    : status.kind === "err"
+                      ? "font-bold text-red-700 dark:text-red-400"
+                      : "text-stone-400 dark:text-stone-500"
+                }`}
+              >
+                {status.kind === "ok" ? "✓" : status.kind === "err" ? "✗" : "•"} {status.text}
+              </span>
+            </div>
           </section>
         )}
 
@@ -3138,111 +3442,208 @@ function SemTool() {
         {/* ============ مرحله ۱۱: آلفای کرونباخ ============ */}
         {currentStep === stepIdx("alpha") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[3]}`}>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="flex flex-wrap items-start justify-between gap-2">
               <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">محاسبه آلفای کرونباخ</h2>
-              <HelpButtons section="alpha" />
-            </div>
-                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                  این مرحله اختیاری است؛ اگر نیاز ندارید، آن را خاموش کنید تا از مراحل حذف شود.
-                </p>
-              </div>
-              <div className="flex items-center gap-4 rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
-                <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">نیاز دارم؟</span>
-                <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                  <input type="radio" name="wantAlpha" checked={wantAlpha} onChange={() => setWantAlpha(true)} className="h-4 w-4 accent-indigo-600" />
-                  بله
-                </label>
-                <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-stone-700 dark:text-stone-300">
-                  <input type="radio" name="wantAlpha" checked={!wantAlpha} onChange={() => setWantAlpha(false)} className="h-4 w-4 accent-indigo-600" />
-                  خیر
-                </label>
+              <div className="flex items-center gap-3">
+                <HelpButtons section="alpha" />
+                <div className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white p-2.5 dark:border-stone-700 dark:bg-slate-800">
+                  <span className="text-sm font-extrabold text-stone-800 dark:text-stone-200">نیاز دارم؟</span>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-sm font-bold text-stone-700 dark:text-stone-300">
+                    <input type="radio" name="wantAlpha" checked={wantAlpha} onChange={() => setWantAlpha(true)} className="h-4 w-4 accent-indigo-600" />
+                    بله
+                  </label>
+                  <label className="flex cursor-pointer items-center gap-1.5 text-sm font-bold text-stone-700 dark:text-stone-300">
+                    <input type="radio" name="wantAlpha" checked={!wantAlpha} onChange={() => setWantAlpha(false)} className="h-4 w-4 accent-indigo-600" />
+                    خیر
+                  </label>
+                </div>
               </div>
             </div>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              این بخش اختیاری است؛ با «خیر» غیرفعال می‌شود ولی در استپر باقی می‌ماند. متغیرها از همین پروژه می‌آیند؛ برای
+              هر گویه دامنه نمره جداگانه تعیین کنید.
+            </p>
 
             {!wantAlpha ? (
               <div className="mt-4 rounded-xl border border-dashed border-amber-300 bg-amber-50/60 p-8 text-center text-sm font-bold text-amber-700 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
                 این مرحله فعلاً غیرفعال است — اگر خواستید، «بله» را انتخاب کنید تا محاسبه آلفا فعال شود.
               </div>
-            ) : !analysisValid || !analysis.meas.length ? (
-              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-                {analysisValid
-                  ? "برای محاسبه آلفا، متغیرها باید حداقل ۲ زیرمقیاس/گویه داشته باشند."
-                  : "ابتدا از مرحله «تشخیص» تحلیل را اجرا کنید."}
-              </div>
             ) : (
               <div className="mt-4 space-y-4">
-                {analysis.meas.map((m) => {
-                  const cols = analysis.indicatorCols[m.varId] ?? [];
-                  const items = m.subNames.map((s, si) => {
-                    const col = cols[si] ?? [];
-                    const rest = cols.filter((_, j) => j !== si);
-                    const restTotal = rest[0]?.map((_, ri) => rest.reduce((acc, c) => acc + (c[ri] ?? 0), 0)) ?? [];
-                    const corr = col.length && restTotal.length ? pearsonCorr(col, restTotal) : NaN;
-                    return {
-                      name: s,
-                      mean: mean(col),
-                      sd: sampleStd(col),
-                      itemTotal: corr,
-                      alphaIfDeleted: cronbachAlpha(rest),
-                    };
-                  });
-                  return (
-                    <div key={m.varId} className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <h3 className="font-extrabold text-stone-800 dark:text-stone-200">{m.name}</h3>
-                        <div className="flex flex-wrap gap-2 text-[12px] font-bold">
-                          <span className="rounded-full bg-indigo-50 px-3 py-1 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
-                            آلفای کرونباخ: {fmt(m.alpha)}
-                          </span>
-                          <span className="rounded-full bg-sky-50 px-3 py-1 text-sky-700 dark:bg-sky-950 dark:text-sky-300">
-                            آلفای استانداردشده: {fmt(stdAlphaOf(cols))}
-                          </span>
-                          <span
-                            className={`rounded-full px-3 py-1 ${
-                              m.alpha >= 0.7
-                                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                                : "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300"
-                            }`}
-                          >
-                            {m.alpha >= 0.7 ? "قابل قبول ✓" : "ضعیف ✗"}
-                          </span>
+                {/* تعریف گویه‌ها */}
+                <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                  <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">گویه‌های هر متغیر (دامنه هر گویه جداگانه)</p>
+                  <div className="mt-3 space-y-4">
+                    {alphaScales.map((q) => (
+                      <div key={q.varId} className="rounded-xl border border-stone-200 bg-stone-50/60 p-3 dark:border-stone-700 dark:bg-slate-900/60">
+                        <div className="flex flex-wrap items-center gap-3">
+                          <input className={`${inputCls} max-w-xs opacity-70`} value={q.name} disabled title="نام از متغیرهای پروژه می‌آید" />
+                          <button type="button" className={btnLight} onClick={() => addAlphaItem(q.varId)}>
+                            <Plus className="h-4 w-4" />
+                            افزودن گویه
+                          </button>
                         </div>
+                        <div className="mt-2 space-y-2">
+                          <div className="grid grid-cols-[1fr_110px_110px_40px] items-center gap-2 px-1 text-[11px] font-bold text-stone-500 dark:text-stone-400">
+                            <span>گویه</span>
+                            <span className="text-center">حداقل نمره</span>
+                            <span className="text-center">حداکثر نمره</span>
+                            <span />
+                          </div>
+                          {q.items.map((it, si) => (
+                            <div key={si} className="grid grid-cols-[1fr_110px_110px_40px] items-center gap-2">
+                              <input className={`${inputCls} opacity-60`} value={`گویه ${si + 1}`} disabled />
+                              <input type="number" dir="ltr" className={inputCls} value={it.min} onChange={(e) => setAlphaItemRange(q.varId, si, "min", Number(e.target.value))} />
+                              <input type="number" dir="ltr" className={inputCls} value={it.max} onChange={(e) => setAlphaItemRange(q.varId, si, "max", Number(e.target.value))} />
+                              <button
+                                type="button"
+                                onClick={() => removeAlphaItem(q.varId, si)}
+                                disabled={q.items.length <= 2}
+                                className="flex h-9 w-9 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500 disabled:opacity-30 dark:border-stone-600 dark:bg-slate-800 dark:text-stone-400"
+                                title="حذف گویه"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <p className={`${tinyCls} mt-2`}>
+                          {q.items.length} گویه · دامنه‌ها: {q.items.map((it) => `${it.min}-${it.max}`).join("، ")}
+                        </p>
                       </div>
-                      <div className="tool-table-wrap mt-3">
-                        <table className="tool-table">
-                          <thead>
-                            <tr>
-                              <th>گویه / زیرمقیاس</th>
-                              <th>میانگین</th>
-                              <th>انحراف معیار</th>
-                              <th>همبستگی گویه-کل</th>
-                              <th>آلفا اگر حذف شود</th>
-                              <th>بار عاملی</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {items.map((it, si) => (
-                              <tr key={si}>
-                                <td>{it.name}</td>
-                                <td className="number-cell">{Number.isFinite(it.mean) ? fmt(it.mean) : "-"}</td>
-                                <td className="number-cell">{Number.isFinite(it.sd) ? fmt(it.sd) : "-"}</td>
-                                <td className="number-cell">{Number.isFinite(it.itemTotal) ? fmt(it.itemTotal) : "-"}</td>
-                                <td className="number-cell">{Number.isFinite(it.alphaIfDeleted) ? fmt(it.alphaIfDeleted) : "-"}</td>
-                                <td className="number-cell">{fmt(m.loadings[si])}</td>
-                              </tr>
+                    ))}
+                  </div>
+                </div>
+
+                {/* تنظیمات تولید */}
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div>
+                    <label className={labelCls}>حجم نمونه</label>
+                    <input type="number" className={inputCls} value={alphaN} onChange={(e) => setAlphaN(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>حداقل آلفای هدف</label>
+                    <input type="number" step={0.05} dir="ltr" className={inputCls} value={alphaMin} onChange={(e) => setAlphaMin(e.target.value)} />
+                  </div>
+                  <div>
+                    <label className={labelCls}>حداکثر آلفای هدف</label>
+                    <input type="number" step={0.05} dir="ltr" className={inputCls} value={alphaMax} onChange={(e) => setAlphaMax(e.target.value)} />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <button type="button" className={btnPrimary} onClick={generateAlpha}>
+                    <Play className="h-4 w-4" />
+                    تولید داده آلفا و محاسبه
+                  </button>
+                  <button type="button" className={btnSecondary} onClick={() => computeAlphaResult()}>
+                    <RefreshCw className="h-4 w-4" />
+                    محاسبه آلفا
+                  </button>
+                  <span
+                    className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
+                      alphaStatus.kind === "ok"
+                        ? "font-bold text-emerald-700 dark:text-emerald-400"
+                        : alphaStatus.kind === "err"
+                          ? "font-bold text-red-700 dark:text-red-400"
+                          : "text-stone-400 dark:text-stone-500"
+                    }`}
+                  >
+                    {alphaStatus.kind === "ok" ? "✓" : alphaStatus.kind === "err" ? "✗" : "•"} {alphaStatus.text}
+                  </span>
+                </div>
+
+                {/* جدول داده آلفا */}
+                {alphaRows.length > 0 && (
+                  <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                    <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">داده گویه‌ها ({alphaRows.length} ردیف)</p>
+                    <div className="tool-table-wrap tool-table-scroll mt-2">
+                      <table className="tool-table" style={{ minWidth: Math.max(560, alphaCols.length * 90) }}>
+                        <thead>
+                          <tr>
+                            <th>ردیف</th>
+                            {alphaCols.map((c, i) => (
+                              <th key={i}>{c}</th>
                             ))}
-                          </tbody>
-                        </table>
-                      </div>
-                      <p className={`${tinyCls} mt-2`}>
-                        معیار: همبستگی گویه-کل ≥ 0.30 مطلوب؛ اگر «آلفا اگر حذف شود» از آلفای کل بزرگ‌تر باشد، حذف آن گویه
-                        آلفا را بالا می‌برد.
-                      </p>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {alphaRows.slice(0, 15).map((r, i) => (
+                            <tr key={i}>
+                              <td className="row-index">{i + 1}</td>
+                              {r.map((v, j) => (
+                                <td key={j} className="number-cell">{v == null ? "" : v}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
-                  );
-                })}
+                  </div>
+                )}
+
+                {/* نتایج */}
+                {alphaResult && alphaResult.length > 0 && (
+                  <div className="space-y-4">
+                    {alphaResult.map((g, gi) => (
+                      <div key={gi} className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="font-extrabold text-stone-800 dark:text-stone-200">
+                            {g.name} <span className="text-[12px] font-bold text-stone-400">({g.k} گویه)</span>
+                          </h3>
+                          <div className="flex flex-wrap gap-2 text-[12px] font-bold">
+                            <span className="rounded-full bg-indigo-50 px-3 py-1 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                              آلفای کرونباخ: {fmt(g.alpha)}
+                            </span>
+                            <span className="rounded-full bg-sky-50 px-3 py-1 text-sky-700 dark:bg-sky-950 dark:text-sky-300">
+                              استانداردشده: {fmt(g.stdAlpha)}
+                            </span>
+                            <span
+                              className={`rounded-full px-3 py-1 ${
+                                g.alpha >= 0.7
+                                  ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                                  : "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300"
+                              }`}
+                            >
+                              {g.alpha >= 0.7 ? "قابل قبول ✓" : "ضعیف ✗"}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="tool-table-wrap mt-3">
+                          <table className="tool-table">
+                            <thead>
+                              <tr>
+                                <th>گویه</th>
+                                <th>میانگین</th>
+                                <th>انحراف معیار</th>
+                                <th>همبستگی گویه-کل</th>
+                                <th>آلفا اگر حذف شود</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {g.items.map((it, si) => (
+                                <tr key={si}>
+                                  <td>{it.name}</td>
+                                  <td className="number-cell">{Number.isFinite(it.mean) ? fmt(it.mean) : "-"}</td>
+                                  <td className="number-cell">{Number.isFinite(it.sd) ? fmt(it.sd) : "-"}</td>
+                                  <td className="number-cell">{Number.isFinite(it.itemTotal) ? fmt(it.itemTotal) : "-"}</td>
+                                  <td className="number-cell">{Number.isFinite(it.alphaIfDeleted) ? fmt(it.alphaIfDeleted) : "-"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <p className={`${tinyCls} mt-2`}>
+                          معیار: همبستگی گویه-کل ≥ 0.30 مطلوب؛ اگر «آلفا اگر حذف شود» از آلفای کل بزرگ‌تر باشد، حذف آن
+                          گویه آلفا را بالا می‌برد.
+                        </p>
+                      </div>
+                    ))}
+                    <p className={`${tinyCls} text-center`}>
+                      نتیجه آلفا در «نگارش گزارش» و «خروجی‌های نهایی» نیز درج می‌شود.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -3282,7 +3683,7 @@ function SemTool() {
                 dir="rtl"
                 className="max-h-[520px] overflow-auto whitespace-pre-wrap text-[12.5px] leading-7 text-stone-700 dark:text-stone-300"
               >
-                {buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length)}
+                {buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length, alphaReportText())}
               </pre>
             </div>
           </section>
@@ -3378,21 +3779,6 @@ function SemTool() {
           </section>
         )}
 
-        {/* ---------- راهنمای رنگ استپر ---------- */}
-        <div className="mt-5 flex flex-wrap items-center justify-center gap-4 text-[11px] font-bold text-stone-400 dark:text-stone-500">
-          <span className="flex items-center gap-1.5">
-            <span className="h-3 w-3 rounded-full bg-emerald-500" /> کامل شده
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-3 w-3 rounded-full bg-amber-400" /> در انتظار
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-3 w-3 rounded-full bg-red-400" /> نیازمند تحلیل
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-3 w-3 rounded-full bg-indigo-600" /> مرحله فعلی
-          </span>
-        </div>
       </div>
 
       {/* ---------- مودال نمایش بزرگ دیاگرام ---------- */}
@@ -3420,7 +3806,7 @@ function SemTool() {
         </div>
       )}
 
-      {/* ---------- مودال تشخیص (تصمیم تولید/تحلیل) ---------- */}
+      {/* ---------- مودال تشخیص (تصمیم تولید داده) ---------- */}
       {diagnoseModal && (
         <div
           className="fixed inset-0 z-[72] flex items-center justify-center bg-black/50 p-4"
@@ -3432,85 +3818,62 @@ function SemTool() {
             className="w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-stone-700 dark:bg-slate-800"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">مرحله تشخیص — تصمیم بگیرید</h3>
+            <div className="flex flex-col items-center text-center">
+              <span className="flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100 dark:bg-emerald-950">
+                <CheckCircle2 className="h-12 w-12 text-emerald-600 dark:text-emerald-400" />
+              </span>
+              <h3 className="mt-3 text-lg font-black text-stone-900 dark:text-stone-100">وضعیت داده</h3>
+            </div>
 
-            {/* گزارش وضعیت */}
-            <div className="mt-3 rounded-xl bg-stone-50 p-4 text-[13px] leading-6 text-stone-700 dark:bg-slate-900 dark:text-stone-300">
+            <div className="mt-4 rounded-xl bg-stone-50 p-4 text-[13px] leading-6 text-stone-700 dark:bg-slate-900 dark:text-stone-300">
               {rows.length ? (
-                <>
-                  <p>
-                    <b>وضعیت داده:</b> {rows.length} ردیف × {columns.length} ستون
-                    {source === "generate" ? ` (n=${n})` : " (واردشده)"}
-                  </p>
-                  <p>
-                    <b>وضعیت تحلیل:</b>{" "}
-                    {analysisValid
-                      ? analysis.sem.fit.valid
-                        ? `اجرا شده — CFI=${fmt(analysis.sem.fit.cfi)}، RMSEA=${fmt(analysis.sem.fit.rmsea)}`
-                        : "اجرا شده (برازش نامعتبر)"
-                      : "اجرا نشده"}
-                  </p>
-                  {analysisValid && !inputsChangedSinceAnalysis && (
-                    <p className="text-emerald-700 dark:text-emerald-300">✓ نتایج با داده فعلی هماهنگ است.</p>
-                  )}
-                </>
+                <p>
+                  <b>داده آماده است:</b> {rows.length} ردیف × {columns.length} ستون
+                  {source === "generate" ? ` (n=${n})` : " (واردشده)"} — می‌توانید دوباره تولید کنید یا به مرحله بعد
+                  بروید.
+                </p>
               ) : (
                 <p>
-                  <b>وضعیت داده:</b> هنوز داده‌ای تولید/وارد نشده است.
-                </p>
-              )}
-              {inputsChangedSinceAnalysis && analysisValid && (
-                <p className="mt-1 rounded-lg bg-amber-50 p-2 font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
-                  ⚠ در بخش‌های قبل تغییری ایجاد شده است؛ برای اطمینان، تحلیل را دوباره اجرا کنید یا با نتایج قبلی ادامه
-                  دهید.
+                  <b>هنوز داده‌ای تولید نشده است.</b> با دکمه زیر داده تمرینی ساخته و تحلیل اجرا می‌شود.
                 </p>
               )}
             </div>
 
             <div className="mt-4 grid gap-2">
-              {source === "generate" && (
-                <button
-                  type="button"
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-extrabold text-white shadow transition hover:bg-indigo-500"
-                  onClick={() => {
-                    setDiagnoseModal(false);
-                    generate();
-                    markDone("diagnose");
-                    setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
-                  }}
-                >
-                  <Play className="h-4 w-4" />
-                  {rows.length ? "تولید مجدد داده و تحلیل" : "تولید داده و تحلیل"}
-                </button>
-              )}
               <button
                 type="button"
-                className="inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-extrabold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-extrabold text-white shadow transition hover:bg-indigo-500"
                 onClick={() => {
                   setDiagnoseModal(false);
-                  analyze(undefined, undefined, undefined, true, true);
+                  generate();
                   markDone("diagnose");
                   setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
                 }}
               >
-                <RefreshCw className="h-4 w-4" />
-                {analysisValid ? "اجرای مجدد تحلیل" : "اجرای تحلیل"}
-              </button>
-              <button
-                type="button"
-                className="inline-flex items-center justify-center gap-2 rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm font-extrabold text-stone-600 transition hover:bg-stone-100 dark:border-stone-600 dark:bg-slate-900 dark:text-stone-300"
-                onClick={() => {
-                  setDiagnoseModal(false);
-                  markDone("diagnose");
-                  setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
-                }}
-              >
-                ادامه بدون تغییر داده‌ها
+                <Play className="h-4 w-4" />
+                {rows.length ? "تولید مجدد داده و تحلیل" : "تولید داده و تحلیل"}
               </button>
             </div>
-            <div className="mt-3 flex justify-end">
-              <button type="button" className="text-[12px] font-bold text-stone-400 hover:text-stone-600" onClick={() => setDiagnoseModal(false)}>
-                انصراف
+
+            <div className="mt-4 flex items-center justify-between gap-2 border-t border-stone-200 pt-4 dark:border-stone-700">
+              <button
+                type="button"
+                className="text-[13px] font-bold text-stone-400 transition hover:text-stone-600 dark:text-stone-500 dark:hover:text-stone-300"
+                onClick={() => setDiagnoseModal(false)}
+              >
+                بستن
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-extrabold text-white shadow transition hover:bg-emerald-500"
+                onClick={() => {
+                  setDiagnoseModal(false);
+                  markDone("diagnose");
+                  setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
+                }}
+              >
+                برو مرحله بعدی
+                <ChevronLeft className="h-4 w-4" />
               </button>
             </div>
           </div>

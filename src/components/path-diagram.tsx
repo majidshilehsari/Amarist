@@ -192,8 +192,8 @@ export default function PathDiagram({
             <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
             </marker>
-            <marker id="arrow-sub" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" />
+            <marker id="arrow-sub" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
             </marker>
           </defs>
 
@@ -254,8 +254,8 @@ export default function PathDiagram({
                         y1={cy + nodeH / 2}
                         x2={sp.cx}
                         y2={sp.cy - subH / 2}
-                        stroke="#cbd5e1"
-                        strokeWidth={1.1}
+                        stroke="#64748b"
+                        strokeWidth={1.7}
                         markerEnd="url(#arrow-sub)"
                       />
                       <rect x={sp.cx - subW / 2} y={sp.cy - subH / 2} width={subW} height={subH} rx={6} fill={subFill} stroke={subStroke} strokeWidth={1} />

@@ -38,6 +38,7 @@ import {
   type VariableSpec,
 } from "@/lib/sem-generator";
 import PathDiagram from "@/components/path-diagram";
+import SectionNav from "@/components/section-nav";
 import ToolHeader from "@/components/tool-header";
 
 // ------------------------------------------------------------
@@ -45,25 +46,25 @@ import ToolHeader from "@/components/tool-header";
 // ------------------------------------------------------------
 
 const inputCls =
-  "w-full rounded-xl border border-stone-300 bg-[#fbfdff] px-3 py-2 text-sm outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100";
-const labelCls = "mb-1 block text-[12px] font-bold text-stone-600";
-const tinyCls = "mt-1 text-[11px] leading-5 text-stone-400";
-const cardCls = "rounded-2xl border p-5 shadow-sm sm:p-6";
+  "w-full rounded-xl border border-stone-300 bg-[#fbfdff] px-3 py-2 text-sm outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-100 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100";
+const labelCls = "mb-1 block text-[12px] font-bold text-stone-600 dark:text-stone-300";
+const tinyCls = "mt-1 text-[11px] leading-5 text-stone-400 dark:text-stone-500";
+const cardCls = "rounded-2xl p-5 shadow-sm sm:p-6";
 const btnPrimary =
   "inline-flex items-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-extrabold text-white shadow-md shadow-indigo-600/20 transition hover:bg-indigo-500 active:translate-y-0";
 const btnSecondary =
-  "inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-extrabold text-indigo-700 transition hover:bg-indigo-100";
+  "inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-extrabold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-300";
 const btnLight =
-  "inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-2 text-sm font-bold text-stone-600 transition hover:bg-stone-100";
+  "inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-2 text-sm font-bold text-stone-600 transition hover:bg-stone-100 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300 dark:hover:bg-stone-700";
 
 /** رنگ‌های ملایم متفاوت برای هر بخش تا چشم خسته نشود */
 const sectionTones = [
-  "border-blue-200 bg-blue-50/40",
-  "border-violet-200 bg-violet-50/40",
-  "border-amber-200 bg-amber-50/40",
-  "border-emerald-200 bg-emerald-50/40",
-  "border-rose-200 bg-rose-50/40",
-  "border-sky-200 bg-sky-50/40",
+  "border-blue-300 bg-blue-50/50 dark:border-blue-900 dark:bg-slate-900",
+  "border-violet-300 bg-violet-50/50 dark:border-violet-900 dark:bg-slate-900",
+  "border-amber-300 bg-amber-50/50 dark:border-amber-900 dark:bg-slate-900",
+  "border-emerald-300 bg-emerald-50/50 dark:border-emerald-900 dark:bg-slate-900",
+  "border-rose-300 bg-rose-50/50 dark:border-rose-900 dark:bg-slate-900",
+  "border-sky-300 bg-sky-50/50 dark:border-sky-900 dark:bg-slate-900",
 ];
 
 function badge(ok: boolean, text: string): string {
@@ -72,6 +73,21 @@ function badge(ok: boolean, text: string): string {
 
 function badgeWarn(text: string): string {
   return `<span class="assumption-badge assumption-warn">${text}</span>`;
+}
+
+/** جمله وضعیت هر پیش‌فرض: شرط برقرار بودن + برقرار/نیست */
+function AssumptionNote({ condition, pass }: { condition: string; pass: boolean }) {
+  return (
+    <p
+      className={`mt-1.5 rounded-lg px-3 py-1.5 text-[12px] font-bold ${
+        pass
+          ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+          : "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300"
+      }`}
+    >
+      شرط برقرار بودن: {condition} — وضعیت فعلی: {pass ? "برقرار ✓" : "برقرار نیست ✗"}
+    </p>
+  );
 }
 
 function starP(p: number): string {
@@ -445,8 +461,10 @@ export default function SemTool() {
     pathTargets: {},
     indirectTargets: {},
     r2Range: { min: 0.3, max: 0.6 },
-    cfiMin: null,
-    rmseaMax: null,
+    cfiMin: 0.9,
+    rmseaMax: 0.08,
+    chi2dfMax: 3,
+    srmrMax: 0.08,
     missingPct: 0,
     outlierPct: 0,
     enforceNormality: true,
@@ -463,6 +481,7 @@ export default function SemTool() {
   const [answerKey, setAnswerKey] = useState<SemAnswerKey | null>(null);
   const [bootResults, setBootResults] = useState<BootResult[] | null>(null);
   const [bootBusy, setBootBusy] = useState(false);
+  const [footerMsg, setFooterMsg] = useState<string | null>(null);
   const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({
     text: "هنوز تحلیلی اجرا نشده است.",
     kind: "",
@@ -475,25 +494,46 @@ export default function SemTool() {
   };
 
   const addVar = () => {
-    setVars((prev) => {
-      const id = prev.length ? Math.max(...prev.map((v) => v.id)) + 1 : 0;
-      return [
-        ...prev,
-        {
-          id,
-          name: `متغیر ${prev.length + 1}`,
-          role: "outcome" as Role,
-          hasTotal: false,
-          totalMin: 1,
-          totalMax: 5,
-          subscales: [],
-        },
-      ];
-    });
+    const id = vars.length ? Math.max(...vars.map((v) => v.id)) + 1 : 0;
+    const newVar: VariableSpec = {
+      id,
+      name: `متغیر ${vars.length + 1}`,
+      role: "outcome",
+      hasTotal: false,
+      totalMin: 1,
+      totalMax: 5,
+      subscales: [],
+    };
+    setVars((prev) => [...prev, newVar]);
+    setStatus({ text: `متغیر «${newVar.name}» اضافه شد؛ نقش و زیرمقیاس‌هایش را تنظیم کنید.`, kind: "ok" });
   };
 
   const removeVar = (id: number) => {
+    const removed = vars.find((v) => v.id === id);
     setVars((prev) => prev.filter((v) => v.id !== id));
+    // پاکسازی state های وابسته به متغیر حذف‌شده
+    setColMap((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    setConstraints((prev) => {
+      const pathTargets = { ...prev.pathTargets };
+      Object.keys(pathTargets).forEach((k) => {
+        const [f, t] = k.split(":").map(Number);
+        if (f === id || t === id) delete pathTargets[k];
+      });
+      const indirectTargets = { ...prev.indirectTargets };
+      Object.keys(indirectTargets).forEach((k) => {
+        const [f, t] = k.split(":").map(Number);
+        if (f === id || t === id) delete indirectTargets[k];
+      });
+      return { ...prev, pathTargets, indirectTargets };
+    });
+    setAnalysis(null);
+    setAnswerKey(null);
+    setBootResults(null);
+    setStatus({ text: removed ? `متغیر «${removed.name}» حذف شد.` : "متغیر حذف شد.", kind: "ok" });
   };
 
   const addSubscale = (id: number) => {
@@ -845,6 +885,8 @@ export default function SemTool() {
         document.body.removeChild(ta);
       }
       setStatus({ text: "کل گزارش کپی شد.", kind: "ok" });
+      setFooterMsg("گزارش کپی شد ✓ — حالا می‌توانید آن را هر جا Paste کنید");
+      setTimeout(() => setFooterMsg(null), 4000);
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
@@ -864,13 +906,25 @@ export default function SemTool() {
   };
 
   const hasLatent = vars.some((v) => v.subscales.length > 0);
-  const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
+  const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان (مکنون)" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
   const varName = (id: number) => vars.find((v) => v.id === id)?.name ?? `متغیر ${id + 1}`;
   const pairs = indirectPairs(vars, paths);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-44">
       <ToolHeader title="تحلیل مسیر و مدل معادلات ساختاری (SEM)" subtitle={modeLabel} />
+
+      <SectionNav
+        sections={[
+          { id: "source", label: "منبع داده" },
+          { id: "variables", label: "مشخصات متغیرها" },
+          { id: "draw-model", label: "ترسیم مدل" },
+          { id: "constraints", label: "قیود تولید" },
+          { id: "data-table", label: "جدول داده" },
+          { id: "assumptions", label: "بررسی پیش‌فرض‌ها" },
+          { id: "results", label: "نتایج" },
+        ]}
+      />
 
       <div className="mx-auto max-w-[1280px] px-4">
         {/* ---------- هیرو ---------- */}
@@ -896,7 +950,7 @@ export default function SemTool() {
         </header>
 
         {/* ---------- ۱) منبع داده ---------- */}
-        <section className={`${cardCls} mt-4 ${sectionTones[0]}`}>
+        <section id="source" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[0]}`}>
           <h2 className="text-lg font-extrabold text-stone-900">۱) منبع داده</h2>
           <p className="mt-1 text-[13px] leading-6 text-stone-500">
             انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود.
@@ -928,7 +982,7 @@ export default function SemTool() {
         </section>
 
         {/* ---------- ۲) مشخصات متغیرها ---------- */}
-        <section className={`${cardCls} mt-4 ${sectionTones[1]}`}>
+        <section id="variables" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[1]}`}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-extrabold text-stone-900">۲) مشخصات متغیرها</h2>
@@ -936,7 +990,7 @@ export default function SemTool() {
                 ابتدا نقش، سپس نام متغیر، نمره کل و زیرمقیاس‌ها را مشخص کنید. هر زیرمقیاس دامنه نمره مستقل خودش را دارد.
               </p>
             </div>
-            <button className={btnLight} onClick={addVar}>
+            <button type="button" className={btnLight} onClick={addVar}>
               <Plus className="h-4 w-4" />
               افزودن متغیر
             </button>
@@ -969,8 +1023,9 @@ export default function SemTool() {
                       <input className={inputCls} value={v.name} onChange={(e) => updateVar(v.id, { name: e.target.value })} />
                     </div>
                     <button
+                      type="button"
                       onClick={() => removeVar(v.id)}
-                      className="flex h-10 w-10 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100"
+                      className="flex h-10 w-10 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400"
                       title="حذف متغیر"
                     >
                       <Trash2 className="h-4 w-4" />
@@ -1091,8 +1146,9 @@ export default function SemTool() {
                                 onChange={(e) => setSubscaleRange(v.id, si, "max", Number(e.target.value))}
                               />
                               <button
+                                type="button"
                                 onClick={() => removeSubscale(v.id, si)}
-                                className="flex h-9 w-9 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500"
+                                className="flex h-9 w-9 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-400"
                                 title="حذف زیرمقیاس"
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
@@ -1101,23 +1157,25 @@ export default function SemTool() {
                           ))}
                         </div>
 
-                        <div className="mt-3 flex flex-wrap items-center gap-3 text-[12px]">
-                          <span className="rounded-full bg-indigo-50 px-3 py-1 font-bold text-indigo-700">
-                            جمع کل زیرمقیاس‌ها: حداقل {sumMin} — حداکثر {sumMax}
-                          </span>
+                        <div className="mt-3 grid grid-cols-[1fr_120px_120px] items-center gap-2 rounded-xl border-2 border-violet-300 bg-violet-100/60 px-2 py-2 dark:border-violet-800 dark:bg-violet-950/40">
+                          <span className="text-[13px] font-black text-violet-800 dark:text-violet-200">جمع کل زیرمقیاس‌ها</span>
+                          <span className="text-center text-[13px] font-black text-violet-800 dark:text-violet-200">{sumMin}</span>
+                          <span className="text-center text-[13px] font-black text-violet-800 dark:text-violet-200">{sumMax}</span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-3 text-[12px]">
                           {v.hasTotal &&
                             (totalMatches ? (
-                              <span className="rounded-full bg-emerald-100 px-3 py-1 font-bold text-emerald-700">
+                              <span className="rounded-full bg-emerald-100 px-3 py-1 font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
                                 ✓ نمره کل با جمع زیرمقیاس‌ها برابر است
                               </span>
                             ) : (
-                              <span className="rounded-full bg-amber-100 px-3 py-1 font-bold text-amber-700">
+                              <span className="rounded-full bg-amber-100 px-3 py-1 font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
                                 ⚠ نمره کل ({v.totalMin} تا {v.totalMax}) با جمع زیرمقیاس‌ها ({sumMin} تا {sumMax}) برابر نیست
                               </span>
                             ))}
                         </div>
 
-                        <button className={`${btnLight} mt-3`} onClick={() => addSubscale(v.id)}>
+                        <button type="button" className={`${btnLight} mt-3`} onClick={() => addSubscale(v.id)}>
                           <Plus className="h-4 w-4" />
                           افزودن زیرمقیاس
                         </button>
@@ -1173,38 +1231,71 @@ export default function SemTool() {
             })}
           </div>
 
-          {/* مسیرهای مدل */}
-          <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4">
-            <p className="text-[12px] font-bold text-stone-600">مسیرهای مدل (فعال/غیرفعال)</p>
-            <p className={tinyCls}>با غیرفعال کردن یک مسیر، آن مسیر صفر فرض می‌شود و شاخص‌های برازش معنادار می‌شوند.</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {allPaths.map((p, i) => {
-                const active = !inactiveKeys.has(`${p.from}:${p.to}`);
-                return (
-                  <label
-                    key={i}
-                    className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-[12px] font-bold transition ${
-                      active ? "border-indigo-300 bg-indigo-50 text-indigo-800" : "border-stone-200 bg-white text-stone-400"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={active}
-                      onChange={() => togglePath(p.from, p.to)}
-                      className="h-4 w-4 accent-indigo-600"
-                    />
-                    {varName(p.from)} ← {varName(p.to)}
-                  </label>
-                );
-              })}
+        </section>
+
+        {/* ---------- ۳) ترسیم مدل ---------- */}
+        <section id="draw-model" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[2]}`}>
+          <div>
+            <h2 className="text-lg font-extrabold text-stone-900">۳) ترسیم مدل</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500">
+              مشخص کنید از کدام متغیر به کدام متغیر فلش بخورد؛ مسیرهای غیرفعال صفر فرض می‌شوند. پیش‌نمایش مدل زیر همین‌جا
+              رسم می‌شود.
+            </p>
+          </div>
+
+          <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_320px]">
+            <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+              <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">فلش‌های مدل (فعال/غیرفعال)</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {allPaths.map((p, i) => {
+                  const active = !inactiveKeys.has(`${p.from}:${p.to}`);
+                  return (
+                    <label
+                      key={i}
+                      className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-[12px] font-bold transition ${
+                        active
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                          : "border-stone-200 bg-stone-50 text-stone-400 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-500"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={() => togglePath(p.from, p.to)}
+                        className="h-4 w-4 accent-emerald-600"
+                      />
+                      <span className="flex items-center gap-1">
+                        <span className="rounded-md bg-indigo-100 px-1.5 py-0.5 text-[11px] text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300">
+                          {varName(p.from)}
+                        </span>
+                        ←
+                        <span className="rounded-md bg-emerald-100 px-1.5 py-0.5 text-[11px] text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                          {varName(p.to)}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              <p className={`${tinyCls} mt-2`}>
+                نکته: وقتی همه مسیرها فعال‌اند، مدل اشباع است و شاخص‌های برازش کامل (CFI=1، RMSEA=0) می‌شوند؛ با غیرفعال
+                کردن یک مسیر، برازش مدل معنادار و قابل آزمون می‌شود.
+              </p>
+            </div>
+
+            <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+              <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">پیش‌نمایش مدل</p>
+              <div className="mt-2">
+                <PathDiagram vars={vars} paths={paths} />
+              </div>
             </div>
           </div>
         </section>
 
-        {/* ---------- ۳) قیود تولید ---------- */}
+        {/* ---------- ۴) قیود تولید ---------- */}
         {source === "generate" && (
-          <section className={`${cardCls} mt-4 ${sectionTones[2]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900">۳) قیود تولید داده</h2>
+          <section id="constraints" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[2]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900">۴) قیود تولید داده</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500">
               مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار باشد.
             </p>
@@ -1411,33 +1502,61 @@ export default function SemTool() {
                   </span>
                 </span>
               </label>
-              <div className="rounded-xl border border-stone-200 bg-white p-3">
-                <p className="text-sm font-extrabold text-stone-800">شاخص‌های برازش (اختیاری)</p>
-                <div className="mt-2 flex gap-3">
-                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600">
+              <div className="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">
+                  شاخص‌های برازش (قابل تنظیم — پیش‌فرض‌ها مطابق معیارهای رایج داوری)
+                </p>
+                <p className={tinyCls}>
+                  داده تولیدی فقط پذیرفته می‌شود که همه این شاخص‌ها را برآورده کند؛ با این پیش‌فرض‌ها خروجی برای داوری و
+                  آموزش قابل قبول است و همه فرضیه‌های مسیرهای فعال معنادار می‌شوند.
+                </p>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
                     CFI ≥
                     <input
                       type="number"
                       step={0.01}
                       dir="ltr"
                       className={`${inputCls} !w-20 !py-1`}
-                      value={constraints.cfiMin ?? 0.9}
+                      value={constraints.cfiMin}
                       onChange={(e) => setConstraints({ ...constraints, cfiMin: Number(e.target.value) })}
                     />
                   </label>
-                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600">
+                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
                     RMSEA ≤
                     <input
                       type="number"
                       step={0.01}
                       dir="ltr"
                       className={`${inputCls} !w-20 !py-1`}
-                      value={constraints.rmseaMax ?? 0.08}
+                      value={constraints.rmseaMax}
                       onChange={(e) => setConstraints({ ...constraints, rmseaMax: Number(e.target.value) })}
                     />
                   </label>
+                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
+                    χ²/df ≤
+                    <input
+                      type="number"
+                      step={0.1}
+                      dir="ltr"
+                      className={`${inputCls} !w-20 !py-1`}
+                      value={constraints.chi2dfMax}
+                      onChange={(e) => setConstraints({ ...constraints, chi2dfMax: Number(e.target.value) })}
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
+                    SRMR ≤
+                    <input
+                      type="number"
+                      step={0.01}
+                      dir="ltr"
+                      className={`${inputCls} !w-20 !py-1`}
+                      value={constraints.srmrMax}
+                      onChange={(e) => setConstraints({ ...constraints, srmrMax: Number(e.target.value) })}
+                    />
+                  </label>
                 </div>
-                <p className={tinyCls}>با خالی‌کردن فیلد، قید غیرفعال می‌شود.</p>
+                <p className={`${tinyCls} mt-1`}>پیش‌فرض معقول: CFI ≥ 0.90 ، RMSEA ≤ 0.08 ، χ²/df ≤ 3 ، SRMR ≤ 0.08</p>
               </div>
               <div className="rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 p-3">
                 <p className="text-sm font-extrabold text-emerald-800">پیش‌فرض‌های واقع‌گرایانه</p>
@@ -1450,11 +1569,11 @@ export default function SemTool() {
           </section>
         )}
 
-        {/* ---------- ۴) جدول داده ---------- */}
-        <section className={`${cardCls} mt-4 ${sectionTones[3]}`}>
+        {/* ---------- ۵) جدول داده ---------- */}
+        <section id="data-table" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[3]}`}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-extrabold text-stone-900">۴) جدول داده</h2>
+              <h2 className="text-lg font-extrabold text-stone-900">۵) جدول داده</h2>
               <p className="mt-1 text-[13px] leading-6 text-stone-500">
                 داده‌ها قابل ویرایش‌اند؛ ایمپورت و اکسپورت با اکسل انجام می‌شود.
               </p>
@@ -1538,9 +1657,9 @@ export default function SemTool() {
           )}
         </section>
 
-        {/* ---------- ۵) بررسی پیش‌فرض‌ها ---------- */}
-        <section className={`${cardCls} mt-4 ${sectionTones[4]}`}>
-          <h2 className="text-lg font-extrabold text-stone-900">۵) بررسی پیش‌فرض‌های تحلیل</h2>
+        {/* ---------- ۶) بررسی پیش‌فرض‌ها ---------- */}
+        <section id="assumptions" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[4]}`}>
+          <h2 className="text-lg font-extrabold text-stone-900">۶) بررسی پیش‌فرض‌های تحلیل</h2>
           <p className="mt-1 text-[13px] leading-6 text-stone-500">
             شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود.
           </p>
@@ -1571,6 +1690,10 @@ export default function SemTool() {
                     </tbody>
                   </table>
                 </div>
+                <AssumptionNote
+                  condition="هیچ سلولی از داده‌ها خالی نباشد"
+                  pass={analysis.missing.every((m) => m.count === 0)}
+                />
               </div>
 
               {/* ۲) داده پرت */}
@@ -1604,6 +1727,10 @@ export default function SemTool() {
                 ) : (
                   <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.maha.message}</p>
                 )}
+                <AssumptionNote
+                  condition="هیچ داده پرتی با p کمتر از ۰/۰۵ در فاصله ماهالانوبیس وجود نداشته باشد"
+                  pass={analysis.maha.valid && analysis.maha.outliers.length === 0}
+                />
               </div>
 
               {/* ۳) نرمال بودن تک‌متغیری */}
@@ -1635,6 +1762,10 @@ export default function SemTool() {
                     </tbody>
                   </table>
                 </div>
+                <AssumptionNote
+                  condition="قدرمطلق کجی هر متغیر کمتر از ۳ و قدرمطلق کشیدگی کمتر از ۱۰ باشد (کلاین، ۲۰۲۳)"
+                  pass={analysis.normals.every((x) => Math.abs(x.skew) < 3 && Math.abs(x.kurt) < 10)}
+                />
               </div>
 
               {/* ۴) مردیا */}
@@ -1659,6 +1790,10 @@ export default function SemTool() {
                 ) : (
                   <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.mardia.message}</p>
                 )}
+                <AssumptionNote
+                  condition="نسبت بحرانی ضریب کشیدگی مردیا کمتر از ۵ باشد (بلانچ، ۲۰۱۲)"
+                  pass={analysis.mardia.valid && analysis.mardia.cr < 5}
+                />
               </div>
 
               {/* ۵) خطی بودن */}
@@ -1697,6 +1832,12 @@ export default function SemTool() {
                   </table>
                 </div>
                 <p className={`${tinyCls} mt-1 text-stone-500`}>** p &lt; 0.01 ، * p &lt; 0.05 (دوطرفه)</p>
+                <AssumptionNote
+                  condition="همبستگی همه مسیرهای فعال مدل در سطح ۰/۰۵ معنادار باشد"
+                  pass={paths
+                    .filter((p) => p.active)
+                    .every((p) => (analysis.corr.p[p.from]?.[p.to] ?? 1) < 0.05)}
+                />
               </div>
 
               {/* ۶) هم‌خطی و استقلال خطاها */}
@@ -1730,14 +1871,26 @@ export default function SemTool() {
                     </tbody>
                   </table>
                 </div>
+                <AssumptionNote
+                  condition="VIF همه پیش‌بین‌ها کمتر از ۵ و دوربین-واتسون بین ۱/۵ تا ۲/۵ باشد"
+                  pass={vars
+                    .filter((v) => v.role !== "exogenous")
+                    .every((v) => {
+                      const vifs = analysis.sem.vifs[v.id] ?? [];
+                      const dw = analysis.sem.dw[v.id] ?? NaN;
+                      const vifOk = vifs.every((x) => x < 5);
+                      const dwOk = !Number.isFinite(dw) || (dw >= 1.5 && dw <= 2.5);
+                      return vifOk && dwOk;
+                    })}
+                />
               </div>
             </div>
           )}
         </section>
 
-        {/* ---------- ۶) نتایج ---------- */}
-        <section className={`${cardCls} mt-4 ${sectionTones[5]}`}>
-          <h2 className="text-lg font-extrabold text-stone-900">۶) نتایج</h2>
+        {/* ---------- ۷) نتایج ---------- */}
+        <section id="results" className={`${cardCls} mt-4 scroll-mt-20 ${sectionTones[5]}`}>
+          <h2 className="text-lg font-extrabold text-stone-900">۷) نتایج</h2>
           {!analysis ? (
             <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400">
               بعد از تحلیل، دیاگرام مدل، ضرایب مسیر، اثرات، R² و شاخص‌های برازش اینجا نمایش داده می‌شود.
@@ -1857,10 +2010,18 @@ export default function SemTool() {
                       )}
                       {bootResults?.map((b, i) => {
                         const isTotal = b.via === null;
-                        const viaNames = b.via ? b.via.map((m) => varName(m)).join(" ← ") : null;
-                        const label = isTotal
-                          ? `کل اثر غیرمستقیم: ${varName(b.from)} ← ${varName(b.to)}`
-                          : `${varName(b.from)} ← ${viaNames} ← ${varName(b.to)}`;
+                        let label: string;
+                        if (isTotal) {
+                          const parts = bootResults
+                            .filter((x) => x.via !== null && x.from === b.from && x.to === b.to)
+                            .map(
+                              (x) =>
+                                `${varName(b.from)} ← ${x.via!.map((m) => varName(m)).join(" ← ")} ← ${varName(b.to)}`
+                            );
+                          label = `کل اثر غیرمستقیم: ${varName(b.from)} ← ${varName(b.to)} (${parts.join(" + ")})`;
+                        } else {
+                          label = `${varName(b.from)} ← ${b.via!.map((m) => varName(m)).join(" ← ")} ← ${varName(b.to)}`;
+                        }
                         return (
                           <tr key={i} className={isTotal ? "bg-stone-50 font-bold" : ""}>
                             <td>{label}</td>
@@ -1941,6 +2102,11 @@ export default function SemTool() {
               {answerKey && (
                 <div>
                   <h3 className="font-extrabold text-stone-800">کلید پاسخ (مقادیر هدف در برابر واقعی — مخصوص استاد)</h3>
+                  <p className={`${tinyCls} mt-1`}>
+                    کلید پاسخ یعنی ضرایب استانداردی (β) که هنگام تولید داده برای هر مسیر «هدف» قرار گرفته‌اند، در برابر
+                    ضرایبی که در داده نهایی «واقعاً» برآورد شده‌اند. دانشجو باید با تحلیل داده به ضرایبی نزدیک به ستون
+                    «ضریب واقعی» برسد؛ این جدول فقط برای استاد است تا صحت کار دانشجو را سریع بسنجد.
+                  </p>
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
@@ -1967,30 +2133,40 @@ export default function SemTool() {
       </div>
 
       {/* ---------- فوتر ثابت خروجی ---------- */}
-      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-stone-200 bg-white/95 shadow-[0_-6px_24px_rgba(24,32,51,0.08)] backdrop-blur">
-        <div className="mx-auto flex max-w-[1280px] flex-wrap items-center justify-between gap-2 px-4 py-2.5">
-          <span className="text-sm font-extrabold text-stone-800">خروجی نهایی</span>
-          <div className="flex flex-wrap items-center gap-2">
-            <button className={btnPrimary} onClick={exportExcel}>
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-stone-200 bg-white/95 shadow-[0_-6px_24px_rgba(24,32,51,0.08)] backdrop-blur dark:border-stone-700 dark:bg-stone-900/95">
+        <div className="mx-auto flex max-w-[1280px] flex-col items-center gap-1.5 px-4 py-2.5">
+          <p className="text-center text-[12px] leading-5 text-stone-500 dark:text-stone-400">
+            برای دریافت خروجی مورد نظر، روی دکمه مربوطه کلیک کنید؛ اکسل کامل شامل شیت‌های «داده»، «نمرات کل» و «گزارش»،
+            قالب داده برای پر کردن و ایمپورت مجدد، و گزارش به‌صورت docx یا txt جداگانه در دسترس است.
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button type="button" className={btnPrimary} onClick={exportExcel}>
               <Download className="h-4 w-4" />
-              اکسل کامل
+              دانلود اکسل کامل
             </button>
-            <button className={btnSecondary} onClick={downloadTemplate}>
+            <button type="button" className={btnSecondary} onClick={downloadTemplate}>
               <FileSpreadsheet className="h-4 w-4" />
-              قالب داده
+              دانلود قالب داده
             </button>
-            <button className={btnLight} onClick={exportDocx}>
+            <button type="button" className={btnLight} onClick={exportDocx}>
               <FileText className="h-4 w-4" />
               گزارش docx
             </button>
-            <button className={btnLight} onClick={exportTxt}>
+            <button type="button" className={btnLight} onClick={exportTxt}>
               <FileText className="h-4 w-4" />
               گزارش txt
             </button>
-            <button className={btnLight} onClick={copyReport}>
+            <button type="button" className={btnLight} onClick={copyReport}>
               <Copy className="h-4 w-4" />
-              کپی گزارش
+              کپی کل گزارش
             </button>
+          </div>
+          <div aria-live="polite" className="min-h-5">
+            {footerMsg && (
+              <span className="rounded-full bg-emerald-100 px-3 py-0.5 text-[12px] font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                ✓ {footerMsg}
+              </span>
+            )}
           </div>
         </div>
       </div>

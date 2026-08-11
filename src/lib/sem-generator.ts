@@ -48,8 +48,11 @@ export type GenConstraints = {
   pathTargets: Record<string, PathTarget>;
   indirectTargets: Record<string, IndirectTarget>;
   r2Range: { min: number; max: number } | null;
-  cfiMin: number | null;
-  rmseaMax: number | null;
+  /** شاخص‌های برازش — همگی قبل از تولید قابل تنظیم با پیش‌فرض معقول برای داوری */
+  cfiMin: number;
+  rmseaMax: number;
+  chi2dfMax: number;
+  srmrMax: number;
   missingPct: number;
   outlierPct: number;
   enforceNormality: boolean;
@@ -302,8 +305,12 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
         margins.push(r2 - constraints.r2Range.min, constraints.r2Range.max - r2);
       }
     }
-    if (constraints.cfiMin != null && sem.fit.valid) margins.push(sem.fit.cfi - constraints.cfiMin);
-    if (constraints.rmseaMax != null && sem.fit.valid) margins.push(constraints.rmseaMax - sem.fit.rmsea);
+    if (sem.fit.valid) {
+      margins.push(sem.fit.cfi - constraints.cfiMin);
+      margins.push(constraints.rmseaMax - sem.fit.rmsea);
+      margins.push(constraints.chi2dfMax - sem.fit.chi2df);
+      margins.push(constraints.srmrMax - sem.fit.srmr);
+    }
 
     if (constraints.enforceNormality && constraints.outlierPct === 0) {
       for (const v of variables) {
@@ -404,8 +411,7 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     .map(([k]) => `اثر غیرمستقیم ${k} معنادار`);
   messages.push(...sigInd);
   if (constraints.r2Range) messages.push(`R² بین ${constraints.r2Range.min} تا ${constraints.r2Range.max}`);
-  if (constraints.cfiMin != null) messages.push(`CFI حداقل ${constraints.cfiMin}`);
-  if (constraints.rmseaMax != null) messages.push(`RMSEA حداکثر ${constraints.rmseaMax}`);
+  messages.push(`CFI حداقل ${constraints.cfiMin}، RMSEA حداکثر ${constraints.rmseaMax}، χ²/df حداکثر ${constraints.chi2dfMax}، SRMR حداکثر ${constraints.srmrMax}`);
   throw new Error(
     `با این تنظیمات، در ${maxAttempts} تلاش داده‌ای که همه قیود (${messages.join("، ")}) را پاس کند پیدا نشد. ` +
       `بهترین امتیاز معیار: ${scoreText}. پیشنهاد: حجم نمونه را بیشتر کنید، تعداد زیرمقیاس‌ها را افزایش دهید یا قیود را ملایم‌تر کنید.`

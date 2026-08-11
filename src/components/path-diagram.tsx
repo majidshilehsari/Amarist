@@ -14,6 +14,10 @@ const roleColors: Record<Role, { fill: string; stroke: string; text: string }> =
 const subFill = "#f8fafc";
 const subStroke = "#94a3b8";
 
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
 export default function PathDiagram({
   vars,
   paths,
@@ -23,27 +27,31 @@ export default function PathDiagram({
   paths: PathRow[];
   results?: SemResults | null;
 }) {
-  const nodeW = 190;
-  const nodeH = 54;
-  const colGap = 250;
-  const subW = 170;
-  const subH = 28;
-  const subGap = 36;
+  const nodeW = 200;
+  const nodeH = 56;
+  const colGap = 270;
+  const subW = 150;
+  const subH = 26;
+  const subColGap = 12;
+  const subRowGap = 30;
+  const subCols = 2;
 
-  // چیدمان: به ترتیب نقش (برون‌زاها، میانجی‌ها، درون‌زاها)
   const ordered = [...vars].sort((a, b) => roleCol[a.role] - roleCol[b.role]);
   const nodes = ordered.map((v, idx) => ({
     id: v.id,
-    name: v.name,
+    name: truncate(v.name, 24),
     latent: v.subscales.length > 0,
     x: 30 + idx * colGap,
-    y: 56,
+    y: 60,
     color: roleColors[v.role],
   }));
 
   const W = 30 + (ordered.length - 1) * colGap + nodeW + 30;
-  const maxSubs = Math.max(0, ...vars.map((v) => v.subscales.length));
-  const H = Math.max(56 + nodeH + 24 + maxSubs * subGap + 24, 190);
+  const maxSubRows = Math.max(
+    0,
+    ...vars.map((v) => Math.ceil(v.subscales.length / subCols))
+  );
+  const H = Math.max(60 + nodeH + 40 + maxSubRows * subRowGap + 30, 200);
 
   const active = paths.filter((p) => p.active);
   const betaOf = (from: number, to: number) =>
@@ -52,7 +60,7 @@ export default function PathDiagram({
 
   return (
     <div dir="ltr" className="tool-table-wrap overflow-x-auto p-4">
-      <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full min-w-[640px]" role="img" aria-label="دیاگرام مدل">
+      <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full min-w-[680px]" role="img" aria-label="دیاگرام مدل">
         <defs>
           <marker
             id="arrow"
@@ -70,8 +78,8 @@ export default function PathDiagram({
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
-            markerWidth="5.5"
-            markerHeight="5.5"
+            markerWidth="5"
+            markerHeight="5"
             orient="auto-start-reverse"
           >
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" />
@@ -111,52 +119,68 @@ export default function PathDiagram({
           const cy = n.y + nodeH / 2;
           const r2 = r2Of(n.id);
           const subs = vars.find((v) => v.id === n.id)?.subscales ?? [];
+          const subRows = Math.ceil(subs.length / subCols);
           return (
             <g key={n.id}>
-              {/* گره اصلی */}
               {n.latent ? (
                 <ellipse cx={cx} cy={cy} rx={nodeW / 2} ry={nodeH / 2 + 8} fill={n.color.fill} stroke={n.color.stroke} strokeWidth={1.6} />
               ) : (
                 <rect x={n.x} y={n.y} width={nodeW} height={nodeH} rx={10} fill={n.color.fill} stroke={n.color.stroke} strokeWidth={1.6} />
               )}
-              <text x={cx} y={cy - (r2 != null && Number.isFinite(r2) ? 2 : 5)} textAnchor="middle" fontSize={11} fontWeight={700} fill={n.color.text}>
+              <text x={cx} y={cy - (r2 != null && Number.isFinite(r2) ? 1 : 4)} textAnchor="middle" fontSize={11} fontWeight={700} fill={n.color.text}>
                 {n.name}
               </text>
               {r2 != null && Number.isFinite(r2) && (
-                <text x={cx} y={cy + 15} textAnchor="middle" fontSize={10} fontWeight={700} fill="#475569">
+                <text x={cx} y={cy + 14} textAnchor="middle" fontSize={10} fontWeight={700} fill="#475569">
                   R² = {r2.toFixed(2)}
                 </text>
               )}
 
-              {/* زیرمقیاس‌ها */}
+              {/* زیرمقیاس‌ها در دو ستون */}
               {subs.map((s, si) => {
-                const sy = n.y + nodeH + 26 + si * subGap;
-                const sx = n.x + (nodeW - subW) / 2;
-                const startY = n.y + nodeH + (n.latent ? 8 : 0);
+                const colIdx = si % subCols;
+                const rowIdx = Math.floor(si / subCols);
+                const sy = n.y + nodeH + 34 + rowIdx * subRowGap;
+                const totalRowW = subCols * subW + (subCols - 1) * subColGap;
+                const sx = n.x + (nodeW - totalRowW) / 2 + colIdx * (subW + subColGap);
+                const startY = n.y + nodeH + (n.latent ? 10 : 0);
+                const subCx = sx + subW / 2;
                 return (
                   <g key={si}>
                     <line
                       x1={cx}
                       y1={startY}
-                      x2={cx}
+                      x2={subCx}
                       y2={sy - 2}
                       stroke="#cbd5e1"
-                      strokeWidth={1.2}
+                      strokeWidth={1.1}
                       markerEnd="url(#arrow-sub)"
                     />
-                    <rect x={sx} y={sy} width={subW} height={subH} rx={6} fill={subFill} stroke={subStroke} strokeWidth={1.1} />
-                    <text x={cx} y={sy + subH / 2 + 4} textAnchor="middle" fontSize={9.5} fontWeight={600} fill="#475569">
-                      {s.name.length > 26 ? s.name.slice(0, 25) + "…" : s.name}
+                    <rect x={sx} y={sy} width={subW} height={subH} rx={6} fill={subFill} stroke={subStroke} strokeWidth={1} />
+                    <text x={subCx} y={sy + subH / 2 + 3.5} textAnchor="middle" fontSize={9} fontWeight={600} fill="#475569">
+                      {truncate(s.name, 20)}
                     </text>
                   </g>
                 );
               })}
+
+              {/* خط اتصال افقی بین ستون‌های زیرمقیاس */}
+              {subRows > 1 && (
+                <line
+                  x1={cx}
+                  y1={n.y + nodeH + 10}
+                  x2={cx}
+                  y2={n.y + nodeH + 34 + (subRows - 1) * subRowGap}
+                  stroke="#e2e8f0"
+                  strokeWidth={1}
+                />
+              )}
             </g>
           );
         })}
       </svg>
-      <p className="mt-2 text-center text-[11px] text-stone-400">
-        بیضی = متغیر پنهان (دارای زیرمقیاس) · مستطیل = متغیر مشاهده‌شده · رنگ‌ها: برون‌زا (آبی) / میانجی (نارنجی) / درون‌زا (سبز) · R² زیر نام متغیرهای درون‌زا
+      <p className="mt-2 text-center text-[11px] text-stone-400 dark:text-stone-500">
+        بیضی = متغیر پنهان (مکنون) · مستطیل = متغیر مشاهده‌شده · رنگ‌ها: برون‌زا (آبی) / میانجی (نارنجی) / درون‌زا (سبز) · R² زیر نام متغیرهای درون‌زا
       </p>
     </div>
   );

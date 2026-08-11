@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme inline {
   --font-sans: "Vazirmatn Variable", ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", sans-serif;
@@ -20,6 +22,53 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: "Vazirmatn Variable", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ---------- حالت تاریک ---------- */
+.dark body {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.dark .tool-table-wrap {
+  background: #0f172a;
+  border-color: #334155;
+}
+
+.dark .tool-table th {
+  background: #1e293b;
+  color: #cbd5e1;
+  border-color: #334155;
+}
+
+.dark .tool-table td {
+  border-color: #334155;
+  color: #e2e8f0;
+}
+
+.dark .group-head-1 {
+  background: #1e3a5f !important;
+}
+
+.dark .group-head-2 {
+  background: #14532d !important;
+}
+
+.dark .group-head-3 {
+  background: #78350f !important;
+}
+
+.dark .row-index {
+  background: #1e293b;
+  color: #94a3b8;
+}
+
+.dark .delta-cell {
+  background: #1e293b;
+}
+
+.dark .muted {
+  color: #94a3b8;
 }
 
 ::selection {

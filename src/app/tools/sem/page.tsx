@@ -56,10 +56,12 @@ import {
   type VariableSpec,
 } from "@/lib/sem-generator";
 import ErrorBoundary from "@/components/error-boundary";
+import HelpButtons from "@/components/help-buttons";
 import PathDiagram from "@/components/path-diagram";
 import ProgressStepper, { type StepStatus } from "@/components/progress-stepper";
 import ResultModal from "@/components/result-modal";
 import ToolHeader from "@/components/tool-header";
+import ZoomableDiagram from "@/components/zoomable-diagram";
 
 // ------------------------------------------------------------
 // ثابت‌های استایل
@@ -409,7 +411,7 @@ function buildReportText(
   }
   const { sem, corr, maha, mardia, missing, normals, meas } = analysis;
   const nodeLabel = (id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`;
-  L.push(`تعداد موارد: ${n} | تعداد گره‌های مدل: ${nodes.length}`);
+  L.push(`تعداد موارد: ${n} | تعداد متغیرها/زیرمقیاس‌ها: ${nodes.length}`);
   L.push("");
   L.push("دامنه نمره متغیرها:");
   vars.forEach((v) => {
@@ -491,7 +493,7 @@ function buildReportText(
     });
   }
   L.push("");
-  L.push("۹) R² گره‌های درون‌زا:");
+  L.push("۹) R² متغیرهای درون‌زا:");
   nodes.forEach((nd) => {
     if (nd.role !== "exogenous") L.push(`  ${nd.label}: R²=${fmt(sem.r2[nd.nodeId] ?? 0)}`);
   });
@@ -617,7 +619,7 @@ function buildDocxReport(
     })
   );
   children.push(
-    docP(`پروژه: ${projectName} | منبع داده: ${source === "generate" ? "تولید تمرینی" : "داده واقعی"} | تعداد موارد: ${faNum(n)} | تعداد گره‌های مدل: ${faNum(nodes.length)}`, { align: AlignmentType.CENTER, bold: true })
+    docP(`پروژه: ${projectName} | منبع داده: ${source === "generate" ? "تولید تمرینی" : "داده واقعی"} | تعداد موارد: ${faNum(n)} | تعداد متغیرها/زیرمقیاس‌ها: ${faNum(nodes.length)}`, { align: AlignmentType.CENTER, bold: true })
   );
 
   if (!analysis) {
@@ -861,12 +863,15 @@ function SemTool() {
   const [modal, setModal] = useState<ModalState>(null);
   const [showBigDiagram, setShowBigDiagram] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
+  const [completed, setCompleted] = useState<Record<string, boolean>>({});
   const [wantAlpha, setWantAlpha] = useState(true);
   const [backupModal, setBackupModal] = useState(false);
   const [backupName, setBackupName] = useState("");
   const [backupScope, setBackupScope] = useState<"all" | "one">("all");
   const [projectModal, setProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
+  const [diagnoseModal, setDiagnoseModal] = useState(false);
+  const [analysisInputs, setAnalysisInputs] = useState<string>("");
   const fileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
 
@@ -893,6 +898,12 @@ function SemTool() {
     analysis.nodeIds.length === modelNodes.length &&
     analysis.nodeIds.every((id, i) => id === modelNodes[i].nodeId);
 
+  const inputsChangedSinceAnalysis = useMemo(() => {
+    if (!analysisValid) return false;
+    const current = JSON.stringify({ source, vars, inactiveArrowIds: [...inactiveArrowIds], constraints, n, rows, columns });
+    return analysisInputs !== current;
+  }, [analysisValid, analysisInputs, source, vars, inactiveArrowIds, constraints, n, rows, columns]);
+
   const hasLatent = vars.some((v) => v.subscales.length > 0);
   const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان (مکنون)" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
   const varName = (id: number) => varNameOf(vars, id);
@@ -907,8 +918,8 @@ function SemTool() {
     ];
     if (source === "generate") list.push({ id: "constraints", label: "قیود تولید داده", short: "قیود" });
     list.push(
-      { id: "data", label: "جدول داده‌ها", short: "داده" },
       { id: "diagnose", label: "تشخیص", short: "تشخیص" },
+      { id: "data", label: "جدول داده‌ها", short: "داده" },
       { id: "assumptions", label: "بررسی پیش‌فرض‌ها", short: "پیش‌فرض" },
       { id: "descriptive", label: "یافته‌های توصیفی", short: "توصیفی" },
       { id: "diagram", label: "دیاگرام مدل", short: "دیاگرام" },
@@ -930,22 +941,110 @@ function SemTool() {
     return steps.map((s, i) => {
       if (i === currentStep) return "current";
       if (i > currentStep) return "pending";
-      if (analysisSteps.has(s.id) && !analysisValid) return "analysis";
-      return "done";
+      if (analysisSteps.has(s.id)) {
+        return completed[s.id] && analysisValid ? "done" : "analysis";
+      }
+      return completed[s.id] ? "done" : "pending";
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [steps, currentStep, analysisValid]);
+  }, [steps, currentStep, analysisValid, completed]);
 
   const goToStep = (i: number) => {
     if (i >= 0 && i <= currentStep) setActiveStep(i);
   };
 
+  const markDone = (stepId: string) => {
+    setCompleted((prev) => (prev[stepId] ? prev : { ...prev, [stepId]: true }));
+  };
+
   const goNext = () => {
-    setActiveStep((s) => Math.min(Math.max(s, currentStep) + 1, steps.length - 1));
+    const cur = Math.min(activeStep, steps.length - 1);
+    const stepId = steps[cur]?.id ?? "";
+    if (stepId === "diagnose") {
+      // اعتبارسنجی + مودال تصمیم
+      if (!rows.length) {
+        setModal({
+          ok: false,
+          lines: [
+            "هنوز داده‌ای وجود ندارد.",
+            source === "generate"
+              ? "از دکمه «تولید داده و تحلیل» استفاده کنید."
+              : "ابتدا در مرحله «جدول داده‌ها» فایل اکسل را وارد کنید.",
+          ],
+        });
+        return;
+      }
+      setDiagnoseModal(true);
+      return;
+    }
+    if (stepId === "data" && !analysisValid && rows.length) {
+      // قبل از رفتن به مراحل تحلیل‌محور، اعتبارسنجی داده
+      const problems = validateData();
+      if (problems.length) {
+        setModal({ ok: false, lines: problems });
+        return;
+      }
+    }
+    markDone(stepId);
+    setActiveStep(Math.min(cur + 1, steps.length - 1));
   };
 
   const goPrev = () => {
-    setActiveStep((s) => Math.max(Math.min(s, currentStep) - 1, 0));
+    const cur = Math.min(activeStep, steps.length - 1);
+    setActiveStep(Math.max(cur - 1, 0));
+  };
+
+  // تشخیص تغییر در ورودی‌ها → مراحل بعدی ناقص می‌شوند
+  const lastInputsRef = useRef<string>("");
+  useEffect(() => {
+    const snapshot = JSON.stringify({ source, vars, inactiveArrowIds: [...inactiveArrowIds], constraints, n, rows, columns });
+    if (lastInputsRef.current && lastInputsRef.current !== snapshot) {
+      const t = setTimeout(() => {
+        setCompleted((prev) => {
+          const next: Record<string, boolean> = {};
+          const inputSteps = new Set(steps.slice(0, stepIdx("diagnose")).map((s) => s.id));
+          Object.keys(prev).forEach((k) => {
+            if (inputSteps.has(k) || k === "diagnose") next[k] = true;
+          });
+          return next;
+        });
+      }, 0);
+      lastInputsRef.current = snapshot;
+      return () => clearTimeout(t);
+    }
+    lastInputsRef.current = snapshot;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, vars, inactiveArrowIds, constraints, n, rows, columns]);
+
+  // ---------- اعتبارسنجی داده ----------
+  const validateData = (): string[] => {
+    const problems: string[] = [];
+    if (!rows.length) {
+      problems.push("داده‌ای وجود ندارد؛ ابتدا داده تولید یا وارد کنید.");
+      return problems;
+    }
+    // گره‌های بی‌اعتبار
+    for (const nd of modelNodes) {
+      const col = computeNodeCols(rows, vars, modelNodes, colMap).nodeCols[nd.nodeId] ?? [];
+      const validCount = col.filter(Number.isFinite).length;
+      if (validCount === 0) {
+        problems.push(`متغیر «${nd.label}» هیچ داده معتبری ندارد؛ نگاشت ستون‌ها را بررسی کنید.`);
+      } else if (validCount < 10) {
+        problems.push(`متغیر «${nd.label}» فقط ${validCount} داده معتبر دارد (حداقل ۱۰ لازم است).`);
+      }
+    }
+    // داده گمشده (وقتی تولید با missing عمدی نداریم)
+    if (constraints.missingPct === 0) {
+      const missingCols = columns
+        .map((col, i) => ({ col, count: rows.filter((r) => r[i] == null || !Number.isFinite(r[i])).length }))
+        .filter((m) => m.count > 0);
+      if (missingCols.length) {
+        problems.push(
+          `داده گمشده یافت شد: ${missingCols.map((m) => `${m.col} (${m.count})`).join("، ")} — سلول‌ها را کامل کنید.`
+        );
+      }
+    }
+    return problems;
   };
 
   // ---------- اعمال/ذخیره پروژه ----------
@@ -1227,6 +1326,7 @@ function SemTool() {
             loadings: pcaLoadings(indicatorCols[v.id]),
             subNames: v.subscales.map((s) => s.name),
           }));
+        setAnalysisInputs(JSON.stringify({ source, vars, inactiveArrowIds: [...inactiveArrowIds], constraints, n, rows: r, columns: c }));
         setAnalysis({
           nodeIds: modelNodes.map((nd) => nd.nodeId),
           nodeCols,
@@ -1246,7 +1346,7 @@ function SemTool() {
           setModal({
             ok: true,
             lines: [
-              `تعداد موارد: ${r.length} | تعداد گره‌های مدل: ${modelNodes.length}`,
+              `تعداد موارد: ${r.length} | تعداد متغیرها/زیرمقیاس‌ها: ${modelNodes.length}`,
               `مسیرهای معنادار: ${sigCount} از ${sem.paths.length}`,
               sem.fit.valid
                 ? `برازش: CFI=${fmt(sem.fit.cfi)} | RMSEA=${fmt(sem.fit.rmsea)} | χ²/df=${fmt(sem.fit.chi2df)} | SRMR=${fmt(sem.fit.srmr)}`
@@ -1265,7 +1365,8 @@ function SemTool() {
         if (openModal) setModal({ ok: false, lines: [(err as Error).message] });
       }
     },
-    [rows, colMap, columns, vars, modelNodes, modelArrows, constraints.bootSamples, runBootstrap, setModal]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, colMap, columns, vars, modelNodes, modelArrows, constraints.bootSamples, runBootstrap, setModal, source, inactiveArrowIds, constraints, n, setAnalysisInputs]
   );
 
   // ---------- تولید داده ----------
@@ -1660,7 +1761,10 @@ function SemTool() {
         {/* ============ مرحله ۰: پروژه ============ */}
         {currentStep === stepIdx("project") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">پروژه‌ها</h2>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">پروژه‌ها</h2>
+              <HelpButtons section="project" />
+            </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               همه داده‌ها در مرورگر شما ذخیره می‌شوند. یک پروژه انتخاب کنید یا پروژه جدید بسازید؛ با «بکاپ پروژه‌ها»
               می‌توانید همه پروژه‌ها یا فقط همین پروژه را ذخیره کنید.
@@ -1745,7 +1849,10 @@ function SemTool() {
         {/* ============ مرحله ۱: منبع داده ============ */}
         {currentStep === stepIdx("source") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">منبع داده</h2>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">منبع داده</h2>
+              <HelpButtons section="source" />
+            </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               انتخاب کنید داده‌های واقعی پژوهش خود را وارد می‌کنید یا داده تمرینی برای شما تولید شود.
             </p>
@@ -1793,10 +1900,13 @@ function SemTool() {
                   به‌صورت زیرمقیاس‌های مستقل وارد می‌شود.
                 </p>
               </div>
-              <button type="button" className={btnLight} onClick={addVar}>
-                <Plus className="h-4 w-4" />
-                افزودن متغیر
-              </button>
+              <div className="flex items-center gap-2">
+                <HelpButtons section="variables" />
+                <button type="button" className={btnLight} onClick={addVar}>
+                  <Plus className="h-4 w-4" />
+                  افزودن متغیر
+                </button>
+              </div>
             </div>
 
             <div className="mt-4 grid gap-4">
@@ -1982,10 +2092,13 @@ function SemTool() {
                   هر فلش در یک خط جداگانه قابل فعال/غیرفعال کردن است. غیرفعال‌کردن فلش = صفر فرض‌شدن آن مسیر.
                 </p>
               </div>
-              <button type="button" className={btnSecondary} onClick={() => setShowBigDiagram(true)}>
-                <RefreshCw className="h-4 w-4" />
-                مشاهده بزرگ مدل
-              </button>
+              <div className="flex items-center gap-2">
+                <HelpButtons section="draw" />
+                <button type="button" className={btnSecondary} onClick={() => setShowBigDiagram(true)}>
+                  <RefreshCw className="h-4 w-4" />
+                  مشاهده بزرگ مدل
+                </button>
+              </div>
             </div>
 
             {isolatedVars.length > 0 && (
@@ -2041,7 +2154,10 @@ function SemTool() {
         {/* ============ مرحله ۴: قیود تولید ============ */}
         {currentStep === stepIdx("constraints") && source === "generate" && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">قیود تولید داده</h2>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">قیود تولید داده</h2>
+              <HelpButtons section="constraints" />
+            </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را قبول می‌کند که این شرایط برقرار
               باشد.
@@ -2082,7 +2198,7 @@ function SemTool() {
                 <tbody>
                   {[...new Set(allArrows.map((a) => `${a.fromVar}:${a.toVar}`))].map((key) => {
                     const [fv, tv] = key.split(":").map(Number);
-                    const t = constraints.pathTargets[key] ?? { sig: "sig", betaMin: null, betaMax: null };
+                    const t = constraints.pathTargets[key] ?? { sig: "sig", betaMin: 0.2, betaMax: 0.5 };
                     return (
                       <tr key={key}>
                         <td style={{ fontWeight: 900 }}>{varName(fv)} ← {varName(tv)}</td>
@@ -2189,7 +2305,7 @@ function SemTool() {
               </label>
 
               <div className="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
-                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">شاخص‌های برازش (پیش‌فرض‌های داوری)</p>
+                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">شاخص‌های برازش</p>
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
                     CFI ≥
@@ -2222,82 +2338,13 @@ function SemTool() {
           </section>
         )}
 
-        {/* ============ مرحله ۵: جدول داده‌ها ============ */}
-        {currentStep === stepIdx("data") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">جدول داده‌ها</h2>
-                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                  {source === "generate"
-                    ? "داده‌ها در مرحله «تشخیص» تولید می‌شوند؛ اینجا می‌توانید داده موجود را ویرایش یا ایمپورت/اکسپورت کنید."
-                    : "فایل اکسل داده‌های واقعی را وارد کنید یا از قالب داده استفاده کنید."}
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept=".xlsx,.xls"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleImport(f);
-                    e.target.value = "";
-                  }}
-                />
-                <button type="button" className={btnSecondary} onClick={() => fileRef.current?.click()}>
-                  <Upload className="h-4 w-4" />
-                  ایمپورت اکسل
-                </button>
-                <button type="button" className={btnSecondary} onClick={downloadTemplate}>
-                  <FileSpreadsheet className="h-4 w-4" />
-                  دانلود قالب داده
-                </button>
-                <button type="button" className={btnSecondary} onClick={exportExcel}>
-                  <Download className="h-4 w-4" />
-                  اکسپورت اکسل
-                </button>
-              </div>
-            </div>
-
-            {rows.length > 0 ? (
-              <div className="tool-table-wrap tool-table-scroll mt-4">
-                <table className="tool-table" style={{ minWidth: Math.max(720, columns.length * 90) }}>
-                  <thead>
-                    <tr>
-                      <th>ردیف</th>
-                      {columns.map((c, i) => (
-                        <th key={i}>{c}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((r, i) => (
-                      <tr key={i}>
-                        <td className="row-index">{i + 1}</td>
-                        {r.map((v, j) => (
-                          <td key={j}>
-                            <Cell value={v} onCommit={(nv) => updateCell(i, j, nv)} />
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
-                هنوز داده‌ای وجود ندارد؛ در مرحله «تشخیص» داده تولید کنید یا فایل اکسل وارد کنید.
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* ============ مرحله ۶: تشخیص ============ */}
+        {/* ============ مرحله ۵: تشخیص ============ */}
         {currentStep === stepIdx("diagnose") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">تشخیص</h2>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">تشخیص</h2>
+              <HelpButtons section="diagnose" />
+            </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               خلاصه وضعیت مدل را مرور کنید و تصمیم بگیرید؛ تولید داده یا اجرای تحلیل فقط از اینجا انجام می‌شود.
             </p>
@@ -2351,12 +2398,12 @@ function SemTool() {
               {source === "generate" && (
                 <button type="button" className={btnPrimary} onClick={generate}>
                   <Play className="h-4 w-4" />
-                  تولید داده و تحلیل
+                  {rows.length ? "تولید مجدد داده و تحلیل" : "تولید داده و تحلیل"}
                 </button>
               )}
               <button type="button" className={btnSecondary} onClick={() => analyze(undefined, undefined, undefined, true, true)}>
                 <RefreshCw className="h-4 w-4" />
-                اجرای تحلیل
+                {analysisValid ? "اجرای مجدد تحلیل" : "اجرای تحلیل"}
               </button>
               <span
                 className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
@@ -2370,6 +2417,34 @@ function SemTool() {
                 {status.kind === "ok" ? "✓" : status.kind === "err" ? "✗" : "•"} {status.text}
               </span>
             </div>
+            <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4 text-[13px] leading-6 text-stone-700 dark:border-stone-700 dark:bg-slate-800 dark:text-stone-300">
+              {rows.length ? (
+                <>
+                  <p>
+                    <b>وضعیت داده:</b> {rows.length} ردیف × {columns.length} ستون
+                    {source === "generate" ? ` (n=${n})` : " (واردشده)"}
+                  </p>
+                  <p>
+                    <b>وضعیت تحلیل:</b>{" "}
+                    {analysisValid
+                      ? analysis.sem.fit.valid
+                        ? `اجرا شده — CFI=${fmt(analysis.sem.fit.cfi)}، RMSEA=${fmt(analysis.sem.fit.rmsea)}`
+                        : "اجرا شده (برازش نامعتبر)"
+                      : "اجرا نشده"}
+                  </p>
+                  {inputsChangedSinceAnalysis && analysisValid && (
+                    <p className="mt-1 rounded-lg bg-amber-50 p-2 font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                      ⚠ در بخش‌های قبل تغییری ایجاد شده است؛ برای اطمینان، تحلیل را دوباره اجرا کنید.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p>
+                  <b>وضعیت داده:</b> هنوز داده‌ای تولید/وارد نشده است.
+                </p>
+              )}
+            </div>
+
             {source === "generate" && !rows.length && (
               <p className={`${tinyCls} mt-2`}>
                 هنوز داده‌ای تولید نشده است؛ با «تولید داده و تحلیل» داده ساخته و تحلیل اجرا می‌شود.
@@ -2384,10 +2459,88 @@ function SemTool() {
         )}
 
 
+        {/* ============ مرحله ۶: جدول داده‌ها ============ */}
+        {currentStep === stepIdx("data") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">جدول داده‌ها</h2>
+              <HelpButtons section="data" />
+            </div>
+                <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+                  {source === "generate"
+                    ? "داده‌ها در مرحله «تشخیص» تولید می‌شوند؛ اینجا می‌توانید داده موجود را ویرایش یا ایمپورت/اکسپورت کنید."
+                    : "فایل اکسل داده‌های واقعی را وارد کنید یا از قالب داده استفاده کنید."}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (f) handleImport(f);
+                    e.target.value = "";
+                  }}
+                />
+                <button type="button" className={btnSecondary} onClick={downloadTemplate}>
+                  <FileSpreadsheet className="h-4 w-4" />
+                  دانلود قالب داده
+                </button>
+                <button type="button" className={btnSecondary} onClick={() => fileRef.current?.click()}>
+                  <Upload className="h-4 w-4" />
+                  ایمپورت اکسل
+                </button>
+                <button type="button" className={btnSecondary} onClick={exportExcel}>
+                  <Download className="h-4 w-4" />
+                  اکسپورت اکسل
+                </button>
+              </div>
+            </div>
+
+            {rows.length > 0 ? (
+              <div className="tool-table-wrap tool-table-scroll mt-4">
+                <table className="tool-table" style={{ minWidth: Math.max(720, columns.length * 90) }}>
+                  <thead>
+                    <tr>
+                      <th>ردیف</th>
+                      {columns.map((c, i) => (
+                        <th key={i}>{c}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r, i) => (
+                      <tr key={i}>
+                        <td className="row-index">{i + 1}</td>
+                        {r.map((v, j) => (
+                          <td key={j}>
+                            <Cell value={v} onCommit={(nv) => updateCell(i, j, nv)} />
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
+                هنوز داده‌ای وجود ندارد؛ در مرحله «تشخیص» داده تولید کنید یا فایل اکسل وارد کنید.
+              </div>
+            )}
+          </section>
+        )}
+
         {/* ============ مرحله ۷: بررسی پیش‌فرض‌ها ============ */}
         {currentStep === stepIdx("assumptions") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[7]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">بررسی پیش‌فرض‌های تحلیل</h2>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">بررسی پیش‌فرض‌های تحلیل</h2>
+              <HelpButtons section="assumptions" />
+            </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               شش پیش‌فرض استاندارد مدل معادلات ساختاری روی داده فعلی محاسبه می‌شود.
             </p>
@@ -2463,7 +2616,7 @@ function SemTool() {
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
-                        <tr><th>گره</th><th>کجی</th><th>کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
+                        <tr><th>متغیر / زیرمقیاس</th><th>کجی</th><th>کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
                       </thead>
                       <tbody>
                         {analysis.normals.map((x, i) => (
@@ -2518,7 +2671,7 @@ function SemTool() {
                     <table className="tool-table">
                       <thead>
                         <tr>
-                          <th>گره</th>
+                          <th>متغیر / زیرمقیاس</th>
                           {modelNodes.map((nd, i) => (
                             <th key={i}>{nd.label}</th>
                           ))}
@@ -2558,7 +2711,7 @@ function SemTool() {
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
-                        <tr><th>گره وابسته</th><th>پیش‌بین‌ها</th><th>VIF</th><th>تلورانس</th><th>دوربین-واتسون</th><th>نتیجه</th></tr>
+                        <tr><th>متغیر وابسته</th><th>پیش‌بین‌ها</th><th>VIF</th><th>تلورانس</th><th>دوربین-واتسون</th><th>نتیجه</th></tr>
                       </thead>
                       <tbody>
                         {modelNodes.map((nd) => {
@@ -2601,7 +2754,10 @@ function SemTool() {
         {/* ============ مرحله ۸: یافته‌های توصیفی (درختی) ============ */}
         {currentStep === stepIdx("descriptive") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های توصیفی</h2>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های توصیفی</h2>
+              <HelpButtons section="descriptive" />
+            </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               آمار توصیفی به‌صورت درخت‌واری: نمره کل هر متغیر و زیرمقیاس‌های آن در زیرش.
             </p>
@@ -2614,7 +2770,7 @@ function SemTool() {
                 <table className="tool-table">
                   <thead>
                     <tr>
-                      <th>گره</th>
+                      <th>متغیر / زیرمقیاس</th>
                       <th>n</th>
                       <th>میانگین</th>
                       <th>انحراف معیار</th>
@@ -2649,7 +2805,10 @@ function SemTool() {
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">دیاگرام مدل</h2>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">دیاگرام مدل</h2>
+              <HelpButtons section="diagram" />
+            </div>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
                   نمایش گرافیکی مدل با ضرایب مسیر (β) و R² گره‌ها.
                 </p>
@@ -2668,7 +2827,10 @@ function SemTool() {
         {/* ============ مرحله ۱۰: یافته‌های استنباطی ============ */}
         {currentStep === stepIdx("inferential") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[2]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های استنباطی</h2>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های استنباطی</h2>
+              <HelpButtons section="inferential" />
+            </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               ابتدا شاخص‌های برازش مدل، سپس ضرایب مسیر، اثرات و R².
             </p>
@@ -2795,15 +2957,14 @@ function SemTool() {
                 </div>
 
                 <div>
-                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">R² گره‌های درون‌زای مدل</h3>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">R² متغیرهای درون‌زای مدل</h3>
                   <p className={tinyCls}>
-                    «گره» یعنی هر واحد واردشده در مدل: متغیر جمع‌پذیر با نمره کل یک گره است، و در متغیرهای غیرجمع‌پذیر هر
-                    زیرمقیاس مستقل یک گره جدا. R² هر گره یعنی درصد واریانس آن که توسط پیش‌بین‌هایش تبیین می‌شود.
+                    R² هر متغیر درون‌زا یعنی درصد واریانس آن که توسط پیش‌بین‌هایش تبیین می‌شود (برای متغیرهای غیرجمع‌پذیر، هر زیرمقیاس جداگانه).
                   </p>
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
-                        <tr><th>گره</th><th>R²</th><th>نتیجه</th></tr>
+                        <tr><th>متغیر / زیرمقیاس</th><th>R²</th><th>نتیجه</th></tr>
                       </thead>
                       <tbody>
                         {modelNodes.map((nd) =>
@@ -2893,7 +3054,10 @@ function SemTool() {
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[3]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">محاسبه آلفای کرونباخ</h2>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">محاسبه آلفای کرونباخ</h2>
+              <HelpButtons section="alpha" />
+            </div>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
                   این مرحله اختیاری است؛ اگر نیاز ندارید، آن را خاموش کنید تا از مراحل حذف شود.
                 </p>
@@ -2979,7 +3143,10 @@ function SemTool() {
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">نگارش گزارش</h2>
+                <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">نگارش گزارش</h2>
+              <HelpButtons section="report" />
+            </div>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
                   گزارش کامل تحلیل به‌صورت متن آماده. می‌توانید کپی کنید یا docx / txt دانلود کنید.
                 </p>
@@ -3014,7 +3181,10 @@ function SemTool() {
         {/* ============ مرحله ۱۳: ذخیره ============ */}
         {currentStep === stepIdx("save") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">ذخیره</h2>
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">ذخیره</h2>
+              <HelpButtons section="save" />
+            </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               پروژه به‌صورت خودکار در مرورگر ذخیره می‌شود. برای انتقال یا بکاپ، فایل بکاپ بگیرید؛ خروجی‌های نهایی را هم
               می‌توانید از اینجا دانلود کنید.
@@ -3107,7 +3277,102 @@ function SemTool() {
                 بستن
               </button>
             </div>
-            <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} large />
+            <ZoomableDiagram>
+              <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} />
+            </ZoomableDiagram>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- مودال تشخیص (تصمیم تولید/تحلیل) ---------- */}
+      {diagnoseModal && (
+        <div
+          className="fixed inset-0 z-[72] flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setDiagnoseModal(false)}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl border border-stone-200 bg-white p-6 shadow-2xl dark:border-stone-700 dark:bg-slate-800"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-black text-stone-900 dark:text-stone-100">مرحله تشخیص — تصمیم بگیرید</h3>
+
+            {/* گزارش وضعیت */}
+            <div className="mt-3 rounded-xl bg-stone-50 p-4 text-[13px] leading-6 text-stone-700 dark:bg-slate-900 dark:text-stone-300">
+              {rows.length ? (
+                <>
+                  <p>
+                    <b>وضعیت داده:</b> {rows.length} ردیف × {columns.length} ستون
+                    {source === "generate" ? ` (n=${n})` : " (واردشده)"}
+                  </p>
+                  <p>
+                    <b>وضعیت تحلیل:</b>{" "}
+                    {analysisValid
+                      ? analysis.sem.fit.valid
+                        ? `اجرا شده — CFI=${fmt(analysis.sem.fit.cfi)}، RMSEA=${fmt(analysis.sem.fit.rmsea)}`
+                        : "اجرا شده (برازش نامعتبر)"
+                      : "اجرا نشده"}
+                  </p>
+                  {analysisValid && !inputsChangedSinceAnalysis && (
+                    <p className="text-emerald-700 dark:text-emerald-300">✓ نتایج با داده فعلی هماهنگ است.</p>
+                  )}
+                </>
+              ) : (
+                <p>
+                  <b>وضعیت داده:</b> هنوز داده‌ای تولید/وارد نشده است.
+                </p>
+              )}
+              {inputsChangedSinceAnalysis && analysisValid && (
+                <p className="mt-1 rounded-lg bg-amber-50 p-2 font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                  ⚠ در بخش‌های قبل تغییری ایجاد شده است؛ برای اطمینان، تحلیل را دوباره اجرا کنید یا با نتایج قبلی ادامه
+                  دهید.
+                </p>
+              )}
+            </div>
+
+            <div className="mt-4 grid gap-2">
+              {source === "generate" && (
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-extrabold text-white shadow transition hover:bg-indigo-500"
+                  onClick={() => {
+                    setDiagnoseModal(false);
+                    generate();
+                  }}
+                >
+                  <Play className="h-4 w-4" />
+                  {rows.length ? "تولید مجدد داده و تحلیل" : "تولید داده و تحلیل"}
+                </button>
+              )}
+              <button
+                type="button"
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-extrabold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-300"
+                onClick={() => {
+                  setDiagnoseModal(false);
+                  analyze(undefined, undefined, undefined, true, true);
+                }}
+              >
+                <RefreshCw className="h-4 w-4" />
+                {analysisValid ? "اجرای مجدد تحلیل" : "اجرای تحلیل"}
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm font-extrabold text-stone-600 transition hover:bg-stone-100 dark:border-stone-600 dark:bg-slate-900 dark:text-stone-300"
+                onClick={() => {
+                  setDiagnoseModal(false);
+                  markDone("diagnose");
+                  setActiveStep(Math.min(stepIdx("diagnose") + 1, steps.length - 1));
+                }}
+              >
+                ادامه بدون تغییر داده‌ها
+              </button>
+            </div>
+            <div className="mt-3 flex justify-end">
+              <button type="button" className="text-[12px] font-bold text-stone-400 hover:text-stone-600" onClick={() => setDiagnoseModal(false)}>
+                انصراف
+              </button>
+            </div>
           </div>
         </div>
       )}

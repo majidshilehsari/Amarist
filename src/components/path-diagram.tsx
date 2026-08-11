@@ -159,8 +159,8 @@ export default function PathDiagram({
   return (
     <div dir="ltr" className="w-full overflow-auto">
       <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className={`h-auto ${large ? "w-full" : "w-full min-w-[560px]"}`}
+        width={W}
+        height={H}
         role="img"
         aria-label="دیاگرام مدل"
       >

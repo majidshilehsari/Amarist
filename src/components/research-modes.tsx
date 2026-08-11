@@ -4,11 +4,37 @@ import {
   HeartPulse,
   Network,
   TrendingUp,
+  type LucideIcon,
 } from "lucide-react";
-import SectionHeading from "./section-heading";
 import FollowUpToggle from "./follow-up-toggle";
 
-const categories = [
+type Mode = {
+  icon: LucideIcon;
+  title: string;
+  description: string;
+  /** حالت‌های اثربخشی: تیک «مرحله پیگیری» (کوواریانس / واریانس اندازه‌گیری مکرر) */
+  followUp?: boolean;
+  /** حالت‌های مدل‌سازی: برچسب‌های روش‌ها */
+  tags?: string[];
+};
+
+type Category = {
+  id: string;
+  icon: LucideIcon;
+  title: string;
+  subtitle: string;
+  description: string;
+  accent: {
+    panelBorder: string;
+    panelBg: string;
+    badge: string;
+    cardRing: string;
+    iconBg: string;
+  };
+  modes: Mode[];
+};
+
+const categories: Category[] = [
   {
     id: "clinical",
     icon: HeartPulse,
@@ -29,12 +55,14 @@ const categories = [
         title: "اثربخشی یک درمان",
         description:
           "بررسی اثر یک مداخله روی یک گروه؛ مقایسه‌ی پیش و پس از مداخله، یا گروه مداخله با گروه کنترل.",
+        followUp: true,
       },
       {
         icon: GitCompareArrows,
         title: "مقایسه اثربخشی دو درمان",
         description:
           "مقایسه‌ی اثر دو مداخله در دو گروه مستقل؛ مشخص کردن اینکه کدام درمان مؤثرتر است.",
+        followUp: true,
       },
     ],
   },
@@ -73,18 +101,9 @@ const categories = [
 
 export default function ResearchModes() {
   return (
-    <section
-      id="modes"
-      className="scroll-mt-20 bg-white py-16 lg:py-24"
-    >
+    <section id="modes" className="scroll-mt-20 bg-white py-10 lg:py-14">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
-        <SectionHeading
-          eyebrow="در قلب آماریست"
-          title="چهار حالت پژوهشی"
-          description="همه‌ی ابزارهای آماریست حول چهار حالت پژوهشی می‌چرخند؛ برای هر حالت هم می‌توانید داده‌ی واقعی تحلیل کنید، هم داده‌ی تمرینی هدفمند تولید کنید."
-        />
-
-        <div className="mt-14 grid gap-8 lg:grid-cols-2">
+        <div className="grid gap-8 lg:grid-cols-2">
           {categories.map((category) => (
             <div
               key={category.id}
@@ -136,9 +155,11 @@ export default function ResearchModes() {
                     <p className="mt-2 flex-1 text-[13px] leading-6 text-stone-600">
                       {mode.description}
                     </p>
-                    {"tags" in mode && mode.tags ? (
+                    {mode.followUp ? (
+                      <FollowUpToggle />
+                    ) : (
                       <div className="mt-4 flex flex-wrap gap-1.5">
-                        {mode.tags.map((tag) => (
+                        {mode.tags?.map((tag) => (
                           <span
                             key={tag}
                             className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600"
@@ -147,8 +168,6 @@ export default function ResearchModes() {
                           </span>
                         ))}
                       </div>
-                    ) : (
-                      <FollowUpToggle />
                     )}
                   </div>
                 ))}

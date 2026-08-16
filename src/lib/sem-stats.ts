@@ -605,12 +605,14 @@ export function bootstrapIndirectEffects(
 
   const summarize = (effects: number[]): { lo: number; hi: number; p: number } => {
     effects.sort((a, b) => a - b);
-    const lo = effects[Math.max(0, Math.floor(nn * 0.025))];
-    const hi = effects[Math.min(nn - 1, Math.floor(nn * 0.975))];
+    const count = effects.length;
+    if (!count) return { lo: NaN, hi: NaN, p: NaN };
+    const lo = effects[Math.max(0, Math.floor((count - 1) * 0.025))];
+    const hi = effects[Math.min(count - 1, Math.ceil((count - 1) * 0.975))];
     const p = clamp(
       2 * Math.min(
-        effects.filter((x) => x <= 0).length / nn,
-        effects.filter((x) => x >= 0).length / nn
+        effects.filter((x) => x <= 0).length / count,
+        effects.filter((x) => x >= 0).length / count
       ),
       0,
       1

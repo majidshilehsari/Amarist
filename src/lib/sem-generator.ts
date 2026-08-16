@@ -349,8 +349,12 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     if (sem.fit.valid) {
       margins.push(sem.fit.cfi - constraints.cfiMin);
       margins.push(constraints.rmseaMax - sem.fit.rmsea);
-      margins.push(constraints.chi2dfMax - sem.fit.chi2df);
+      // در مدل اشباع‌شده df=0 است و χ²/df تعریف نمی‌شود؛ این معیار نباید تلاش را با NaN رد کند.
+      if (sem.fit.df > 0) margins.push(constraints.chi2dfMax - sem.fit.chi2df);
       margins.push(constraints.srmrMax - sem.fit.srmr);
+    } else {
+      // برازش غیرقابل‌محاسبه هرگز نباید صرفاً به‌دلیل نبودن حاشیه برازش پذیرفته شود.
+      margins.push(Number.NEGATIVE_INFINITY);
     }
 
     if (constraints.enforceNormality && constraints.outlierPct === 0) {

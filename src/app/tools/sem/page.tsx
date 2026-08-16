@@ -1446,6 +1446,11 @@ function SemTool() {
   const [analysisInputs, setAnalysisInputs] = useState<string>("");
   const fileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
+  const bootstrapWorkerRef = useRef<Worker | null>(null);
+
+  useEffect(() => {
+    return () => bootstrapWorkerRef.current?.terminate();
+  }, []);
 
   // ---------- گره‌ها و فلش‌ها ----------
   const nodes = useMemo(() => buildModelNodes(vars), [vars]);
@@ -1620,6 +1625,9 @@ function SemTool() {
 
   // ---------- اعمال/ذخیره پروژه ----------
   const applyProjectData = useCallback((data: ProjectData) => {
+    bootstrapWorkerRef.current?.terminate();
+    bootstrapWorkerRef.current = null;
+    setBootBusy(false);
     setSource(data.source);
     setVars(data.vars);
     setInactiveArrowIds(new Set(data.inactiveArrowIds ?? []));
@@ -1741,6 +1749,9 @@ function SemTool() {
   const switchProject = (id: string) => {
     const p = projects.find((x) => x.id === id);
     if (!p) return;
+    bootstrapWorkerRef.current?.terminate();
+    bootstrapWorkerRef.current = null;
+    setBootBusy(false);
     setProjectId(id);
     applyProjectData(p.data);
     setActiveStep(0);
@@ -1919,12 +1930,83 @@ function SemTool() {
         });
       }
       const bootN = nBoot ?? constraints.bootSamples;
+      const useMl = Object.keys(measurements).length > 0;
+      bootstrapWorkerRef.current?.terminate();
+      bootstrapWorkerRef.current = null;
       setBootBusy(true);
       if (!silent) setStatus({ text: `در حال اجرای بوت‌استرپ با ${bootN} نمونه...`, kind: "" });
+
+      const sem = estimateSem(
+        modelNodes,
+        modelArrows,
+        comps,
+        useMl ? measurements : undefined,
+        useMl ? "ml" : "approx"
+      );
+      const finish = (
+        raw: { fromVar: number; toVar: number; viaVar: number | null; indirect: number; lo: number; hi: number; p: number }[]
+      ) => {
+        const directOf = (fromVar: number, toVar: number) =>
+          sem.paths
+            .filter((path) => {
+              const fromNode = modelNodes.find((node) => node.nodeId === path.from);
+              const toNode = modelNodes.find((node) => node.nodeId === path.to);
+              return fromNode?.varId === fromVar && toNode?.varId === toVar;
+            })
+            .reduce((sum, path) => sum + (Number.isFinite(path.std) ? path.std : 0), 0);
+        const results: BootResult[] = raw.map((result) => ({
+          fromVar: result.fromVar,
+          toVar: result.toVar,
+          viaVar: result.viaVar,
+          direct: result.viaVar === null ? directOf(result.fromVar, result.toVar) : 0,
+          indirect: result.indirect,
+          lo: result.lo,
+          hi: result.hi,
+          p: result.p,
+          total: result.viaVar === null ? directOf(result.fromVar, result.toVar) + result.indirect : NaN,
+        }));
+        setBootResults(results);
+        setBootBusy(false);
+        if (!silent) setStatus({ text: `بوت‌استرپ با ${bootN} نمونه تکمیل شد.`, kind: "ok" });
+      };
+      const fail = (message: string) => {
+        setBootBusy(false);
+        setStatus({ text: message, kind: "err" });
+        if (!silent) setModal({ ok: false, lines: [message] });
+      };
+
+      if (useMl && typeof Worker !== "undefined") {
+        try {
+          const worker = new Worker(new URL("../../../workers/sem-bootstrap.worker.ts", import.meta.url), { type: "module" });
+          bootstrapWorkerRef.current = worker;
+          worker.onmessage = (event: MessageEvent<{ ok: boolean; results?: Parameters<typeof finish>[0]; error?: string }>) => {
+            if (bootstrapWorkerRef.current !== worker) return;
+            worker.terminate();
+            bootstrapWorkerRef.current = null;
+            if (event.data.ok && event.data.results) finish(event.data.results);
+            else fail(event.data.error ?? "بوت‌استرپ ML ناموفق بود.");
+          };
+          worker.onerror = (event) => {
+            if (bootstrapWorkerRef.current !== worker) return;
+            worker.terminate();
+            bootstrapWorkerRef.current = null;
+            fail(event.message || "خطا در Worker بوت‌استرپ ML.");
+          };
+          worker.postMessage({
+            nodes: modelNodes,
+            arrows: modelArrows,
+            nodeColumns: comps,
+            measurementColumns: measurements,
+            samples: bootN,
+          });
+          return;
+        } catch {
+          // اگر Worker در مرورگر پشتیبانی نشود، مسیر همگام فقط با درخواست صریح کاربر اجرا می‌شود.
+        }
+      }
+
       setTimeout(() => {
         try {
-          const useMl = Object.keys(measurements).length > 0;
-          const sem = estimateSem(modelNodes, modelArrows, comps, useMl ? measurements : undefined, useMl ? "ml" : "approx");
           const raw = bootstrapIndirectEffects(
             modelNodes,
             modelArrows,
@@ -1933,36 +2015,15 @@ function SemTool() {
             useMl ? measurements : undefined,
             useMl ? "ml" : "approx"
           );
-          const directOf = (fromVar: number, toVar: number) =>
-            sem.paths
-              .filter((path) => {
-                const fromNode = modelNodes.find((node) => node.nodeId === path.from);
-                const toNode = modelNodes.find((node) => node.nodeId === path.to);
-                return fromNode?.varId === fromVar && toNode?.varId === toVar;
-              })
-              .reduce((sum, path) => sum + (Number.isFinite(path.std) ? path.std : 0), 0);
-          const res: BootResult[] = raw.map((b) => ({
-            fromVar: b.fromVar,
-            toVar: b.toVar,
-            viaVar: b.viaVar,
-            direct: b.viaVar === null ? directOf(b.fromVar, b.toVar) : 0,
-            indirect: b.indirect,
-            lo: b.lo,
-            hi: b.hi,
-            p: b.p,
-            total: b.viaVar === null ? directOf(b.fromVar, b.toVar) + b.indirect : NaN,
-          }));
-          setBootResults(res);
-          setBootBusy(false);
-          if (!silent) setStatus({ text: `بوت‌استرپ با ${bootN} نمونه تکمیل شد.`, kind: "ok" });
-        } catch (err) {
-          setBootBusy(false);
-          if (!silent) setStatus({ text: (err as Error).message, kind: "err" });
+          finish(raw);
+        } catch (error) {
+          fail((error as Error).message);
         }
       }, 30);
     },
     [analysis, constraints.bootSamples, modelNodes, modelArrows]
   );
+
 
   // ---------- تحلیل ----------
   const analyze = useCallback(
@@ -1970,7 +2031,7 @@ function SemTool() {
       rowsArg?: (number | null)[][],
       mapArg?: Record<number, (number | null)[]>,
       colsArg?: string[],
-      boot = true,
+      boot = false,
       openModal = false
     ) => {
       const r = rowsArg ?? rows;
@@ -2101,7 +2162,7 @@ function SemTool() {
       setAnswerKey(out.answerKey);
       setStatus({ text: `داده تولید شد (${out.answerKey.attempts} تلاش).`, kind: "ok" });
       const cm = autoMap(out.columns, vars);
-      analyze(out.rows, cm, out.columns, true, true);
+      analyze(out.rows, cm, out.columns, false, true);
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
       setModal({ ok: false, lines: [(err as Error).message] });
@@ -3640,7 +3701,7 @@ function SemTool() {
                 type="button"
                 className={btnPrimary}
                 disabled={!rows.length}
-                onClick={() => analyze(undefined, undefined, undefined, true, true)}
+                onClick={() => analyze(undefined, undefined, undefined, false, true)}
               >
                 <RefreshCw className="h-4 w-4" />
                 {analysisValid ? "اجرای مجدد تحلیل" : "اجرای تحلیل"}

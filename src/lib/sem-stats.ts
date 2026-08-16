@@ -2,6 +2,7 @@
 // آماره‌ها و تحلیل‌های مدل معادلات ساختاری (SEM) و تحلیل مسیر — آماریست
 // ============================================================
 
+import { bootstrapSemMlIndirect, estimateSemMl, type MlLoadingEstimate } from "./sem-ml";
 import {
   mean,
   sampleVariance,
@@ -48,9 +49,9 @@ export function kurtosis(values: number[]): number {
   const m = mean(finite);
   const sd = sampleStd(finite);
   if (!Number.isFinite(sd) || sd <= 0) return NaN;
-  const m4 = finite.reduce((s, v) => s + Math.pow((v - m) / sd, 4), 0) / n;
+  const standardizedFourthMomentSum = finite.reduce((s, v) => s + Math.pow((v - m) / sd, 4), 0);
   return (
-    ((n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3))) * m4 -
+    ((n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3))) * standardizedFourthMomentSum -
     (3 * (n - 1) * (n - 1)) / ((n - 2) * (n - 3))
   );
 }
@@ -226,9 +227,10 @@ export function mardiaTest(cols: number[][]) {
   // ضریب کشیدگی مردیا برابر میانگین مربع فاصله‌های ماهالانوبیس است.
   const b2p = mean(m.d2.map((distance) => distance * distance));
   const expected = p * (p + 2);
+  const excess = b2p - expected;
   const se = Math.sqrt((8 * p * (p + 2)) / n);
-  const cr = (b2p - expected) / se;
-  return { valid: true, kurtosis: b2p, cr, message: "" };
+  const cr = excess / se;
+  return { valid: true, kurtosis: excess, cr, message: "" };
 }
 
 // ---------- رگرسیون ----------
@@ -370,6 +372,13 @@ export type SemFit = {
   pcfi: number;
   ifi: number;
   gfi: number;
+  nfi?: number;
+  rfi?: number;
+  rmr?: number;
+  agfi?: number;
+  pgfi?: number;
+  pClose?: number;
+  npar?: number;
   message?: string;
 };
 
@@ -402,6 +411,8 @@ export type SemResults = {
   fit: SemFit;
   effects: SemEffect[];
   warnings: string[];
+  estimator?: "composite" | "ml";
+  measurementLoadings?: MlLoadingEstimate[];
 };
 
 const ROLE_ORDER_NODE: Record<Role, number> = { exogenous: 0, mediator: 1, outcome: 2 };
@@ -671,7 +682,8 @@ export function estimateSem(
   nodes: ModelNode[],
   arrows: ModelArrow[],
   nodeCols: number[][],
-  measurementCols?: SemMeasurementColumns
+  measurementCols?: SemMeasurementColumns,
+  estimator: "approx" | "ml" = "approx"
 ): SemResults {
   const p = nodes.length;
   const ordered = [...nodes]
@@ -858,7 +870,41 @@ export function estimateSem(
     }
   }
 
-  if (measurementCols) {
+  let usedEstimator: "composite" | "ml" = "composite";
+  let mlLoadings: MlLoadingEstimate[] | undefined;
+  if (measurementCols && estimator === "ml") {
+    const ml = estimateSemMl(nodes, active, nodeCols, measurementCols, { computeStandardErrors: true });
+    if (ml.valid) {
+      usedEstimator = "ml";
+      fit = ml.fit;
+      mlLoadings = ml.loadings;
+      pathResults.splice(
+        0,
+        pathResults.length,
+        ...ml.paths.map((path) => ({
+          from: path.from,
+          to: path.to,
+          b: path.b,
+          se: path.se,
+          t: path.cr,
+          p: path.p,
+          std: path.std,
+        }))
+      );
+      Object.keys(r2).forEach((key) => delete r2[Number(key)]);
+      Object.assign(r2, ml.r2);
+      ml.paths.forEach((path) => {
+        const from = pos.get(path.from);
+        const to = pos.get(path.to);
+        if (from != null && to != null) B[to][from] = path.b;
+      });
+      warnings.push(ml.fit.message ?? "برآورد هم‌زمان ML انجام شد.");
+    } else {
+      warnings.push(`برآورد ML همگرا نشد؛ خروجی مرکب نمایش داده شد: ${ml.message ?? "علت نامشخص"}`);
+      const measuredFit = measurementModelFit(nodes, active, nodeCols, measurementCols, pathResults, r2);
+      if (measuredFit) fit = measuredFit;
+    }
+  } else if (measurementCols) {
     const measuredFit = measurementModelFit(nodes, active, nodeCols, measurementCols, pathResults, r2);
     if (measuredFit) fit = measuredFit;
   }
@@ -890,7 +936,18 @@ export function estimateSem(
     }
   }
 
-  return { ordered, paths: pathResults, r2, dw, vifs, fit, effects, warnings };
+  return {
+    ordered,
+    paths: pathResults,
+    r2,
+    dw,
+    vifs,
+    fit,
+    effects,
+    warnings,
+    estimator: usedEstimator,
+    measurementLoadings: mlLoadings,
+  };
 }
 
 // ---------- بوت‌استرپ اثر غیرمستقیم (مسیرهای جداگانه + کل) ----------
@@ -911,8 +968,22 @@ export function bootstrapIndirectEffects(
   nodes: ModelNode[],
   arrows: ModelArrow[],
   nodeCols: number[][],
-  nBoot: number
+  nBoot: number,
+  measurementCols?: SemMeasurementColumns,
+  estimator: "approx" | "ml" = "approx"
 ): IndirectBootRow[] {
+  if (measurementCols && estimator === "ml") {
+    return bootstrapSemMlIndirect(nodes, arrows, nodeCols, measurementCols, nBoot).map((result) => ({
+      fromVar: result.fromVar,
+      toVar: result.toVar,
+      viaVar: result.viaVar,
+      indirect: result.indirect,
+      lo: result.lo,
+      hi: result.hi,
+      p: result.p,
+      sig: result.sig,
+    }));
+  }
   const n = nodeCols[0]?.length ?? 0;
   const fullRows: number[][] = [];
   for (let i = 0; i < n; i++) {

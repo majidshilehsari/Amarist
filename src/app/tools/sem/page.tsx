@@ -97,9 +97,9 @@ const fitConstraintRows: {
   { key: "cminDf", label: "CMIN/df", scientificRange: "1 تا 3 مطلوب", interpretation: "کمتر از 3 مطلوب و تا 5 در برخی منابع قابل قبول است.", step: 0.1 },
   { key: "rmsea", label: "RMSEA", scientificRange: "≤ 0.08 قابل قبول", interpretation: "کمتر از 0.05 عالی و 0.05 تا 0.08 قابل قبول است.", step: 0.01 },
   { key: "rmseaCiHigh", label: "حد بالای CI90% RMSEA", scientificRange: "≤ 0.10", interpretation: "حد بالای فاصله اطمینان 90٪ بهتر است از 0.10 بیشتر نباشد.", step: 0.01 },
-  { key: "pnfi", label: "PNFI", scientificRange: "≥ 0.50", interpretation: "بالاتر از 0.50 معمولاً قابل قبول تلقی می‌شود.", step: 0.01 },
+  { key: "pnfi", label: "PNFI", scientificRange: "وابسته به PRATIO", interpretation: "حد ثابت عمومی ندارد؛ با درجه آزادی و پیچیدگی مدل تفسیر می‌شود.", step: 0.01 },
   { key: "cfi", label: "CFI", scientificRange: "≥ 0.90 قابل قبول", interpretation: "بالاتر از 0.95 نشان‌دهنده برازش بسیار مطلوب است.", step: 0.01 },
-  { key: "pcfi", label: "PCFI", scientificRange: "≥ 0.50", interpretation: "بالاتر از 0.50 معمولاً قابل قبول است.", step: 0.01 },
+  { key: "pcfi", label: "PCFI", scientificRange: "وابسته به PRATIO", interpretation: "حد ثابت عمومی ندارد؛ سقف آن با نسبت درجه آزادی محدود می‌شود.", step: 0.01 },
   { key: "ifi", label: "IFI", scientificRange: "≥ 0.90", interpretation: "بالاتر از 0.90 مطلوب و بالاتر از 0.95 بسیار مطلوب است.", step: 0.01 },
   { key: "gfi", label: "GFI", scientificRange: "≥ 0.90", interpretation: "بالاتر از 0.90 نشان‌دهنده برازش مطلوب است.", step: 0.01 },
   { key: "srmr", label: "SRMR", scientificRange: "≤ 0.08", interpretation: "شاخص تکمیلی؛ کمتر از 0.08 قابل قبول است.", step: 0.01 },
@@ -150,7 +150,7 @@ type FitReportRow = { index: string; value: string; criterion: string; interpret
 function fitReportRows(fit: SemResults["fit"]): FitReportRow[] {
   const cminPass = Number.isFinite(fit.chi2df) && fit.chi2df >= 1 && fit.chi2df <= 3;
   const rmseaPass = fit.rmsea <= 0.08 && (!Number.isFinite(fit.rmseaHigh) || fit.rmseaHigh <= 0.1);
-  return [
+  const rows: FitReportRow[] = [
     { index: "χ²", value: fmt(fit.chi2), criterion: "آستانه ثابت ندارد", interpretation: fit.pValue > 0.05 ? "قابل قبول" : "با احتیاط تفسیر شود", pass: null },
     { index: "Df", value: String(fit.df), criterion: "> 0 برای مدل قابل‌آزمون", interpretation: fit.df > 0 ? "مطلوب" : "مدل اشباع", pass: fit.df > 0 },
     { index: "P-value", value: fmtP(fit.pValue), criterion: "> 0.05 مطلوب", interpretation: fit.pValue > 0.05 ? "مطلوب" : "نامطلوب", pass: fit.pValue > 0.05 },
@@ -162,14 +162,21 @@ function fitReportRows(fit: SemResults["fit"]): FitReportRow[] {
       interpretation: rmseaPass ? (fit.rmsea <= 0.05 ? "بسیار مطلوب" : "مطلوب") : "نامطلوب",
       pass: rmseaPass,
     },
-    { index: "PNFI", value: fmt(fit.pnfi), criterion: "≥ 0.50", interpretation: fit.pnfi >= 0.5 ? "مطلوب" : "نامطلوب", pass: fit.pnfi >= 0.5 },
+    { index: "PNFI", value: fmt(fit.pnfi), criterion: "بالاتر بهتر؛ وابسته به PRATIO", interpretation: "با پیچیدگی و df مدل تفسیر شود", pass: null },
     { index: "CFI", value: fmt(fit.cfi), criterion: "≥ 0.90؛ عالی ≥ 0.95", interpretation: fit.cfi >= 0.95 ? "بسیار مطلوب" : fit.cfi >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.cfi >= 0.9 },
-    { index: "PCFI", value: fmt(fit.pcfi), criterion: "≥ 0.50", interpretation: fit.pcfi >= 0.5 ? "مطلوب" : "نامطلوب", pass: fit.pcfi >= 0.5 },
+    { index: "PCFI", value: fmt(fit.pcfi), criterion: "بالاتر بهتر؛ وابسته به PRATIO", interpretation: "با پیچیدگی و df مدل تفسیر شود", pass: null },
     { index: "IFI", value: fmt(fit.ifi), criterion: "≥ 0.90", interpretation: fit.ifi >= 0.95 ? "بسیار مطلوب" : fit.ifi >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.ifi >= 0.9 },
     { index: "GFI", value: fmt(fit.gfi), criterion: "≥ 0.90", interpretation: fit.gfi >= 0.95 ? "بسیار مطلوب" : fit.gfi >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.gfi >= 0.9 },
     { index: "TLI", value: fmt(fit.tli), criterion: "≥ 0.90", interpretation: fit.tli >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.tli >= 0.9 },
     { index: "SRMR", value: fmt(fit.srmr), criterion: "≤ 0.08", interpretation: fit.srmr <= 0.08 ? "مطلوب" : "نامطلوب", pass: fit.srmr <= 0.08 },
   ];
+  if (Number.isFinite(fit.nfi)) rows.push({ index: "NFI", value: fmt(fit.nfi!), criterion: "≥ 0.90", interpretation: fit.nfi! >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.nfi! >= 0.9 });
+  if (Number.isFinite(fit.rfi)) rows.push({ index: "RFI", value: fmt(fit.rfi!), criterion: "≥ 0.90", interpretation: fit.rfi! >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.rfi! >= 0.9 });
+  if (Number.isFinite(fit.rmr)) rows.push({ index: "RMR", value: fmt(fit.rmr!), criterion: "کمتر بهتر؛ وابسته به مقیاس", interpretation: "همراه SRMR تفسیر شود", pass: null });
+  if (Number.isFinite(fit.agfi)) rows.push({ index: "AGFI", value: fmt(fit.agfi!), criterion: "≥ 0.90", interpretation: fit.agfi! >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.agfi! >= 0.9 });
+  if (Number.isFinite(fit.pgfi)) rows.push({ index: "PGFI", value: fmt(fit.pgfi!), criterion: "بالاتر بهتر", interpretation: "شاخص مقتصد و وابسته به df", pass: null });
+  if (Number.isFinite(fit.pClose)) rows.push({ index: "PCLOSE", value: fmtP(fit.pClose!), criterion: "> 0.05 برای برازش نزدیک", interpretation: fit.pClose! > 0.05 ? "مطلوب" : "نامطلوب", pass: fit.pClose! > 0.05 });
+  return rows;
 }
 
 function AssumptionNote({ condition, pass }: { condition: string; pass: boolean }) {
@@ -504,7 +511,7 @@ type Analysis = {
   maha: ReturnType<typeof mahalanobisDistances>;
   mardia: ReturnType<typeof mardiaTest>;
   missing: { col: string; count: number }[];
-  normals: { name: string; skew: number; kurt: number }[];
+  normals: { name: string; skew: number; skewCr: number; kurt: number; kurtCr: number }[];
   meas: { varId: number; name: string; alpha: number; loadings: number[]; subNames: string[] }[];
 };
 
@@ -990,12 +997,12 @@ function buildReportText(
   L.push(maha.valid ? `  تعداد داده پرت: ${maha.outliers.length}` : `  ${maha.message}`);
   L.push("");
   L.push("۳) نرمال بودن تک‌متغیری (کلاین: |کجی|<3 و |کشیدگی|<10):");
-  normals.forEach((x) => L.push(`  ${x.name}: کجی=${fmt(x.skew)} | کشیدگی=${fmt(x.kurt)}`));
+  normals.forEach((x) => L.push(`  ${x.name}: کجی=${fmt(x.skew)} | CR کجی=${fmt(x.skewCr)} | کشیدگی=${fmt(x.kurt)} | CR کشیدگی=${fmt(x.kurtCr)}`));
   L.push("");
   L.push("۴) نرمال بودن چندمتغیری (مردیا):");
   L.push(
     mardia.valid
-      ? `  ضریب کشیدگی مردیا=${fmt(mardia.kurtosis)} | نسبت بحرانی=${fmt(mardia.cr)} (بلانچ: کمتر از 5)`
+      ? `  ضریب کشیدگی مردیا=${fmt(mardia.kurtosis)} | نسبت بحرانی=${fmt(mardia.cr)} (بلانچ: قدرمطلق کمتر از 5)`
       : `  ${mardia.message}`
   );
   L.push("");
@@ -1220,11 +1227,13 @@ function buildDocxReport(
   children.push(docH("۳) نرمال بودن تک‌متغیری (کجی و کشیدگی)"));
   children.push(
     docTable(
-      ["گره", "کجی", "کشیدگی", "نتیجه کجی", "نتیجه کشیدگی"],
+      ["گره", "کجی", "CR کجی", "کشیدگی", "CR کشیدگی", "نتیجه کجی", "نتیجه کشیدگی"],
       normals.map((x) => [
         x.name,
         fmt(x.skew),
+        fmt(x.skewCr),
         fmt(x.kurt),
+        fmt(x.kurtCr),
         Math.abs(x.skew) < 3 ? "برقرار" : "برقرار نیست",
         Math.abs(x.kurt) < 10 ? "برقرار" : "برقرار نیست",
       ])
@@ -1236,7 +1245,7 @@ function buildDocxReport(
   children.push(docH("۴) نرمال بودن چندمتغیری (مردیا)"));
   children.push(
     mardia.valid
-      ? docP(`ضریب کشیدگی مردیا: ${faNum(fmt(mardia.kurtosis))} | نسبت بحرانی: ${faNum(fmt(mardia.cr))} — ${mardia.cr < 5 ? "نرمال چندمتغیره برقرار است" : "تخطی از نرمال چندمتغیری"}`)
+      ? docP(`ضریب کشیدگی مردیا: ${faNum(fmt(mardia.kurtosis))} | نسبت بحرانی: ${faNum(fmt(mardia.cr))} — ${Math.abs(mardia.cr) < 5 ? "نرمال چندمتغیره برقرار است" : "تخطی از نرمال چندمتغیری"}`)
       : docP(mardia.message)
   );
 
@@ -1894,16 +1903,36 @@ function SemTool() {
 
   // ---------- بوت‌استرپ ----------
   const runBootstrap = useCallback(
-    (nodeColsArg?: number[][], nBoot?: number, silent = false) => {
+    (
+      nodeColsArg?: number[][],
+      nBoot?: number,
+      silent = false,
+      measurementColsArg?: SemMeasurementColumns
+    ) => {
       const comps = nodeColsArg ?? analysis?.nodeCols;
       if (!comps) return;
+      const measurements: SemMeasurementColumns = measurementColsArg ?? {};
+      if (!measurementColsArg && analysis) {
+        modelNodes.forEach((node) => {
+          const indicators = analysis.indicatorCols[node.varId] ?? [];
+          measurements[node.nodeId] = node.kind === "total" && indicators.length ? indicators : [comps[node.nodeId]];
+        });
+      }
       const bootN = nBoot ?? constraints.bootSamples;
       setBootBusy(true);
       if (!silent) setStatus({ text: `در حال اجرای بوت‌استرپ با ${bootN} نمونه...`, kind: "" });
       setTimeout(() => {
         try {
-          const sem = estimateSem(modelNodes, modelArrows, comps);
-          const raw = bootstrapIndirectEffects(modelNodes, modelArrows, comps, bootN);
+          const useMl = Object.keys(measurements).length > 0;
+          const sem = estimateSem(modelNodes, modelArrows, comps, useMl ? measurements : undefined, useMl ? "ml" : "approx");
+          const raw = bootstrapIndirectEffects(
+            modelNodes,
+            modelArrows,
+            comps,
+            bootN,
+            useMl ? measurements : undefined,
+            useMl ? "ml" : "approx"
+          );
           const directOf = (fromVar: number, toVar: number) =>
             sem.paths
               .filter((path) => {
@@ -1962,26 +1991,52 @@ function SemTool() {
           const indicators = indicatorCols[node.varId] ?? [];
           measurementCols[node.nodeId] = node.kind === "total" && indicators.length ? indicators : [nodeCols[node.nodeId]];
         });
-        const sem = estimateSem(modelNodes, modelArrows, nodeCols, measurementCols);
+        const sem = estimateSem(modelNodes, modelArrows, nodeCols, measurementCols, "ml");
+        if (modelNodes.some((node) => (measurementCols[node.nodeId]?.length ?? 0) > 1) && sem.estimator !== "ml") {
+          throw new Error("برآورد هم‌زمان ML همگرا نشد؛ برای جلوگیری از گزارش خروجی غیرهم‌ارز با AMOS، نتیجه تقریبی نمایش داده نشد.");
+        }
         const correlationTables = buildCorrelationTables(vars, modelNodes, nodeCols, indicatorCols);
-        const maha = mahalanobisDistances(nodeCols);
-        const mardia = mardiaTest(nodeCols);
+        const observedForAssumptions = modelNodes.flatMap((node) => {
+          const variable = vars.find((item) => item.id === node.varId);
+          const observed = measurementCols[node.nodeId] ?? [nodeCols[node.nodeId]];
+          return observed.map((column, index) => ({
+            name:
+              observed.length > 1
+                ? `${variable?.name ?? node.label} — ${variable?.subscales[index]?.name ?? `شاخص ${index + 1}`}`
+                : node.label,
+            column,
+          }));
+        });
+        const assumptionColumns = observedForAssumptions.map((item) => item.column);
+        const maha = mahalanobisDistances(assumptionColumns);
+        const mardia = mardiaTest(assumptionColumns);
         const missing = c.map((col, i) => ({
           col,
           count: r.filter((row) => row[i] == null || !Number.isFinite(row[i])).length,
         }));
-        const normals = modelNodes.map((nd) => ({
-          name: nd.label,
-          skew: skewness(nodeCols[nd.nodeId]),
-          kurt: kurtosis(nodeCols[nd.nodeId]),
-        }));
+        const normals = observedForAssumptions.map((item) => {
+          const validCount = item.column.filter(Number.isFinite).length;
+          const skew = skewness(item.column);
+          const kurt = kurtosis(item.column);
+          return {
+            name: item.name,
+            skew,
+            skewCr: validCount > 0 ? skew / Math.sqrt(6 / validCount) : NaN,
+            kurt,
+            kurtCr: validCount > 0 ? kurt / Math.sqrt(24 / validCount) : NaN,
+          };
+        });
         const meas = vars
           .filter((v) => (indicatorCols[v.id]?.length ?? 0) >= 2)
           .map((v) => ({
             varId: v.id,
             name: v.name,
             alpha: cronbachAlpha(indicatorCols[v.id]),
-            loadings: pcaLoadings(indicatorCols[v.id]),
+            loadings:
+              sem.measurementLoadings
+                ?.filter((loading) => modelNodes.find((node) => node.nodeId === loading.nodeId)?.varId === v.id)
+                .sort((left, right) => left.indicatorIndex - right.indicatorIndex)
+                .map((loading) => loading.std) ?? pcaLoadings(indicatorCols[v.id]),
             subNames: v.subscales.map((s) => s.name),
           }));
         setAnalysisInputs(JSON.stringify({ source, vars, inactiveArrowIds: [...inactiveArrowIds], constraints, n, rows: r, columns: c }));
@@ -2019,7 +2074,7 @@ function SemTool() {
             ],
           });
         }
-        if (boot) runBootstrap(nodeCols, constraints.bootSamples, true);
+        if (boot) runBootstrap(nodeCols, constraints.bootSamples, true, measurementCols);
       } catch (err) {
         setStatus({ text: (err as Error).message, kind: "err" });
         if (openModal) setModal({ ok: false, lines: [(err as Error).message] });
@@ -3687,14 +3742,16 @@ function SemTool() {
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
-                        <tr><th>متغیر / زیرمقیاس</th><th>کجی</th><th>کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
+                        <tr><th>متغیر / زیرمقیاس</th><th>کجی</th><th>CR کجی</th><th>کشیدگی</th><th>CR کشیدگی</th><th>نتیجه کجی</th><th>نتیجه کشیدگی</th></tr>
                       </thead>
                       <tbody>
                         {analysis.normals.map((x, i) => (
                           <tr key={i}>
                             <td>{x.name}</td>
                             <td className="number-cell">{fmt(x.skew)}</td>
+                            <td className="number-cell">{fmt(x.skewCr)}</td>
                             <td className="number-cell">{fmt(x.kurt)}</td>
+                            <td className="number-cell">{fmt(x.kurtCr)}</td>
                             <td dangerouslySetInnerHTML={{ __html: Math.abs(x.skew) < 3 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
                             <td dangerouslySetInnerHTML={{ __html: Math.abs(x.kurt) < 10 ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
                           </tr>
@@ -3721,7 +3778,7 @@ function SemTool() {
                           <tr>
                             <td className="number-cell">{fmt(analysis.mardia.kurtosis)}</td>
                             <td className="number-cell">{fmt(analysis.mardia.cr)}</td>
-                            <td dangerouslySetInnerHTML={{ __html: analysis.mardia.cr < 5 ? badge(true, "نرمال چندمتغیره") : badge(false, "تخطی") }} />
+                            <td dangerouslySetInnerHTML={{ __html: Math.abs(analysis.mardia.cr) < 5 ? badge(true, "نرمال چندمتغیره") : badge(false, "تخطی") }} />
                           </tr>
                         </tbody>
                       </table>
@@ -3731,7 +3788,7 @@ function SemTool() {
                   )}
                   <AssumptionNote
                     condition="نسبت بحرانی ضریب کشیدگی مردیا کمتر از ۵ باشد"
-                    pass={analysis.mardia.valid && analysis.mardia.cr < 5}
+                    pass={analysis.mardia.valid && Math.abs(analysis.mardia.cr) < 5}
                   />
                 </div>
 

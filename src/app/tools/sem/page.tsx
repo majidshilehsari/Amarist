@@ -418,7 +418,7 @@ const initialVars: VariableSpec[] = [
   },
 ];
 
-const shirdelVars: VariableSpec[] = [
+const legacyShirdelVars: VariableSpec[] = [
   {
     id: 0,
     name: "تاب‌آوری",
@@ -455,6 +455,36 @@ const shirdelVars: VariableSpec[] = [
   },
 ];
 
+const shirdelVars: VariableSpec[] = [
+  {
+    id: 0,
+    name: "تاب‌آوری",
+    role: "exogenous",
+    hasTotal: true,
+    totalMin: 0,
+    totalMax: 40,
+    subscales: [],
+  },
+  {
+    id: 1,
+    name: "پیری موفق",
+    role: "mediator",
+    hasTotal: true,
+    totalMin: 13,
+    totalMax: 91,
+    subscales: [],
+  },
+  {
+    id: 2,
+    name: "مشارکت اجتماعی",
+    role: "outcome",
+    hasTotal: true,
+    totalMin: 0,
+    totalMax: 30,
+    subscales: [],
+  },
+];
+
 function cloneVariableSpecs(vars: VariableSpec[]): VariableSpec[] {
   return vars.map((variable) => ({
     ...variable,
@@ -475,9 +505,10 @@ function defaultProjectData(vars: VariableSpec[] = initialVars): ProjectData {
   };
 }
 
-const SHIRDEL_PROJECT_ID = "default-shirdel-v1";
+const LEGACY_SHIRDEL_PROJECT_ID = "default-shirdel-v1";
+const SHIRDEL_PROJECT_ID = "default-shirdel-v2";
 const SHIRDEL_PROJECT_NAME = "پروژه پیش‌فرض (شیردل)";
-const SHIRDEL_PROJECT_SEED_KEY = "amarist-sem-shirdel-project-seeded-v1";
+const SHIRDEL_PROJECT_SEED_KEY = "amarist-sem-shirdel-project-seeded-v2";
 
 function createSeedProject(id: string, name: string, vars: VariableSpec[]): Project {
   return {
@@ -494,6 +525,21 @@ function markShirdelProjectSeeded() {
   } catch {
     // ignore
   }
+}
+
+function isUntouchedLegacyShirdelProject(project: Project): boolean {
+  const data = project.data;
+  return (
+    project.id === LEGACY_SHIRDEL_PROJECT_ID &&
+    data.source === "generate" &&
+    data.n === "250" &&
+    data.rows.length === 0 &&
+    data.columns.length === 0 &&
+    data.inactiveArrowIds.length === 0 &&
+    Object.keys(data.colMap).length === 0 &&
+    JSON.stringify(data.vars) === JSON.stringify(legacyShirdelVars) &&
+    JSON.stringify(data.constraints) === JSON.stringify(defaultConstraints())
+  );
 }
 
 function loadInitialProjects(): Project[] {
@@ -520,11 +566,107 @@ function loadInitialProjects(): Project[] {
     // localStorage is unavailable; continue with an in-memory seed
   }
 
-  const seeded = [...existing, createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars)];
+  const legacyIndex = existing.findIndex((project) => project.id === LEGACY_SHIRDEL_PROJECT_ID);
+  let seeded: Project[];
+
+  if (legacyIndex >= 0 && isUntouchedLegacyShirdelProject(existing[legacyIndex])) {
+    seeded = existing.map((project, index) =>
+      index === legacyIndex ? createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars) : project
+    );
+  } else {
+    const preserved = existing.map((project) =>
+      project.id === LEGACY_SHIRDEL_PROJECT_ID && project.name === SHIRDEL_PROJECT_NAME
+        ? { ...project, name: `${SHIRDEL_PROJECT_NAME} — نسخه قبلی` }
+        : project
+    );
+    seeded = [...preserved, createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars)];
+  }
+
   saveProjects(seeded);
   markShirdelProjectSeeded();
   return seeded;
 }
+
+type ScoringGuideTable = {
+  title: string;
+  rows: { component: string; items: string; range: string; interpretation: string }[];
+  notes: string[];
+};
+
+const shirdelScoringGuide: ScoringGuideTable[] = [
+  {
+    title: "تاب‌آوری کانر–دیویدسون (CD-RISC-10)",
+    rows: [
+      {
+        component: "تاب‌آوری (نمره کل)",
+        items: "۱ تا ۱۰",
+        range: "۰ تا ۴۰",
+        interpretation: "نمره بالاتر نشان‌دهنده تاب‌آوری بیشتر است.",
+      },
+      {
+        component: "روش پاسخ‌دهی",
+        items: "همه گویه‌ها",
+        range: "لیکرت ۵ درجه‌ای؛ ۰ تا ۴",
+        interpretation: "۰=اصلاً درست نیست؛ ۴=تقریباً همیشه درست است.",
+      },
+    ],
+    notes: ["در مدل، فقط نمره کل ۰ تا ۴۰ به‌عنوان متغیر مشاهده‌شده وارد می‌شود."],
+  },
+  {
+    title: "پرسشنامه پیری موفق (SAS)",
+    rows: [
+      {
+        component: "سبک زندگی سالم",
+        items: "۱، ۷، ۸، ۱۲",
+        range: "۴ تا ۲۸",
+        interpretation: "نمره بالاتر نشان‌دهنده سبک زندگی سالم‌تر است.",
+      },
+      {
+        component: "مقابله سازگار",
+        items: "۲، ۳، ۱۱، ۱۳",
+        range: "۴ تا ۲۸",
+        interpretation: "نمره بالاتر نشان‌دهنده توانایی بیشتر در مقابله سازگار است.",
+      },
+      {
+        component: "درگیر شدن با زندگی",
+        items: "۴، ۵، ۶، ۹، ۱۰",
+        range: "۵ تا ۳۵",
+        interpretation: "نمره بالاتر نشان‌دهنده مشارکت و درگیری بیشتر با زندگی است.",
+      },
+      {
+        component: "پیری موفق (نمره کل)",
+        items: "۱ تا ۱۳",
+        range: "۱۳ تا ۹۱",
+        interpretation: "نمره بالاتر نشان‌دهنده پیری موفق‌تر است.",
+      },
+    ],
+    notes: ["گویه شماره ۱ معکوس نمره‌گذاری می‌شود.", "در مدل، فقط نمره کل ۱۳ تا ۹۱ وارد می‌شود؛ خرده‌مقیاس‌ها صرفاً برای نمره‌گذاری و گزارش توصیفی‌اند."],
+  },
+  {
+    title: "شبکه اجتماعی لوبن، نسخه ۶ سؤالی (LSNS-6)",
+    rows: [
+      {
+        component: "شبکه اجتماعی خانواده",
+        items: "۱، ۲، ۳",
+        range: "۰ تا ۱۵",
+        interpretation: "نمره بالاتر نشان‌دهنده ارتباط خانوادگی بیشتر است.",
+      },
+      {
+        component: "شبکه اجتماعی دوستان",
+        items: "۴، ۵، ۶",
+        range: "۰ تا ۱۵",
+        interpretation: "نمره بالاتر نشان‌دهنده ارتباط دوستانه بیشتر است.",
+      },
+      {
+        component: "مشارکت اجتماعی (نمره کل)",
+        items: "۱ تا ۶",
+        range: "۰ تا ۳۰",
+        interpretation: "نمره بالاتر نشان‌دهنده شبکه اجتماعی قوی‌تر و مشارکت اجتماعی بیشتر است.",
+      },
+    ],
+    notes: ["در مدل، فقط نمره کل ۰ تا ۳۰ وارد می‌شود؛ خانواده و دوستان جداگانه وارد مدل نمی‌شوند."],
+  },
+];
 
 
 // ------------------------------------------------------------
@@ -1068,7 +1210,7 @@ function SemTool() {
     return analysisInputs !== current;
   }, [analysisValid, analysisInputs, source, vars, inactiveArrowIds, constraints, n, rows, columns]);
 
-  const hasLatent = vars.some((v) => v.subscales.length > 0);
+  const hasLatent = vars.some((v) => v.subscales.length > 0 && v.hasTotal);
   const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان (مکنون)" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
   const varName = (id: number) => varNameOf(vars, id);
 
@@ -2305,6 +2447,77 @@ function SemTool() {
               </div>
             </div>
 
+            {currentProject?.id === SHIRDEL_PROJECT_ID && (
+              <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50/70 p-4 dark:border-indigo-800 dark:bg-indigo-950/30">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-black text-indigo-900 dark:text-indigo-100">راهنمای نمره‌گذاری پروژه شیردل</h3>
+                    <p className="mt-1 text-[12px] leading-6 text-indigo-700 dark:text-indigo-300">
+                      خرده‌مقیاس‌ها برای محاسبه و گزارش توصیفی نگه داشته می‌شوند؛ در مدل ساختاری فقط نمره کل هر سه
+                      پرسشنامه وارد می‌شود.
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-indigo-600 px-3 py-1 text-[11px] font-extrabold text-white">
+                    مدل با ۳ نمره کل مشاهده‌شده
+                  </span>
+                </div>
+
+                <div className="mt-3 space-y-3">
+                  {shirdelScoringGuide.map((table, tableIndex) => (
+                    <div key={table.title} className="overflow-hidden rounded-xl border border-indigo-100 bg-white dark:border-indigo-900 dark:bg-slate-900">
+                      <div className="border-b border-indigo-100 bg-indigo-100/70 px-3 py-2 text-[12px] font-black text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950/60 dark:text-indigo-100">
+                        جدول {tableIndex + 1}. {table.title}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-[760px] border-collapse text-right text-[11px]">
+                          <thead>
+                            <tr className="bg-stone-50 text-stone-600 dark:bg-slate-800 dark:text-stone-300">
+                              <th className="border-b border-stone-200 px-3 py-2 font-extrabold dark:border-stone-700">مؤلفه</th>
+                              <th className="border-b border-stone-200 px-3 py-2 font-extrabold dark:border-stone-700">شماره گویه‌ها</th>
+                              <th className="border-b border-stone-200 px-3 py-2 font-extrabold dark:border-stone-700">دامنه نمره‌گذاری</th>
+                              <th className="border-b border-stone-200 px-3 py-2 font-extrabold dark:border-stone-700">نحوه تفسیر</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {table.rows.map((row) => (
+                              <tr key={`${table.title}-${row.component}`} className="text-stone-700 dark:text-stone-300">
+                                <td className="border-b border-stone-100 px-3 py-2 font-bold dark:border-stone-800">{row.component}</td>
+                                <td className="border-b border-stone-100 px-3 py-2 dark:border-stone-800">{row.items}</td>
+                                <td className="border-b border-stone-100 px-3 py-2 font-bold dark:border-stone-800">{row.range}</td>
+                                <td className="border-b border-stone-100 px-3 py-2 dark:border-stone-800">{row.interpretation}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="space-y-1 px-3 py-2">
+                        {table.notes.map((note) => (
+                          <p key={note} className="text-[11px] font-bold leading-5 text-amber-700 dark:text-amber-300">
+                            نکته: {note}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  <div className="rounded-xl bg-white p-3 text-center shadow-sm dark:bg-slate-900">
+                    <p className="text-[11px] text-stone-500 dark:text-stone-400">تاب‌آوری · مستقل (X)</p>
+                    <p className="mt-1 text-sm font-black text-blue-700 dark:text-blue-300">CD-RISC-10 · کل ۰–۴۰</p>
+                  </div>
+                  <div className="rounded-xl bg-white p-3 text-center shadow-sm dark:bg-slate-900">
+                    <p className="text-[11px] text-stone-500 dark:text-stone-400">پیری موفق · میانجی (M)</p>
+                    <p className="mt-1 text-sm font-black text-amber-700 dark:text-amber-300">SAS · کل ۱۳–۹۱</p>
+                  </div>
+                  <div className="rounded-xl bg-white p-3 text-center shadow-sm dark:bg-slate-900">
+                    <p className="text-[11px] text-stone-500 dark:text-stone-400">مشارکت اجتماعی · وابسته (Y)</p>
+                    <p className="mt-1 text-sm font-black text-emerald-700 dark:text-emerald-300">LSNS-6 · کل ۰–۳۰</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="mt-4 grid gap-4">
               {vars.map((v) => {
                 const sumMin = v.subscales.reduce((s, x) => s + x.min, 0);
@@ -2401,10 +2614,31 @@ function SemTool() {
                           </button>
                         </>
                       ) : (
-                        <p className={`${tinyCls} mt-2`}>
-                          بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) — نمره کل همان خود متغیر است و تنظیمات نمره کل
-                          لازم نیست.
-                        </p>
+                        <div className="mt-3">
+                          <p className={tinyCls}>
+                            بدون زیرمقیاس: متغیر تک‌نمره‌ای (مشاهده‌شده) است و نمره کل همان خود متغیر خواهد بود.
+                          </p>
+                          <div className="mt-2 grid max-w-md grid-cols-2 gap-3">
+                            <div>
+                              <label className={labelCls}>حداقل نمره کل</label>
+                              <input
+                                type="number"
+                                className={inputCls}
+                                value={v.totalMin}
+                                onChange={(e) => updateVar(v.id, { totalMin: Number(e.target.value) })}
+                              />
+                            </div>
+                            <div>
+                              <label className={labelCls}>حداکثر نمره کل</label>
+                              <input
+                                type="number"
+                                className={inputCls}
+                                value={v.totalMax}
+                                onChange={(e) => updateVar(v.id, { totalMax: Number(e.target.value) })}
+                              />
+                            </div>
+                          </div>
+                        </div>
                       )}
                     </div>
 
@@ -2438,6 +2672,11 @@ function SemTool() {
                           ) : (
                             <span className="mt-2 inline-block rounded-full bg-amber-100 px-3 py-1 text-[12px] font-bold text-amber-700 dark:bg-amber-950 dark:text-amber-300">⚠ نمره کل ({v.totalMin} تا {v.totalMax}) با جمع زیرمقیاس‌ها ({sumMin} تا {sumMax}) برابر نیست</span>
                           ))}
+                        <p className="mt-2 rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-[11px] font-bold leading-5 text-indigo-700 dark:border-indigo-900 dark:bg-indigo-950/40 dark:text-indigo-300">
+                          {v.hasTotal
+                            ? "نمایش در مدل: یک سازه کل با زیرمقیاس‌ها به‌عنوان شاخص؛ مسیرهای ساختاری به سازه کل متصل می‌شوند."
+                            : "نمایش در مدل: هر زیرمقیاس یک متغیر مشاهده‌شده مستقل است و مسیر ساختاری جداگانه می‌گیرد."}
+                        </p>
                       </div>
                     )}
 

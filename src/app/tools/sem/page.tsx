@@ -418,10 +418,54 @@ const initialVars: VariableSpec[] = [
   },
 ];
 
-function defaultProjectData(): ProjectData {
+const shirdelVars: VariableSpec[] = [
+  {
+    id: 0,
+    name: "تاب‌آوری",
+    role: "exogenous",
+    hasTotal: true,
+    totalMin: 1,
+    totalMax: 5,
+    subscales: [],
+  },
+  {
+    id: 1,
+    name: "پیری موفق",
+    role: "mediator",
+    hasTotal: false,
+    totalMin: 1,
+    totalMax: 5,
+    subscales: [
+      { name: "سبک زندگی سالم", min: 1, max: 5 },
+      { name: "مقابله سازگار", min: 1, max: 5 },
+      { name: "درگیر شدن با زندگی", min: 1, max: 5 },
+    ],
+  },
+  {
+    id: 2,
+    name: "مشارکت اجتماعی",
+    role: "outcome",
+    hasTotal: false,
+    totalMin: 1,
+    totalMax: 5,
+    subscales: [
+      { name: "خانواده", min: 1, max: 5 },
+      { name: "دوستان", min: 1, max: 5 },
+    ],
+  },
+];
+
+function cloneVariableSpecs(vars: VariableSpec[]): VariableSpec[] {
+  return vars.map((variable) => ({
+    ...variable,
+    subscales: variable.subscales.map((subscale) => ({ ...subscale })),
+  }));
+}
+
+function defaultProjectData(vars: VariableSpec[] = initialVars): ProjectData {
   return {
     source: "generate",
-    vars: initialVars,
+    vars: cloneVariableSpecs(vars),
     inactiveArrowIds: [],
     constraints: defaultConstraints(),
     n: "250",
@@ -429,6 +473,57 @@ function defaultProjectData(): ProjectData {
     rows: [],
     colMap: {},
   };
+}
+
+const SHIRDEL_PROJECT_ID = "default-shirdel-v1";
+const SHIRDEL_PROJECT_NAME = "پروژه پیش‌فرض (شیردل)";
+const SHIRDEL_PROJECT_SEED_KEY = "amarist-sem-shirdel-project-seeded-v1";
+
+function createSeedProject(id: string, name: string, vars: VariableSpec[]): Project {
+  return {
+    id,
+    name,
+    updatedAt: new Date().toISOString(),
+    data: defaultProjectData(vars),
+  };
+}
+
+function markShirdelProjectSeeded() {
+  try {
+    localStorage.setItem(SHIRDEL_PROJECT_SEED_KEY, "1");
+  } catch {
+    // ignore
+  }
+}
+
+function loadInitialProjects(): Project[] {
+  const existing = loadProjects();
+
+  if (!existing.length) {
+    const seeded = [
+      createSeedProject(uid(), "پروژه پیش‌فرض", initialVars),
+      createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars),
+    ];
+    saveProjects(seeded);
+    markShirdelProjectSeeded();
+    return seeded;
+  }
+
+  if (existing.some((project) => project.id === SHIRDEL_PROJECT_ID)) {
+    markShirdelProjectSeeded();
+    return existing;
+  }
+
+  try {
+    if (localStorage.getItem(SHIRDEL_PROJECT_SEED_KEY) === "1") return existing;
+  } catch {
+    // localStorage is unavailable; continue with an in-memory seed
+  }
+
+  const seeded = [...existing, createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars)];
+  saveProjects(seeded);
+  markShirdelProjectSeeded();
+  return seeded;
 }
 
 
@@ -878,18 +973,7 @@ function buildDocxReport(
 
 function SemTool() {
   // ---------- پروژه‌ها ----------
-  const [projects, setProjects] = useState<Project[]>(() => {
-    const existing = loadProjects();
-    if (existing.length) return existing;
-    const seed: Project = {
-      id: uid(),
-      name: "پروژه پیش‌فرض",
-      updatedAt: new Date().toISOString(),
-      data: defaultProjectData(),
-    };
-    saveProjects([seed]);
-    return [seed];
-  });
+  const [projects, setProjects] = useState<Project[]>(loadInitialProjects);
   const [projectId, setProjectId] = useState<string | null>(null);
   const currentProject = projects.find((p) => p.id === projectId) ?? null;
 

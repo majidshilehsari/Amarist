@@ -106,6 +106,10 @@ function starP(p: number): string {
   return "";
 }
 
+function fmtChi2Df(fit: SemResults["fit"]): string {
+  return fit.df === 0 ? "تعریف‌نشده (مدل اشباع)" : fmt(fit.chi2df);
+}
+
 function AssumptionNote({ condition, pass }: { condition: string; pass: boolean }) {
   return (
     <p
@@ -750,7 +754,7 @@ function buildReportText(
   L.push("۱۰) شاخص‌های برازش:");
   if (sem.fit.valid) {
     L.push(
-      `  χ²=${fmt(sem.fit.chi2)} | df=${sem.fit.df} | χ²/df=${fmt(sem.fit.chi2df)} | CFI=${fmt(sem.fit.cfi)} | TLI=${fmt(sem.fit.tli)} | RMSEA=${fmt(sem.fit.rmsea)} | SRMR=${fmt(sem.fit.srmr)}`
+      `  χ²=${fmt(sem.fit.chi2)} | df=${sem.fit.df} | χ²/df=${fmtChi2Df(sem.fit)} | CFI=${fmt(sem.fit.cfi)} | TLI=${fmt(sem.fit.tli)} | RMSEA=${fmt(sem.fit.rmsea)} | SRMR=${fmt(sem.fit.srmr)}`
     );
   } else {
     L.push(`  ${sem.fit.message ?? "نامشخص"}`);
@@ -1029,7 +1033,7 @@ function buildDocxReport(
         [[
           fmt(sem.fit.chi2),
           sem.fit.df,
-          fmt(sem.fit.chi2df),
+          fmtChi2Df(sem.fit),
           fmt(sem.fit.cfi),
           fmt(sem.fit.tli),
           fmt(sem.fit.rmsea),
@@ -1631,7 +1635,7 @@ function SemTool() {
               `تعداد موارد: ${r.length} | تعداد متغیرها/زیرمقیاس‌ها: ${modelNodes.length}`,
               `مسیرهای معنادار: ${sigCount} از ${sem.paths.length}`,
               sem.fit.valid
-                ? `برازش: CFI=${fmt(sem.fit.cfi)} | RMSEA=${fmt(sem.fit.rmsea)} | χ²/df=${fmt(sem.fit.chi2df)} | SRMR=${fmt(sem.fit.srmr)}`
+                ? `برازش: CFI=${fmt(sem.fit.cfi)} | RMSEA=${fmt(sem.fit.rmsea)} | χ²/df=${fmtChi2Df(sem.fit)} | SRMR=${fmt(sem.fit.srmr)}`
                 : `برازش: ${sem.fit.message ?? "نامشخص"}`,
               modelNodes
                 .filter((nd) => nd.role !== "exogenous")
@@ -3459,7 +3463,7 @@ function SemTool() {
                             <tr>
                               <td className="number-cell">{fmt(analysis.sem.fit.chi2)}</td>
                               <td className="number-cell">{analysis.sem.fit.df}</td>
-                              <td className="number-cell">{fmt(analysis.sem.fit.chi2df)}</td>
+                              <td className="number-cell">{fmtChi2Df(analysis.sem.fit)}</td>
                               <td className="number-cell">{fmt(analysis.sem.fit.cfi)}</td>
                               <td className="number-cell">{fmt(analysis.sem.fit.tli)}</td>
                               <td className="number-cell">{fmt(analysis.sem.fit.rmsea)}</td>

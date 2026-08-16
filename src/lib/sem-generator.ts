@@ -38,6 +38,20 @@ export type PathTarget = {
 };
 
 export type IndirectTarget = "sig" | "ns" | "any";
+export type IndirectConstraint = {
+  significance: IndirectTarget;
+  min: number | null;
+  max: number | null;
+};
+
+export function defaultIndirectConstraint(): IndirectConstraint {
+  return { significance: "sig", min: 0.1, max: 0.3 };
+}
+
+function resolveIndirectConstraint(value: IndirectConstraint | IndirectTarget | undefined): IndirectConstraint {
+  if (typeof value === "string") return { ...defaultIndirectConstraint(), significance: value };
+  return { ...defaultIndirectConstraint(), ...(value ?? {}) };
+}
 
 export type FitRange = { min: number | null; max: number | null };
 
@@ -100,7 +114,7 @@ export type GenConstraints = {
   /** قید مسیرها به شکل «varFrom:varTo» */
   pathTargets: Record<string, PathTarget>;
   /** قید اثر غیرمستقیم: «from:to» (کل) و «from:med:to» (هر مسیر میانجی) */
-  indirectTargets: Record<string, IndirectTarget>;
+  indirectTargets: Record<string, IndirectConstraint>;
   r2Range: { min: number; max: number } | null;
   fit: SemFitConstraints;
   missingPct: number;
@@ -217,6 +231,24 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
       throw new Error(`در قید برازش «${key}»، حداقل نباید از حداکثر بزرگ‌تر باشد.`);
     }
   }
+  const indirectConstraintKeys: string[] = [];
+  for (const exogenous of exogVars) {
+    for (const outcome of outVars) {
+      const mediators = medVars.filter(
+        (mediator) =>
+          activeArrows.some((arrow) => arrow.fromVar === exogenous.id && arrow.toVar === mediator.id) &&
+          activeArrows.some((arrow) => arrow.fromVar === mediator.id && arrow.toVar === outcome.id)
+      );
+      mediators.forEach((mediator) => indirectConstraintKeys.push(`${exogenous.id}:${mediator.id}:${outcome.id}`));
+      if (mediators.length > 1) indirectConstraintKeys.push(`${exogenous.id}:${outcome.id}`);
+    }
+  }
+  for (const key of indirectConstraintKeys) {
+    const target = resolveIndirectConstraint(constraints.indirectTargets[key]);
+    if (target.min != null && target.max != null && target.min > target.max) {
+      throw new Error(`در قید اثر غیرمستقیم «${key}»، حداقل نباید از حداکثر بزرگ‌تر باشد.`);
+    }
+  }
 
   const maxAttempts = 6000;
 
@@ -226,6 +258,7 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     rows: (number | null)[][];
     nodeCols: number[][];
     sem: SemResults;
+    boot: ReturnType<typeof bootstrapIndirectEffects>;
     pathTargets: { fromNode: number; toNode: number; target: number; actual: number }[];
   };
   let best: Attempt | null = null;
@@ -487,15 +520,23 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
 
     // بوت‌استرپ اثر غیرمستقیم — فقط وقتی بقیه قیود پاس شده‌اند
     let score = scoreBase;
-    if (scoreBase >= 0 && Object.keys(constraints.indirectTargets).length > 0) {
-      const boot = bootstrapIndirectEffects(nodes, arrows, nodeCols, constraints.bootSamples);
+    let boot: ReturnType<typeof bootstrapIndirectEffects> = [];
+    if (scoreBase >= 0 && indirectConstraintKeys.length > 0) {
+      // برای غربال تولید، ۱۰۰۰ بازنمونه پایدار و سریع است؛ تحلیل نهایی با تعداد انتخابی کاربر اجرا می‌شود.
+      boot = bootstrapIndirectEffects(nodes, arrows, nodeCols, Math.min(constraints.bootSamples, 1000));
       for (const b of boot) {
         const key = b.viaVar === null ? `${b.fromVar}:${b.toVar}` : `${b.fromVar}:${b.viaVar}:${b.toVar}`;
-        const t = constraints.indirectTargets[key];
-        if (!t) continue;
-        if (t === "sig") score = Math.min(score, 0.05 - b.p);
-        else if (t === "ns") score = Math.min(score, b.p - 0.05);
+        if (!indirectConstraintKeys.includes(key)) continue;
+        const target = resolveIndirectConstraint(constraints.indirectTargets[key]);
+        if (target.significance === "sig") score = Math.min(score, 0.05 - b.p);
+        else if (target.significance === "ns") score = Math.min(score, b.p - 0.05);
+        if (target.min != null) score = Math.min(score, b.indirect - target.min);
+        if (target.max != null) score = Math.min(score, target.max - b.indirect);
       }
+      const evaluatedKeys = new Set(
+        boot.map((b) => (b.viaVar === null ? `${b.fromVar}:${b.toVar}` : `${b.fromVar}:${b.viaVar}:${b.toVar}`))
+      );
+      if (indirectConstraintKeys.some((key) => !evaluatedKeys.has(key))) score = Number.NEGATIVE_INFINITY;
     }
 
     const pathTargets = sem.paths.map((pr) => {
@@ -508,7 +549,7 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
       };
     });
 
-    const attemptData: Attempt = { score, columns, rows, nodeCols, sem, pathTargets };
+    const attemptData: Attempt = { score, columns, rows, nodeCols, sem, boot, pathTargets };
 
     if (score >= 0) {
       return {
@@ -536,10 +577,21 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     .filter(([, t]) => t.sig === "ns")
     .map(([k]) => `مسیر ${k} غیرمعنادار`);
   messages.push(...sigPaths, ...nsPaths);
-  const sigInd = Object.entries(constraints.indirectTargets)
-    .filter(([, v]) => v === "sig")
-    .map(([k]) => `اثر غیرمستقیم ${k} معنادار`);
-  messages.push(...sigInd);
+  const indirectMessages = indirectConstraintKeys.map((key) => {
+    const target = resolveIndirectConstraint(constraints.indirectTargets[key]);
+    const significance =
+      target.significance === "sig" ? "معنادار" : target.significance === "ns" ? "غیرمعنادار" : "با هر وضعیت معناداری";
+    const range =
+      target.min != null && target.max != null
+        ? ` و بین ${target.min} تا ${target.max}`
+        : target.min != null
+          ? ` و حداقل ${target.min}`
+          : target.max != null
+            ? ` و حداکثر ${target.max}`
+            : "";
+    return `اثر غیرمستقیم ${key} ${significance}${range}`;
+  });
+  messages.push(...indirectMessages);
   if (constraints.r2Range) messages.push(`R² بین ${constraints.r2Range.min} تا ${constraints.r2Range.max}`);
   const describeFitRange = (label: string, range: { min: number | null; max: number | null }) => {
     if (range.min != null && range.max != null) return `${label} بین ${range.min} تا ${range.max}`;
@@ -562,8 +614,76 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     describeFitRange("SRMR", fitTargets.srmr),
   ].filter((message): message is string => message != null);
   messages.push(...fitMessages);
+
+  const recommendations: string[] = [];
+  const recommendRange = (label: string, value: number, range: { min: number | null; max: number | null }) => {
+    if (!Number.isFinite(value)) return;
+    const shown = Number(value.toFixed(3));
+    if (range.min != null && value < range.min) {
+      recommendations.push(`حداقل «${label}» را از ${range.min} به ${shown} یا کمتر کاهش دهید (بهترین مقدار فعلی: ${shown}).`);
+    }
+    if (range.max != null && value > range.max) {
+      recommendations.push(`حداکثر «${label}» را از ${range.max} به ${shown} یا بیشتر افزایش دهید (بهترین مقدار فعلی: ${shown}).`);
+    }
+  };
+
+  if (best) {
+    if (constraints.r2Range) {
+      for (const node of nodes.filter((item) => item.role === "outcome")) {
+        recommendRange(`R² ${node.label}`, best.sem.r2[node.nodeId] ?? NaN, constraints.r2Range);
+      }
+    }
+    recommendRange("χ²", best.sem.fit.chi2, fitTargets.chi2);
+    recommendRange("Df", best.sem.fit.df, fitTargets.df);
+    recommendRange("P-value", best.sem.fit.pValue, fitTargets.pValue);
+    recommendRange("CMIN/df", best.sem.fit.chi2df, fitTargets.cminDf);
+    recommendRange("RMSEA", best.sem.fit.rmsea, fitTargets.rmsea);
+    recommendRange("حد بالای CI90% RMSEA", best.sem.fit.rmseaHigh, fitTargets.rmseaCiHigh);
+    recommendRange("PNFI", best.sem.fit.pnfi, fitTargets.pnfi);
+    recommendRange("CFI", best.sem.fit.cfi, fitTargets.cfi);
+    recommendRange("PCFI", best.sem.fit.pcfi, fitTargets.pcfi);
+    recommendRange("IFI", best.sem.fit.ifi, fitTargets.ifi);
+    recommendRange("GFI", best.sem.fit.gfi, fitTargets.gfi);
+    recommendRange("SRMR", best.sem.fit.srmr, fitTargets.srmr);
+
+    for (const [key, target] of Object.entries(constraints.pathTargets)) {
+      const [fromVar, toVar] = key.split(":").map(Number);
+      const matching = best.sem.paths.filter((path) => {
+        const arrow = arrows.find((item) => item.fromNode === path.from && item.toNode === path.to);
+        return arrow?.fromVar === fromVar && arrow?.toVar === toVar;
+      });
+      const path = matching[0];
+      if (!path) continue;
+      if (target.sig === "sig" && path.p >= 0.05) {
+        recommendations.push(`برای مسیر ${key} حجم نمونه را افزایش دهید یا وضعیت معناداری را به «مهم نیست» تغییر دهید (p فعلی=${Number(path.p.toFixed(3))}).`);
+      } else if (target.sig === "ns" && path.p < 0.05) {
+        recommendations.push(`برای مسیر ${key} وضعیت را از «غیرمعنادار» به «مهم نیست/معنادار» تغییر دهید (p فعلی=${Number(path.p.toFixed(3))}).`);
+      }
+      recommendRange(`β مسیر ${key}`, path.std, { min: target.betaMin, max: target.betaMax });
+    }
+
+    for (const key of indirectConstraintKeys) {
+      const target = resolveIndirectConstraint(constraints.indirectTargets[key]);
+      const row = best.boot.find((item) =>
+        item.viaVar === null
+          ? key === `${item.fromVar}:${item.toVar}`
+          : key === `${item.fromVar}:${item.viaVar}:${item.toVar}`
+      );
+      if (!row) continue;
+      recommendRange(`اثر غیرمستقیم ${key}`, row.indirect, target);
+      if (target.significance === "sig" && row.p >= 0.05) {
+        recommendations.push(`برای اثر غیرمستقیم ${key} حجم نمونه یا ضرایب مسیرهای میانجی را افزایش دهید (p بوت‌استرپ فعلی=${Number(row.p.toFixed(3))}).`);
+      } else if (target.significance === "ns" && row.p < 0.05) {
+        recommendations.push(`برای اثر غیرمستقیم ${key} دامنه ضرایب مسیر را کاهش دهید یا وضعیت را به «مهم نیست» تغییر دهید.`);
+      }
+    }
+  }
+
+  if (!recommendations.length) {
+    recommendations.push("ابتدا دامنه R² و شاخص‌های برازش را کمی بازتر کنید؛ سپس در صورت نیاز حجم نمونه را افزایش دهید.");
+  }
   throw new Error(
     `با این تنظیمات، در ${maxAttempts} تلاش داده‌ای که همه قیود (${messages.join("، ")}) را پاس کند پیدا نشد. ` +
-      `بهترین امتیاز معیار: ${scoreText}. پیشنهاد: حجم نمونه را بیشتر کنید، تعداد زیرمقیاس‌ها را افزایش دهید یا قیود را ملایم‌تر کنید.`
+      `بهترین امتیاز معیار: ${scoreText}. پیشنهادهای مشخص: ${recommendations.slice(0, 6).join(" ")}`
   );
 }

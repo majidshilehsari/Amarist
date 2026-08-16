@@ -954,11 +954,21 @@ export function bootstrapIndirectEffects(
           const boot = (v: number) => idx.map((k) => fullRows[k][v]);
           let sum = 0;
           for (const mNode of mNodes) {
-            const aCoefs = ols(xNodes.map((x) => boot(x.nodeId)), boot(mNode.nodeId)).coefs;
+            const xBoot = xNodes.map((x) => boot(x.nodeId));
+            const mBoot = boot(mNode.nodeId);
+            const aCoefs = ols(xBoot, mBoot).coefs;
+            const mSd = sampleStd(mBoot);
             for (const yNode of yNodes) {
-              const bCoefs = ols([...xNodes.map((x) => boot(x.nodeId)), boot(mNode.nodeId)], boot(yNode.nodeId)).coefs;
+              const yBoot = boot(yNode.nodeId);
+              const bCoefs = ols([...xBoot, mBoot], yBoot).coefs;
               const bCoef = bCoefs[bCoefs.length - 1] ?? 0;
-              for (let i = 1; i < aCoefs.length; i++) sum += aCoefs[i] * bCoef;
+              const ySd = sampleStd(yBoot);
+              const bStd = mSd > 0 && ySd > 0 ? (bCoef * mSd) / ySd : 0;
+              for (let i = 1; i < aCoefs.length; i++) {
+                const xSd = sampleStd(xBoot[i - 1]);
+                const aStd = xSd > 0 && mSd > 0 ? (aCoefs[i] * xSd) / mSd : 0;
+                sum += aStd * bStd;
+              }
             }
           }
           effects.push(sum);
@@ -976,11 +986,21 @@ export function bootstrapIndirectEffects(
           for (const m of meds) {
             const mNodes = nodes.filter((x) => x.varId === m);
             for (const mNode of mNodes) {
-              const aCoefs = ols(xNodes.map((x) => boot(x.nodeId)), boot(mNode.nodeId)).coefs;
+              const xBoot = xNodes.map((x) => boot(x.nodeId));
+              const mBoot = boot(mNode.nodeId);
+              const aCoefs = ols(xBoot, mBoot).coefs;
+              const mSd = sampleStd(mBoot);
               for (const yNode of yNodes) {
-                const bCoefs = ols([...xNodes.map((x) => boot(x.nodeId)), boot(mNode.nodeId)], boot(yNode.nodeId)).coefs;
+                const yBoot = boot(yNode.nodeId);
+                const bCoefs = ols([...xBoot, mBoot], yBoot).coefs;
                 const bCoef = bCoefs[bCoefs.length - 1] ?? 0;
-                for (let i = 1; i < aCoefs.length; i++) sum += aCoefs[i] * bCoef;
+                const ySd = sampleStd(yBoot);
+                const bStd = mSd > 0 && ySd > 0 ? (bCoef * mSd) / ySd : 0;
+                for (let i = 1; i < aCoefs.length; i++) {
+                  const xSd = sampleStd(xBoot[i - 1]);
+                  const aStd = xSd > 0 && mSd > 0 ? (aCoefs[i] * xSd) / mSd : 0;
+                  sum += aStd * bStd;
+                }
               }
             }
           }

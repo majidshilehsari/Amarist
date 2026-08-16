@@ -52,7 +52,9 @@ import {
   buildModelNodes,
   buildModelArrows,
   defaultSemFitConstraints,
+  defaultIndirectConstraint,
   type GenConstraints,
+  type IndirectConstraint,
   type IndirectTarget,
   type SemFitConstraints,
   type PathTarget,
@@ -132,6 +134,15 @@ function starP(p: number): string {
 
 function fmtChi2Df(fit: SemResults["fit"]): string {
   return fit.df === 0 ? "تعریف‌نشده (مدل اشباع)" : fmt(fit.chi2df);
+}
+
+function indirectEffectInterpretation(effect: number, p: number): string {
+  if (!(p < 0.05)) return "اثر غیرمستقیم غیرمعنادار";
+  const magnitude = Math.abs(effect);
+  if (magnitude < 0.1) return "اثر معنادار اما کوچک‌تر از دامنه متداول";
+  if (magnitude <= 0.3) return "اثر کوچک تا متوسط؛ طبیعی و متداول در مقالات";
+  if (magnitude <= 0.5) return "اثر نسبتاً قوی؛ با توجه به زمینه پژوهش تفسیر شود";
+  return "اثر بسیار قوی؛ احتمال بیش‌برازش یا همپوشانی سازه‌ها بررسی شود";
 }
 
 type FitReportRow = { index: string; value: string; criterion: string; interpretation: string; pass: boolean | null };
@@ -353,6 +364,25 @@ type Analysis = {
 
 type ModalState = { ok: boolean; lines: string[] } | null;
 
+type AlphaScale = { varId: number; name: string; items: { min: number; max: number }[] };
+type AlphaResultGroup = {
+  name: string;
+  k: number;
+  alpha: number;
+  stdAlpha: number;
+  items: { name: string; mean: number; sd: number; itemTotal: number; alphaIfDeleted: number }[];
+};
+type AlphaProjectData = {
+  wantAlpha: boolean;
+  scales: AlphaScale[];
+  n: string;
+  min: string;
+  max: string;
+  columns: string[];
+  rows: (number | null)[][];
+  result: AlphaResultGroup[] | null;
+};
+
 // ------------------------------------------------------------
 // پروژه‌ها (ذخیره در مرورگر)
 // ------------------------------------------------------------
@@ -366,6 +396,7 @@ type ProjectData = {
   columns: string[];
   rows: (number | null)[][];
   colMap: Record<number, (number | null)[]>;
+  alpha?: AlphaProjectData;
 };
 
 type Project = {
@@ -443,11 +474,21 @@ function normalizeConstraints(input?: LegacyGenConstraints | null): GenConstrain
     if (input.srmrMax != null) fit.srmr.max = input.srmrMax;
   }
 
+  const indirectTargets = Object.fromEntries(
+    Object.entries(input.indirectTargets ?? {}).map(([key, value]) => {
+      const normalized =
+        typeof value === "string"
+          ? { ...defaultIndirectConstraint(), significance: value as IndirectTarget }
+          : { ...defaultIndirectConstraint(), ...(value as Partial<IndirectConstraint>) };
+      return [key, normalized];
+    })
+  );
+
   return {
     ...defaults,
     ...input,
     pathTargets: input.pathTargets ?? {},
-    indirectTargets: input.indirectTargets ?? {},
+    indirectTargets,
     fit,
   };
 }
@@ -615,6 +656,41 @@ function cloneVariableSpecs(vars: VariableSpec[]): VariableSpec[] {
   }));
 }
 
+function defaultAlphaProjectData(vars: VariableSpec[]): AlphaProjectData {
+  return {
+    wantAlpha: true,
+    scales: vars.map((variable) => ({
+      varId: variable.id,
+      name: variable.name,
+      items: Array.from({ length: Math.max(2, variable.subscales.length || 1) }, () => ({ min: 1, max: 5 })),
+    })),
+    n: "120",
+    min: "0.7",
+    max: "0.9",
+    columns: [],
+    rows: [],
+    result: null,
+  };
+}
+
+function cloneAlphaProjectData(alpha: AlphaProjectData): AlphaProjectData {
+  return {
+    ...alpha,
+    scales: alpha.scales.map((scale) => ({
+      ...scale,
+      items: scale.items.map((item) => ({ ...item })),
+    })),
+    columns: [...alpha.columns],
+    rows: alpha.rows.map((row) => [...row]),
+    result: alpha.result
+      ? alpha.result.map((group) => ({
+          ...group,
+          items: group.items.map((item) => ({ ...item })),
+        }))
+      : null,
+  };
+}
+
 function defaultProjectData(vars: VariableSpec[] = initialVars): ProjectData {
   return {
     source: "generate",
@@ -625,6 +701,7 @@ function defaultProjectData(vars: VariableSpec[] = initialVars): ProjectData {
     columns: [],
     rows: [],
     colMap: {},
+    alpha: defaultAlphaProjectData(vars),
   };
 }
 
@@ -815,7 +892,7 @@ function buildReportText(
         ? `${varNameOf(vars, b.fromVar)} ← ${varNameOf(vars, b.viaVar)} ← ${varNameOf(vars, b.toVar)}`
         : `کل اثر غیرمستقیم: ${varNameOf(vars, b.fromVar)} ← ${varNameOf(vars, b.toVar)}`;
       L.push(
-        `  ${pathLabel}: اثر=${fmt(b.indirect)} | CI95: ${fmt(b.lo)} تا ${fmt(b.hi)} | p=${fmtP(b.p)}${starP(b.p)}` +
+        `  ${pathLabel}: اثر استانداردشده=${fmt(b.indirect)} | CI95: ${fmt(b.lo)} تا ${fmt(b.hi)} | p=${fmtP(b.p)}${starP(b.p)} | ${indirectEffectInterpretation(b.indirect, b.p)}` +
           (b.viaVar === null ? ` | مستقیم=${fmt(b.direct)} | کل=${fmt(b.total)}` : "")
       );
     });
@@ -1078,6 +1155,7 @@ function buildDocxReport(
         fmt(b.hi),
         `${fmtP(b.p)}${starP(b.p)}`,
         b.viaVar === null ? fmt(b.total) : "—",
+        indirectEffectInterpretation(b.indirect, b.p),
       ]);
     });
   } else {
@@ -1090,10 +1168,11 @@ function buildDocxReport(
         "—",
         "—",
         fmt(ef.total),
+        "بوت‌استرپ اجرا نشده",
       ]);
     });
   }
-  children.push(docTable(["مسیر", "مستقیم", "غیرمستقیم", "CI پایین", "CI بالا", "p", "کل"], effectRows));
+  children.push(docTable(["مسیر", "مستقیم", "غیرمستقیم استاندارد", "CI پایین", "CI بالا", "p", "کل", "تفسیر"], effectRows));
   children.push(docP("فاصله اطمینان ۹۵٪ با بوت‌استرپ؛ عدم عبور از صفر = معناداری در سطح ۰/۰۵.", { size: 20, color: "666666" }));
 
   // ۹) R²
@@ -1184,39 +1263,15 @@ function SemTool() {
   const [showBigDiagram, setShowBigDiagram] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
   const [completed, setCompleted] = useState<Record<string, boolean>>({});
-  const [wantAlpha, setWantAlpha] = useState(true);
-  const [alphaScales, setAlphaScales] = useState<
-    { varId: number; name: string; items: { min: number; max: number }[] }[]
-  >(() => {
-    try {
-      const raw = localStorage.getItem("amarist-sem-vars");
-      if (raw) {
-        const arr = JSON.parse(raw) as { id: number; name: string }[];
-        if (Array.isArray(arr) && arr.length) {
-          return arr.map((v) => ({
-            varId: v.id,
-            name: v.name,
-            items: Array.from({ length: 6 }, () => ({ min: 1, max: 5 })),
-          }));
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return initialVars.map((v) => ({
-      varId: v.id,
-      name: v.name,
-      items: Array.from({ length: Math.max(2, v.subscales.length || 1) }, () => ({ min: 1, max: 5 })),
-    }));
-  });
-  const [alphaN, setAlphaN] = useState("120");
-  const [alphaMin, setAlphaMin] = useState("0.7");
-  const [alphaMax, setAlphaMax] = useState("0.9");
-  const [alphaCols, setAlphaCols] = useState<string[]>([]);
-  const [alphaRows, setAlphaRows] = useState<(number | null)[][]>([]);
-  const [alphaResult, setAlphaResult] = useState<
-    { name: string; k: number; alpha: number; stdAlpha: number; items: { name: string; mean: number; sd: number; itemTotal: number; alphaIfDeleted: number }[] }[] | null
-  >(null);
+  const initialAlpha = defaultAlphaProjectData(initialVars);
+  const [wantAlpha, setWantAlpha] = useState(initialAlpha.wantAlpha);
+  const [alphaScales, setAlphaScales] = useState<AlphaScale[]>(initialAlpha.scales);
+  const [alphaN, setAlphaN] = useState(initialAlpha.n);
+  const [alphaMin, setAlphaMin] = useState(initialAlpha.min);
+  const [alphaMax, setAlphaMax] = useState(initialAlpha.max);
+  const [alphaCols, setAlphaCols] = useState<string[]>(initialAlpha.columns);
+  const [alphaRows, setAlphaRows] = useState<(number | null)[][]>(initialAlpha.rows);
+  const [alphaResult, setAlphaResult] = useState<AlphaResultGroup[] | null>(initialAlpha.result);
   const [alphaStatus, setAlphaStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({ text: "", kind: "" });
   const [backupModal, setBackupModal] = useState(false);
   const [backupName, setBackupName] = useState("");
@@ -1405,6 +1460,16 @@ function SemTool() {
     setColumns(data.columns ?? []);
     setRows(data.rows ?? []);
     setColMap(data.colMap ?? {});
+    const alpha = cloneAlphaProjectData(data.alpha ?? defaultAlphaProjectData(data.vars));
+    setWantAlpha(alpha.wantAlpha);
+    setAlphaScales(alpha.scales);
+    setAlphaN(alpha.n);
+    setAlphaMin(alpha.min);
+    setAlphaMax(alpha.max);
+    setAlphaCols(alpha.columns);
+    setAlphaRows(alpha.rows);
+    setAlphaResult(alpha.result);
+    setAlphaStatus({ text: "", kind: "" });
     setAnalysis(null);
     setAnswerKey(null);
     setBootResults(null);
@@ -1442,6 +1507,16 @@ function SemTool() {
                   columns,
                   rows,
                   colMap,
+                  alpha: {
+                    wantAlpha,
+                    scales: alphaScales,
+                    n: alphaN,
+                    min: alphaMin,
+                    max: alphaMax,
+                    columns: alphaCols,
+                    rows: alphaRows,
+                    result: alphaResult,
+                  },
                 },
               }
             : p
@@ -1451,7 +1526,25 @@ function SemTool() {
       });
     }, 100);
     return () => clearTimeout(t);
-  }, [projectId, source, vars, inactiveArrowIds, constraints, n, columns, rows, colMap]);
+  }, [
+    projectId,
+    source,
+    vars,
+    inactiveArrowIds,
+    constraints,
+    n,
+    columns,
+    rows,
+    colMap,
+    wantAlpha,
+    alphaScales,
+    alphaN,
+    alphaMin,
+    alphaMax,
+    alphaCols,
+    alphaRows,
+    alphaResult,
+  ]);
 
   // همگام‌سازی متغیرها با localStorage برای صفحه آلفا
   useEffect(() => {
@@ -1460,6 +1553,21 @@ function SemTool() {
     } catch {
       // ignore
     }
+    const timer = setTimeout(() => {
+      setAlphaScales((previous) =>
+        vars.map((variable) => {
+          const existing = previous.find((scale) => scale.varId === variable.id);
+          return existing
+            ? { ...existing, name: variable.name }
+            : {
+                varId: variable.id,
+                name: variable.name,
+                items: Array.from({ length: Math.max(2, variable.subscales.length || 1) }, () => ({ min: 1, max: 5 })),
+              };
+        })
+      );
+    }, 0);
+    return () => clearTimeout(timer);
   }, [vars]);
 
   const switchProject = (id: string) => {
@@ -1605,8 +1713,14 @@ function SemTool() {
     }));
   };
 
-  const setIndirectTarget = (key: string, value: IndirectTarget) => {
-    setConstraints((prev) => ({ ...prev, indirectTargets: { ...prev.indirectTargets, [key]: value } }));
+  const setIndirectTarget = (key: string, patch: Partial<IndirectConstraint>) => {
+    setConstraints((prev) => ({
+      ...prev,
+      indirectTargets: {
+        ...prev.indirectTargets,
+        [key]: { ...defaultIndirectConstraint(), ...prev.indirectTargets[key], ...patch },
+      },
+    }));
   };
 
   const setFitRange = (key: keyof SemFitConstraints, field: "min" | "max", value: number | null) => {
@@ -1632,7 +1746,13 @@ function SemTool() {
           const sem = estimateSem(modelNodes, modelArrows, comps);
           const raw = bootstrapIndirectEffects(modelNodes, modelArrows, comps, bootN);
           const directOf = (fromVar: number, toVar: number) =>
-            sem.effects.find((e) => e.fromVar === fromVar && e.toVar === toVar)?.direct ?? 0;
+            sem.paths
+              .filter((path) => {
+                const fromNode = modelNodes.find((node) => node.nodeId === path.from);
+                const toNode = modelNodes.find((node) => node.nodeId === path.to);
+                return fromNode?.varId === fromVar && toNode?.varId === toVar;
+              })
+              .reduce((sum, path) => sum + (Number.isFinite(path.std) ? path.std : 0), 0);
           const res: BootResult[] = raw.map((b) => ({
             fromVar: b.fromVar,
             toVar: b.toVar,
@@ -2853,18 +2973,24 @@ function SemTool() {
             {indirectRows.length > 0 && (
               <>
                 <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">قیود اثرات غیرمستقیم (میانجی‌گری — با بوت‌استرپ)</h3>
-                <p className={tinyCls}>برای هر مسیر میانجی جداگانه و برای «کل» اثر غیرمستقیم، معناداری با بوت‌استرپ تعیین می‌شود.</p>
+                <p className={tinyCls}>
+                  معناداری و دامنه اثر غیرمستقیم استانداردشده برای هر مسیر قابل تنظیم است. دامنه پیش‌فرض 0.10 تا 0.30،
+                  اثری کوچک تا متوسط و رایج در پژوهش‌های علوم رفتاری است.
+                </p>
                 <div className="tool-table-wrap mt-3">
-                  <table className="tool-table" style={{ minWidth: 560 }}>
+                  <table className="tool-table" style={{ minWidth: 760 }}>
                     <thead>
                       <tr>
                         <th>مسیر غیرمستقیم</th>
                         <th>وضعیت</th>
+                        <th>حداقل اثر</th>
+                        <th>حداکثر اثر</th>
+                        <th>دامنه متداول</th>
                       </tr>
                     </thead>
                     <tbody>
                       {indirectRows.map((row) => {
-                        const val = constraints.indirectTargets[row.key] ?? "sig";
+                        const target = { ...defaultIndirectConstraint(), ...constraints.indirectTargets[row.key] };
                         return (
                           <tr key={row.key} className={row.isTotal ? "bg-stone-50 font-bold dark:bg-slate-900" : ""}>
                             <td>
@@ -2881,12 +3007,39 @@ function SemTool() {
                               {row.label}
                             </td>
                             <td>
-                              <select className={`${inputCls} !py-1.5`} value={val} onChange={(e) => setIndirectTarget(row.key, e.target.value as IndirectTarget)}>
+                              <select
+                                className={`${inputCls} !py-1.5`}
+                                value={target.significance}
+                                onChange={(e) => setIndirectTarget(row.key, { significance: e.target.value as IndirectTarget })}
+                              >
                                 <option value="sig">معنی‌دار باشد</option>
                                 <option value="ns">معنی‌دار نباشد</option>
                                 <option value="any">مهم نیست</option>
                               </select>
                             </td>
+                            <td>
+                              <input
+                                type="number"
+                                step={0.01}
+                                dir="ltr"
+                                className={`${inputCls} !min-w-24 !py-1.5`}
+                                placeholder="آزاد"
+                                value={target.min ?? ""}
+                                onChange={(e) => setIndirectTarget(row.key, { min: e.target.value === "" ? null : Number(e.target.value) })}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                step={0.01}
+                                dir="ltr"
+                                className={`${inputCls} !min-w-24 !py-1.5`}
+                                placeholder="آزاد"
+                                value={target.max ?? ""}
+                                onChange={(e) => setIndirectTarget(row.key, { max: e.target.value === "" ? null : Number(e.target.value) })}
+                              />
+                            </td>
+                            <td className="font-bold text-emerald-700 dark:text-emerald-300">0.10 تا 0.30</td>
                           </tr>
                         );
                       })}
@@ -3674,7 +3827,7 @@ function SemTool() {
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
-                        <tr><th>مسیر غیرمستقیم</th><th>اثر مستقیم</th><th>اثر غیرمستقیم</th><th>CI پایین ۹۵٪</th><th>CI بالا ۹۵٪</th><th>p</th><th>اثر کل</th><th>نتیجه</th></tr>
+                        <tr><th>مسیر غیرمستقیم</th><th>اثر مستقیم</th><th>اثر غیرمستقیم استاندارد</th><th>CI پایین ۹۵٪</th><th>CI بالا ۹۵٪</th><th>p</th><th>اثر کل</th><th>تفسیر نهایی</th></tr>
                       </thead>
                       <tbody>
                         {bootResults === null && (
@@ -3694,7 +3847,14 @@ function SemTool() {
                               <td className="number-cell">{fmt(b.hi)}</td>
                               <td className="number-cell">{fmtP(b.p)}{starP(b.p)}</td>
                               <td className="number-cell">{isTotal ? fmt(b.total) : "—"}</td>
-                              <td dangerouslySetInnerHTML={{ __html: b.indirect !== 0 && b.p < 0.05 ? badge(true, "میانجی معنی‌دار") : b.indirect === 0 ? badgeWarn("میانجی وجود ندارد") : badge(false, "غیرمعنی‌دار") }} />
+                              <td
+                                dangerouslySetInnerHTML={{
+                                  __html:
+                                    b.p < 0.05
+                                      ? badge(Math.abs(b.indirect) >= 0.1 && Math.abs(b.indirect) <= 0.3, indirectEffectInterpretation(b.indirect, b.p))
+                                      : badge(false, indirectEffectInterpretation(b.indirect, b.p)),
+                                }}
+                              />
                             </tr>
                           );
                         })}

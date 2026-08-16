@@ -32,8 +32,8 @@ export default function PathDiagram({
 }) {
   const nodeW = 190;
   const nodeH = 54;
-  const colGap = 280;
-  const subW = 150;
+  const colGap = 440;
+  const subW = 135;
   const subH = 26;
   const subGap = 36;
 
@@ -43,15 +43,7 @@ export default function PathDiagram({
     vars.filter((v) => v.role === "outcome"),
   ];
 
-  // سمت زیرمقیاس‌ها: ستون چپ ← چپ، ستون راست ← راست، ستون وسط ← بالا/پایین
-  const sideOf = (v: VariableSpec): Side => {
-    const col = varsByRole.findIndex((arr) => arr.includes(v));
-    if (col === 0) return "left";
-    if (col === 2) return "right";
-    const colVars = varsByRole[1];
-    const idx = colVars.findIndex((x) => x.id === v.id);
-    return idx < Math.ceil(colVars.length / 2) ? "top" : "bottom";
-  };
+  const sideOf = (): Side => "bottom";
 
   const nodePos = new Map<number, Pos>();
   /** زیرمقیاس‌های نمایشی متغیرهای جمع‌پذیر */
@@ -67,7 +59,8 @@ export default function PathDiagram({
     for (const v of colVars) {
       const vNodes = nodes.filter((n) => n.varId === v.id);
       const nSub = v.subscales.length;
-      const side = sideOf(v);
+      // برای خوانایی مقاله‌ای، شاخص‌ها زیر سازه قرار می‌گیرند و مسیرهای ساختاری در محور افقی می‌مانند.
+      const side = sideOf();
       const subsOnSide = side === "left" || side === "right";
 
       if (nSub === 0) {
@@ -79,7 +72,7 @@ export default function PathDiagram({
       } else if (v.hasTotal) {
         // متغیر جمع‌پذیر: بیضی (کل) + زیرمقیاس‌های نمایشی
         const total = vNodes[0];
-        const cy = yCursor + nodeH / 2 + 6;
+        const cy = yCursor + nodeH / 2;
         nodePos.set(total.nodeId, { cx: x + nodeW / 2, cy, w: nodeW, h: nodeH });
         allBoxes.push({ x, y: yCursor, w: nodeW, h: nodeH + 12 });
         const inds: Pos[] = [];
@@ -93,13 +86,15 @@ export default function PathDiagram({
           const subBlockH = Math.max(nSub * subGap, nodeH);
           yCursor += Math.max(nodeH + 40, subBlockH + 30);
         } else {
-          const subRows = Math.ceil(nSub / 2);
-          const rowW = 2 * subW + 10;
+          const indicatorColumns = Math.min(3, nSub);
+          const subRows = Math.ceil(nSub / indicatorColumns);
           const place = (baseY: number) =>
             v.subscales.forEach((_, si) => {
-              const ci = si % 2;
-              const ri = Math.floor(si / 2);
-              const sx = x + (nodeW - rowW) / 2 + ci * (subW + 10);
+              const ci = si % indicatorColumns;
+              const ri = Math.floor(si / indicatorColumns);
+              const itemsInRow = Math.min(indicatorColumns, nSub - ri * indicatorColumns);
+              const currentRowW = itemsInRow * subW + (itemsInRow - 1) * 10;
+              const sx = x + (nodeW - currentRowW) / 2 + ci * (subW + 10);
               const sy = baseY + ri * subGap;
               inds.push({ cx: sx + subW / 2, cy: sy + subH / 2, w: subW, h: subH });
               allBoxes.push({ x: sx, y: sy, w: subW, h: subH });
@@ -118,7 +113,8 @@ export default function PathDiagram({
       } else {
         // غیرجمع‌پذیر: هر زیرمقیاس گره مستقل
         const startY = yCursor;
-        const subRows = Math.ceil(nSub / 2);
+        const indicatorColumns = Math.min(3, nSub);
+        const subRows = Math.ceil(nSub / indicatorColumns);
         if (subsOnSide) {
           const subX = side === "left" ? x - subW - 24 : x + nodeW + 24;
           vNodes.forEach((node, si) => {
@@ -128,12 +124,13 @@ export default function PathDiagram({
           });
           yCursor = startY + Math.max(nSub * subGap, subH) + 30;
         } else {
-          const rowW = 2 * subW + 10;
           const place = (baseY: number) =>
             vNodes.forEach((node, si) => {
-              const ci = si % 2;
-              const ri = Math.floor(si / 2);
-              const sx = x + (nodeW - rowW) / 2 + ci * (subW + 10);
+              const ci = si % indicatorColumns;
+              const ri = Math.floor(si / indicatorColumns);
+              const itemsInRow = Math.min(indicatorColumns, nSub - ri * indicatorColumns);
+              const currentRowW = itemsInRow * subW + (itemsInRow - 1) * 10;
+              const sx = x + (nodeW - currentRowW) / 2 + ci * (subW + 10);
               const sy = baseY + ri * subGap;
               nodePos.set(node.nodeId, { cx: sx + subW / 2, cy: sy + subH / 2, w: subW, h: subH });
               allBoxes.push({ x: sx, y: sy, w: subW, h: subH });
@@ -151,7 +148,7 @@ export default function PathDiagram({
   }
 
   // ---------- bounding box واقعی همه عناصر ----------
-  const pad = 30;
+  const pad = 100;
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -207,11 +204,28 @@ export default function PathDiagram({
             const x2 = t.cx - t.w / 2;
             const y2 = t.cy;
             const beta = betaOf(a.fromNode, a.toNode);
-            const mx = (x1 + x2) / 2;
-            const my = (y1 + y2) / 2 - 12;
+            const fromRole = nodes.find((node) => node.nodeId === a.fromNode)?.role;
+            const toRole = nodes.find((node) => node.nodeId === a.toNode)?.role;
+            const roleIndex: Record<Role, number> = { exogenous: 0, mediator: 1, outcome: 2 };
+            const isLongDirectPath =
+              fromRole != null && toRole != null && Math.abs(roleIndex[toRole] - roleIndex[fromRole]) > 1;
+            const controlX = (x1 + x2) / 2;
+            const controlY = Math.min(y1, y2) - 85;
+            const mx = isLongDirectPath ? (x1 + 2 * controlX + x2) / 4 : (x1 + x2) / 2;
+            const my = isLongDirectPath ? (y1 + 2 * controlY + y2) / 4 - 14 : (y1 + y2) / 2 - 14;
             return (
               <g key={i}>
-                <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#64748b" strokeWidth={1.8} markerEnd="url(#arrow)" />
+                {isLongDirectPath ? (
+                  <path
+                    d={`M ${x1} ${y1} Q ${controlX} ${controlY} ${x2} ${y2}`}
+                    fill="none"
+                    stroke="#64748b"
+                    strokeWidth={1.8}
+                    markerEnd="url(#arrow)"
+                  />
+                ) : (
+                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#64748b" strokeWidth={1.8} markerEnd="url(#arrow)" />
+                )}
                 {beta != null && Number.isFinite(beta) && (
                   <g>
                     <rect x={mx - 24} y={my - 12} width={48} height={19} rx={5} fill="#fff" stroke="#cbd5e1" />
@@ -251,7 +265,7 @@ export default function PathDiagram({
                     <g key={si}>
                       <line
                         x1={cx}
-                        y1={cy + nodeH / 2}
+                        y1={cy + nodeH / 2 + 8}
                         x2={sp.cx}
                         y2={sp.cy - subH / 2}
                         stroke="#64748b"

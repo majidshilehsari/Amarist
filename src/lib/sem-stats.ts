@@ -31,22 +31,24 @@ export function countFinite(values: number[]): number {
 }
 
 export function skewness(values: number[]): number {
-  const n = countFinite(values);
+  const finite = values.filter(Number.isFinite);
+  const n = finite.length;
   if (n < 3) return NaN;
-  const m = mean(values);
-  const sd = sampleStd(values);
+  const m = mean(finite);
+  const sd = sampleStd(finite);
   if (!Number.isFinite(sd) || sd <= 0) return NaN;
-  return (n / ((n - 1) * (n - 2))) * values.reduce((s, v) => s + Math.pow((v - m) / sd, 3), 0);
+  return (n / ((n - 1) * (n - 2))) * finite.reduce((s, v) => s + Math.pow((v - m) / sd, 3), 0);
 }
 
 /** کشیدگی (نرمال‌شده/اضافی) با فرمول متداول SPSS */
 export function kurtosis(values: number[]): number {
-  const n = countFinite(values);
+  const finite = values.filter(Number.isFinite);
+  const n = finite.length;
   if (n < 4) return NaN;
-  const m = mean(values);
-  const sd = sampleStd(values);
+  const m = mean(finite);
+  const sd = sampleStd(finite);
   if (!Number.isFinite(sd) || sd <= 0) return NaN;
-  const m4 = values.reduce((s, v) => s + Math.pow((v - m) / sd, 4), 0) / n;
+  const m4 = finite.reduce((s, v) => s + Math.pow((v - m) / sd, 4), 0) / n;
   return (
     ((n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3))) * m4 -
     (3 * (n - 1) * (n - 1)) / ((n - 2) * (n - 3))
@@ -221,7 +223,8 @@ export function mardiaTest(cols: number[][]) {
   if (!m.valid) return { valid: false, kurtosis: NaN, cr: NaN, message: m.message };
   const p = cols.length;
   const n = m.d2.length;
-  const b2p = mean(m.d2);
+  // ضریب کشیدگی مردیا برابر میانگین مربع فاصله‌های ماهالانوبیس است.
+  const b2p = mean(m.d2.map((distance) => distance * distance));
   const expected = p * (p + 2);
   const se = Math.sqrt((8 * p * (p + 2)) / n);
   const cr = (b2p - expected) / se;
@@ -308,7 +311,8 @@ export function cronbachAlpha(cols: number[][]): number {
     if (r.every(Number.isFinite)) rows.push(r);
   }
   if (rows.length < 3) return NaN;
-  const itemVars = cols.map(sampleVariance);
+  const completeCols = Array.from({ length: k }, (_, column) => rows.map((row) => row[column]));
+  const itemVars = completeCols.map(sampleVariance);
   const totals = rows.map((r) => r.reduce((s, v) => s + v, 0));
   const varTotal = sampleVariance(totals);
   if (!Number.isFinite(varTotal) || varTotal <= 0) return NaN;
@@ -447,20 +451,22 @@ function commonFactorLoadings(cols: number[][]): number[] {
   if (count <= 1) return [1];
   const corr = correlationMatrixWithP(cols).r;
   if (count === 2) {
-    const loading = Math.sqrt(clamp(Math.abs(corr[0][1]), 0.09, 0.9025));
-    return [loading, loading];
+    const loading = Math.sqrt(clamp(Math.abs(corr[0][1]), 1e-6, 0.998001));
+    return [loading, Math.sign(corr[0][1] || 1) * loading];
   }
 
   let averageCorrelation = 0;
   let pairs = 0;
   for (let i = 0; i < count; i++) {
     for (let j = i + 1; j < count; j++) {
-      averageCorrelation += Math.max(0, corr[i][j]);
+      averageCorrelation += Math.abs(corr[i][j]);
       pairs++;
     }
   }
-  const initial = Math.sqrt(clamp(averageCorrelation / Math.max(1, pairs), 0.09, 0.9025));
-  let loadings = Array(count).fill(initial);
+  const initial = Math.sqrt(clamp(averageCorrelation / Math.max(1, pairs), 1e-6, 0.998001));
+  let loadings = Array.from({ length: count }, (_, index) =>
+    index === 0 || corr[0][index] >= 0 ? initial : -initial
+  );
   const learningRate = 0.04 / count;
   for (let iteration = 0; iteration < 800; iteration++) {
     const gradients = Array(count).fill(0);
@@ -471,7 +477,7 @@ function commonFactorLoadings(cols: number[][]): number[] {
         gradients[j] -= 2 * loadings[i] * residual;
       }
     }
-    loadings = loadings.map((loading, index) => clamp(loading - learningRate * gradients[index], 0.3, 0.95));
+    loadings = loadings.map((loading, index) => clamp(loading - learningRate * gradients[index], -0.999, 0.999));
   }
   return loadings;
 }
@@ -534,7 +540,7 @@ function measurementModelFit(
   for (const node of orderedNodes) {
     if (node.role === "exogenous") continue;
     const index = latentIndex.get(node.nodeId)!;
-    psi[index][index] = Math.max(0.02, 1 - clamp(r2[node.nodeId] ?? 0, 0, 0.98));
+    psi[index][index] = Math.max(1e-6, 1 - clamp(r2[node.nodeId] ?? 0, 0, 0.999999));
   }
 
   const identity = Array.from({ length: latentCount }, (_, i) =>
@@ -559,7 +565,7 @@ function measurementModelFit(
     const blockObserved = observed.slice(observedOffset, observedOffset + block.cols.length);
     const blockLoadings = block.cols.length > 1 ? commonFactorLoadings(blockObserved) : [1];
     for (const loading of blockLoadings) {
-      loadings.push(block.cols.length > 1 ? clamp(Math.abs(loading), 0.3, 0.95) : 1);
+      loadings.push(block.cols.length > 1 ? clamp(loading, -0.999, 0.999) : 1);
       factorOfIndicator.push(blockIndex);
     }
     observedOffset += block.cols.length;
@@ -690,7 +696,7 @@ export function estimateSem(
     if (node.role === "exogenous") continue;
     const preds = active.filter((a) => a.toNode === id);
     if (!preds.length) {
-      psi[pos.get(id)!] = sampleVariance(nodeCols[id]) || 0;
+      psi[pos.get(id)!] = sampleVariance(nodeCols[id].filter(Number.isFinite)) || 0;
       r2[id] = 0;
       dw[id] = NaN;
       vifs[id] = [];
@@ -698,10 +704,14 @@ export function estimateSem(
       continue;
     }
     const X = preds.map((a) => nodeCols[a.fromNode]);
-    const o = ols(X, nodeCols[id]);
-    const sy = sampleStd(nodeCols[id]);
+    const y = nodeCols[id];
+    const completeIndices = Array.from({ length: y.length }, (_, index) => index).filter(
+      (index) => Number.isFinite(y[index]) && X.every((column) => Number.isFinite(column[index]))
+    );
+    const o = ols(X, y);
+    const sy = sampleStd(completeIndices.map((index) => y[index]));
     preds.forEach((a, j) => {
-      const sx = sampleStd(X[j]);
+      const sx = sampleStd(completeIndices.map((index) => X[j][index]));
       const std = Number.isFinite(o.coefs[j + 1]) && sx > 0 && sy > 0 ? (o.coefs[j + 1] * sx) / sy : NaN;
       B[pos.get(id)!][pos.get(a.fromNode)!] = o.coefs[j + 1];
       pathResults.push({

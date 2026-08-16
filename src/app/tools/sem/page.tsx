@@ -186,6 +186,42 @@ function AssumptionNote({ condition, pass }: { condition: string; pass: boolean 
   );
 }
 
+function CorrelationMatrixTable({ data }: { data: CorrelationTableData }) {
+  return (
+    <div className="tool-table-wrap mt-2">
+      <table className="tool-table" style={{ minWidth: Math.max(560, (data.labels.length + 1) * 130) }}>
+        <thead>
+          <tr>
+            <th>متغیر / زیرمقیاس</th>
+            {data.labels.map((label, index) => (
+              <th key={index}>{label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {data.labels.map((label, i) => (
+            <tr key={`${label}-${i}`}>
+              <td style={{ fontWeight: 900 }}>{label}</td>
+              {data.labels.map((_, j) => {
+                if (i === j) return <td key={j} className="number-cell">1</td>;
+                if (i < j) return <td key={j} />;
+                const value = data.r?.[i]?.[j] ?? NaN;
+                const p = data.p?.[i]?.[j] ?? 1;
+                return (
+                  <td key={j} className="number-cell">
+                    {fmt(value)}
+                    {p < 0.01 ? "**" : p < 0.05 ? "*" : ""}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Cell({ value, onCommit }: { value: number | null; onCommit: (v: number | null) => void }) {
   const [txt, setTxt] = useState(value == null ? "" : String(value));
   const [lastValue, setLastValue] = useState(value);
@@ -222,6 +258,20 @@ function normName(s: string): string {
   return String(s).replace(/[\s\u200c\u200f-]/g, "").toLowerCase();
 }
 
+function parseLocalizedNumber(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const normalized = String(value)
+    .trim()
+    .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
+    .replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
+    .replace(/[،٬,\s]/g, "")
+    .replace(/[٫/]/g, ".");
+  if (!normalized) return null;
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : null;
+}
+
 function autoMap(columns: string[], vars: VariableSpec[]): Record<number, (number | null)[]> {
   const map: Record<number, (number | null)[]> = {};
   const used = new Set<number>();
@@ -256,9 +306,15 @@ function computeNodeCols(
   const indicatorCols: Record<number, number[][]> = {};
   vars.forEach((v) => {
     const idxs = colMap[v.id] ?? [];
-    const cols: number[][] = idxs
-      .filter((i): i is number => i != null)
-      .map((i) => rows.map((r) => r[i] as number));
+    const expectedSlots = Math.max(1, v.subscales.length);
+    const cols: number[][] = Array.from({ length: expectedSlots }, (_, slot) => {
+      const columnIndex = idxs[slot];
+      if (columnIndex == null) return Array(n).fill(NaN);
+      return rows.map((row) => {
+        const value = row[columnIndex];
+        return value != null && Number.isFinite(value) ? value : NaN;
+      });
+    });
     indicatorCols[v.id] = cols;
     const vNodes = nodes.filter((x) => x.varId === v.id);
     if (vNodes.length === 1) {
@@ -282,6 +338,92 @@ function computeNodeCols(
     }
   });
   return { nodeCols, indicatorCols };
+}
+
+function validateRealSemData(
+  rows: (number | null)[][],
+  columns: string[],
+  vars: VariableSpec[],
+  colMap: Record<number, (number | null)[]>
+): string[] {
+  const problems: string[] = [];
+  const selectedColumns: number[] = [];
+  for (const variable of vars) {
+    const expectedSlots = Math.max(1, variable.subscales.length);
+    const mappings = colMap[variable.id] ?? [];
+    for (let slot = 0; slot < expectedSlots; slot++) {
+      const columnIndex = mappings[slot];
+      const label = variable.subscales[slot]
+        ? `${variable.name} — ${variable.subscales[slot].name}`
+        : variable.name;
+      if (columnIndex == null || !columns[columnIndex]) {
+        problems.push(`برای «${label}» هیچ ستون واقعی نگاشت نشده است.`);
+        continue;
+      }
+      selectedColumns.push(columnIndex);
+      const range = variable.subscales[slot] ?? { min: variable.totalMin, max: variable.totalMax };
+      const invalidCount = rows.reduce((count, row) => {
+        const value = row[columnIndex];
+        return value != null && Number.isFinite(value) && (value < range.min || value > range.max) ? count + 1 : count;
+      }, 0);
+      if (invalidCount > 0) {
+        problems.push(`در ستون «${columns[columnIndex]}» برای «${label}»، ${invalidCount} مقدار خارج از دامنه ${range.min} تا ${range.max} وجود دارد.`);
+      }
+    }
+  }
+  const duplicateColumns = [...new Set(selectedColumns.filter((column, index) => selectedColumns.indexOf(column) !== index))];
+  if (duplicateColumns.length) {
+    problems.push(`یک ستون به بیش از یک متغیر/زیرمقیاس نگاشت شده است: ${duplicateColumns.map((index) => columns[index]).join("، ")}.`);
+  }
+  return problems;
+}
+
+function buildCorrelationTables(
+  vars: VariableSpec[],
+  nodes: ModelNode[],
+  nodeCols: number[][],
+  indicatorCols: Record<number, number[][]>
+): { totals: CorrelationTableData; all: CorrelationTableData; subscales: CorrelationTableData } {
+  const totalsLabels = nodes.map((node) => node.label);
+  const totalsCorr = correlationMatrixWithP(nodeCols);
+  const allLabels: string[] = [];
+  const allCols: number[][] = [];
+  const subscaleLabels: string[] = [];
+  const subscaleCols: number[][] = [];
+
+  vars.forEach((variable) => {
+    const variableNodes = nodes.filter((node) => node.varId === variable.id);
+    const indicators = indicatorCols[variable.id] ?? [];
+    const totalNode = variableNodes[0];
+
+    if (variable.hasTotal && totalNode) {
+      allLabels.push(variable.subscales.length ? `${variable.name} (کل)` : variable.name);
+      allCols.push(nodeCols[totalNode.nodeId]);
+    }
+
+    if (variable.subscales.length > 0) {
+      variable.subscales.forEach((subscale, index) => {
+        const column = indicators[index];
+        if (!column) return;
+        const label = `${variable.name} — ${subscale.name}`;
+        allLabels.push(label);
+        allCols.push(column);
+        subscaleLabels.push(label);
+        subscaleCols.push(column);
+      });
+    } else if (totalNode) {
+      subscaleLabels.push(variable.name);
+      subscaleCols.push(nodeCols[totalNode.nodeId]);
+    }
+  });
+
+  const allCorr = correlationMatrixWithP(allCols);
+  const subscaleCorr = correlationMatrixWithP(subscaleCols);
+  return {
+    totals: { labels: totalsLabels, ...totalsCorr },
+    all: { labels: allLabels, ...allCorr },
+    subscales: { labels: subscaleLabels, ...subscaleCorr },
+  };
 }
 
 function stdAlphaOf(cols: number[][]): number {
@@ -349,12 +491,16 @@ type BootResult = {
   total: number;
 };
 
+type CorrelationTableData = { labels: string[]; r: number[][]; p: number[][] };
+
 type Analysis = {
   nodeIds: number[];
   nodeCols: number[][];
   indicatorCols: Record<number, number[][]>;
   sem: SemResults;
-  corr: { r: number[][]; p: number[][] };
+  corr: CorrelationTableData;
+  corrAll: CorrelationTableData;
+  corrSubscales: CorrelationTableData;
   maha: ReturnType<typeof mahalanobisDistances>;
   mardia: ReturnType<typeof mardiaTest>;
   missing: { col: string; count: number }[];
@@ -821,7 +967,7 @@ function buildReportText(
     L.push("تحلیلی اجرا نشده است.");
     return L.join("\n");
   }
-  const { sem, corr, maha, mardia, missing, normals, meas } = analysis;
+  const { sem, corr, corrAll, corrSubscales, maha, mardia, missing, normals, meas } = analysis;
   const nodeLabel = (id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`;
   L.push(`تعداد موارد: ${n} | تعداد متغیرها/زیرمقیاس‌ها: ${nodes.length}`);
   L.push("");
@@ -853,19 +999,23 @@ function buildReportText(
       : `  ${mardia.message}`
   );
   L.push("");
-  L.push("۵) ماتریس همبستگی پیرسون (نمرات کل / گره‌ها):");
-  corr.r.forEach((row, i) => {
-    L.push(
-      `  ${nodeLabel(i)}: ` +
-        row
-          .map((r, j) =>
-            j > i ? `${nodeLabel(j)}=${fmt(r)}${corr.p[i][j] < 0.01 ? "**" : corr.p[i][j] < 0.05 ? "*" : ""}` : ""
-          )
-          .filter(Boolean)
-          .join("، ")
-    );
-  });
-  L.push("  ** p < 0.01 ، * p < 0.05");
+  const appendCorrelationText = (title: string, table: CorrelationTableData) => {
+    L.push(title);
+    table.r.forEach((row, i) => {
+      const entries = row
+        .map((value, j) =>
+          j < i
+            ? `${table.labels[j]}=${fmt(value)}${table.p[i][j] < 0.01 ? "**" : table.p[i][j] < 0.05 ? "*" : ""}`
+            : ""
+        )
+        .filter(Boolean);
+      L.push(`  ${table.labels[i]}: ${entries.length ? entries.join("، ") : "1"}`);
+    });
+  };
+  appendCorrelationText("۵-۱) ماتریس همبستگی پیرسون (نمرات کل / گره‌های مدل):", corr);
+  appendCorrelationText("۵-۲) ماتریس همبستگی پیرسون (نمره کل و زیرمقیاس‌ها با هم):", corrAll);
+  appendCorrelationText("۵-۳) ماتریس همبستگی پیرسون (فقط زیرمقیاس‌ها؛ نمره کل برای متغیر بدون زیرمقیاس):", corrSubscales);
+  L.push("  ** p < 0.01 ، * p < 0.05 (دوطرفه؛ حذف زوجی داده‌های گمشده)");
   L.push("");
   L.push("۶) هم‌خطی و استقلال خطاها:");
   nodes.forEach((nd) => {
@@ -1044,7 +1194,7 @@ function buildDocxReport(
     return new Document({ sections: [{ children }] });
   }
 
-  const { sem, corr, maha, mardia, missing, normals, meas } = analysis;
+  const { sem, corr, corrAll, corrSubscales, maha, mardia, missing, normals, meas } = analysis;
   const nodeLabel = (id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`;
 
   // ۱) داده‌های گمشده
@@ -1091,23 +1241,28 @@ function buildDocxReport(
   );
 
   // ۵) همبستگی
-  children.push(docH("۵) ماتریس همبستگی پیرسون"));
-  children.push(
-    docTable(
-      ["", ...nodes.map((nd) => nd.label)],
-      nodes.map((nd, i) => [
-        nd.label,
-        ...nodes.map((_, j) => {
-          if (i === j) return "1";
-          if (i < j) return "";
-          const r = corr.r?.[i]?.[j] ?? NaN;
-          const p = corr.p?.[i]?.[j] ?? 1;
-          return `${fmt(r)}${p < 0.01 ? "**" : p < 0.05 ? "*" : ""}`;
-        }),
-      ])
-    )
-  );
-  children.push(docP("** p < 0.01 ، * p < 0.05", { size: 20, color: "666666" }));
+  const addCorrelationDocTable = (title: string, table: CorrelationTableData) => {
+    children.push(docH(title));
+    children.push(
+      docTable(
+        ["", ...table.labels],
+        table.labels.map((label, i) => [
+          label,
+          ...table.labels.map((_, j) => {
+            if (i === j) return "1";
+            if (i < j) return "";
+            const value = table.r?.[i]?.[j] ?? NaN;
+            const p = table.p?.[i]?.[j] ?? 1;
+            return `${fmt(value)}${p < 0.01 ? "**" : p < 0.05 ? "*" : ""}`;
+          }),
+        ])
+      )
+    );
+  };
+  addCorrelationDocTable("۵-۱) همبستگی نمرات کل / گره‌های مدل", corr);
+  addCorrelationDocTable("۵-۲) همبستگی نمره کل و زیرمقیاس‌ها", corrAll);
+  addCorrelationDocTable("۵-۳) همبستگی فقط زیرمقیاس‌ها (با جایگزینی نمره کل در نبود زیرمقیاس)", corrSubscales);
+  children.push(docP("** p < 0.01 ، * p < 0.05 (دوطرفه؛ حذف زوجی داده‌های گمشده)", { size: 20, color: "666666" }));
 
   // ۶) VIF / DW
   children.push(docH("۶) عدم هم‌خطی چندگانه و استقلال خطاها"));
@@ -1426,6 +1581,10 @@ function SemTool() {
       problems.push("داده‌ای وجود ندارد؛ ابتدا داده تولید یا وارد کنید.");
       return problems;
     }
+    if (source === "real") {
+      problems.push(...validateRealSemData(rows, columns, vars, colMap));
+    }
+
     // گره‌های بی‌اعتبار
     for (const nd of modelNodes) {
       const col = computeNodeCols(rows, vars, modelNodes, colMap).nodeCols[nd.nodeId] ?? [];
@@ -1437,7 +1596,7 @@ function SemTool() {
       }
     }
     // داده گمشده (وقتی تولید با missing عمدی نداریم)
-    if (constraints.missingPct === 0) {
+    if (source === "generate" && constraints.missingPct === 0) {
       const missingCols = columns
         .map((col, i) => ({ col, count: rows.filter((r) => r[i] == null || !Number.isFinite(r[i])).length }))
         .filter((m) => m.count > 0);
@@ -1790,6 +1949,10 @@ function SemTool() {
       const c = colsArg ?? columns;
       try {
         if (!r.length) throw new Error("داده‌ای وجود ندارد؛ ابتدا داده تولید یا وارد کنید.");
+        if (source === "real") {
+          const realDataProblems = validateRealSemData(r, c, vars, cm);
+          if (realDataProblems.length) throw new Error(realDataProblems.join("\n"));
+        }
         const { nodeCols, indicatorCols } = computeNodeCols(r, vars, modelNodes, cm);
         if (nodeCols.some((col) => col.every((v) => !Number.isFinite(v)))) {
           throw new Error("حداقل یکی از گره‌ها داده معتبر ندارد؛ نگاشت ستون‌ها را بررسی کنید.");
@@ -1800,7 +1963,7 @@ function SemTool() {
           measurementCols[node.nodeId] = node.kind === "total" && indicators.length ? indicators : [nodeCols[node.nodeId]];
         });
         const sem = estimateSem(modelNodes, modelArrows, nodeCols, measurementCols);
-        const corr = correlationMatrixWithP(nodeCols);
+        const correlationTables = buildCorrelationTables(vars, modelNodes, nodeCols, indicatorCols);
         const maha = mahalanobisDistances(nodeCols);
         const mardia = mardiaTest(nodeCols);
         const missing = c.map((col, i) => ({
@@ -1827,7 +1990,9 @@ function SemTool() {
           nodeCols,
           indicatorCols,
           sem,
-          corr,
+          corr: correlationTables.totals,
+          corrAll: correlationTables.all,
+          corrSubscales: correlationTables.subscales,
           maha,
           mardia,
           missing,
@@ -1898,7 +2063,7 @@ function SemTool() {
       const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null }) as unknown[][];
       if (!aoa.length) throw new Error("فایل اکسل خالی است.");
       const first = aoa[0] ?? [];
-      const hasHeader = first.some((v) => typeof v === "string" && !/^-?\d+(\.\d+)?$/.test(v.trim()));
+      const hasHeader = first.some((value) => typeof value === "string" && value.trim() !== "" && parseLocalizedNumber(value) == null);
       const headers: string[] = [];
       let dataRows = aoa;
       if (hasHeader) {
@@ -1909,18 +2074,21 @@ function SemTool() {
       }
       const parsed = dataRows.map((r) =>
         Array.from({ length: headers.length }, (_, j) => {
-          const v = (r as unknown[])[j];
-          if (v == null || v === "") return null;
-          const num = Number(String(v).replace(/[،]/g, "").trim());
-          return Number.isFinite(num) ? num : null;
+          const value = (r as unknown[])[j];
+          return parseLocalizedNumber(value);
         })
       );
       setSource("real");
       setColumns(headers);
       setRows(parsed);
       setColMap(autoMap(headers, vars));
-      setStatus({ text: `داده وارد شد: ${parsed.length} مورد × ${headers.length} ستون.`, kind: "ok" });
-      analyze(parsed, autoMap(headers, vars), headers, true, true);
+      setAnalysis(null);
+      setAnswerKey(null);
+      setBootResults(null);
+      setStatus({
+        text: `داده واقعی وارد شد: ${parsed.length} مورد × ${headers.length} ستون. نگاشت ستون‌ها را بررسی و سپس «اجرای تحلیل» را بزنید.`,
+        kind: "ok",
+      });
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
       setModal({ ok: false, lines: [(err as Error).message] });
@@ -3376,6 +3544,13 @@ function SemTool() {
               داده آماده است؛ با «اجرای تحلیل» مدل روی داده فعلی برآورد می‌شود و مراحل بعدی (پیش‌فرض‌ها، توصیفی،
               دیاگرام، استنباطی) فعال می‌شوند.
             </p>
+            {source === "real" && (
+              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[12px] font-bold leading-6 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300">
+                حالت داده واقعی فعال است: هیچ‌یک از قیود تولید، ضرایب هدف یا دامنه‌های دلخواه به نتایج تحمیل نمی‌شود.
+                محاسبات فقط از مقادیر فایل واردشده و مسیرهای مدل انجام می‌شوند؛ داده‌های گمشده نیز مطابق هر تحلیل به‌صورت
+                زوجی یا لیستی حذف می‌شوند.
+              </div>
+            )}
 
             <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4 text-[13px] leading-6 text-stone-700 dark:border-stone-700 dark:bg-slate-800 dark:text-stone-300">
               {rows.length ? (
@@ -3562,39 +3737,25 @@ function SemTool() {
 
                 <div>
                   <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۵) خطی بودن روابط (ماتریس همبستگی پیرسون)</h3>
-                  <p className={tinyCls}>اعداد زیر قطر ماتریس؛ ** معناداری در سطح ۰/۰۱ و * در سطح ۰/۰۵.</p>
-                  <div className="tool-table-wrap mt-2">
-                    <table className="tool-table">
-                      <thead>
-                        <tr>
-                          <th>متغیر / زیرمقیاس</th>
-                          {modelNodes.map((nd, i) => (
-                            <th key={i}>{nd.label}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {modelNodes.map((nd, i) => (
-                          <tr key={i}>
-                            <td style={{ fontWeight: 900 }}>{nd.label}</td>
-                            {modelNodes.map((_, j) => {
-                              if (i === j) return <td key={j} className="number-cell">1</td>;
-                              if (i < j) return <td key={j} />;
-                              const r = analysis.corr.r?.[i]?.[j] ?? NaN;
-                              const p = analysis.corr.p?.[i]?.[j] ?? 1;
-                              return (
-                                <td key={j} className="number-cell">
-                                  {fmt(r)}
-                                  {p < 0.01 ? "**" : p < 0.05 ? "*" : ""}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <p className={tinyCls}>
+                    اعداد زیر قطر ماتریس؛ ** معناداری در سطح ۰/۰۱ و * در سطح ۰/۰۵. همبستگی‌ها دوطرفه و با حذف زوجی
+                    داده‌های گمشده محاسبه می‌شوند.
+                  </p>
+                  <div className="mt-3">
+                    <h4 className="text-[13px] font-extrabold text-stone-700 dark:text-stone-300">۵-۱) نمرات کل / گره‌های مدل</h4>
+                    <CorrelationMatrixTable data={analysis.corr} />
                   </div>
-                  <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>** p &lt; 0.01 ، * p &lt; 0.05 (دوطرفه)</p>
+                  <div className="mt-5">
+                    <h4 className="text-[13px] font-extrabold text-stone-700 dark:text-stone-300">۵-۲) نمره کل و زیرمقیاس‌ها با هم</h4>
+                    <CorrelationMatrixTable data={analysis.corrAll} />
+                  </div>
+                  <div className="mt-5">
+                    <h4 className="text-[13px] font-extrabold text-stone-700 dark:text-stone-300">
+                      ۵-۳) فقط زیرمقیاس‌ها؛ نمره کل برای متغیرهای بدون زیرمقیاس
+                    </h4>
+                    <CorrelationMatrixTable data={analysis.corrSubscales} />
+                  </div>
+                  <p className={`${tinyCls} mt-2 text-stone-500 dark:text-stone-400`}>** p &lt; 0.01 ، * p &lt; 0.05 (دوطرفه)</p>
                   <AssumptionNote
                     condition="همبستگی همه فلش‌های فعال مدل در سطح ۰/۰۵ معنادار باشد"
                     pass={modelArrows.every((a) => (analysis.corr.p[a.fromNode]?.[a.toNode] ?? 1) < 0.05)}

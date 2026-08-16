@@ -44,14 +44,17 @@ import {
   correlationMatrixWithP,
   type ModelNode,
   type Role,
+  type SemMeasurementColumns,
   type SemResults,
 } from "@/lib/sem-stats";
 import {
   generateSemData,
   buildModelNodes,
   buildModelArrows,
+  defaultSemFitConstraints,
   type GenConstraints,
   type IndirectTarget,
+  type SemFitConstraints,
   type PathTarget,
   type SemAnswerKey,
   type VariableSpec,
@@ -78,6 +81,27 @@ const btnSecondary =
   "inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2 text-sm font-extrabold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 disabled:opacity-50";
 const btnLight =
   "inline-flex items-center gap-2 rounded-xl border border-stone-200 bg-stone-50 px-4 py-2 text-sm font-bold text-stone-600 transition hover:bg-stone-100 dark:border-stone-700 dark:bg-slate-800 dark:text-stone-300 dark:hover:bg-slate-700 disabled:opacity-50";
+
+const fitConstraintRows: {
+  key: keyof SemFitConstraints;
+  label: string;
+  scientificRange: string;
+  interpretation: string;
+  step: number;
+}[] = [
+  { key: "chi2", label: "χ²", scientificRange: "آستانه ثابت ندارد", interpretation: "مقدار کمتر نسبت به df بهتر است؛ همراه p تفسیر می‌شود.", step: 0.1 },
+  { key: "df", label: "Df", scientificRange: "بیشتر از صفر", interpretation: "با ساختار مدل تعیین می‌شود و با تولید داده تغییر نمی‌کند.", step: 1 },
+  { key: "pValue", label: "P-value", scientificRange: "> 0.05 مطلوب", interpretation: "عدم تفاوت معنادار ماتریس مشاهده‌شده و مدل را نشان می‌دهد.", step: 0.01 },
+  { key: "cminDf", label: "CMIN/df", scientificRange: "1 تا 3 مطلوب", interpretation: "کمتر از 3 مطلوب و تا 5 در برخی منابع قابل قبول است.", step: 0.1 },
+  { key: "rmsea", label: "RMSEA", scientificRange: "≤ 0.08 قابل قبول", interpretation: "کمتر از 0.05 عالی و 0.05 تا 0.08 قابل قبول است.", step: 0.01 },
+  { key: "rmseaCiHigh", label: "حد بالای CI90% RMSEA", scientificRange: "≤ 0.10", interpretation: "حد بالای فاصله اطمینان 90٪ بهتر است از 0.10 بیشتر نباشد.", step: 0.01 },
+  { key: "pnfi", label: "PNFI", scientificRange: "≥ 0.50", interpretation: "بالاتر از 0.50 معمولاً قابل قبول تلقی می‌شود.", step: 0.01 },
+  { key: "cfi", label: "CFI", scientificRange: "≥ 0.90 قابل قبول", interpretation: "بالاتر از 0.95 نشان‌دهنده برازش بسیار مطلوب است.", step: 0.01 },
+  { key: "pcfi", label: "PCFI", scientificRange: "≥ 0.50", interpretation: "بالاتر از 0.50 معمولاً قابل قبول است.", step: 0.01 },
+  { key: "ifi", label: "IFI", scientificRange: "≥ 0.90", interpretation: "بالاتر از 0.90 مطلوب و بالاتر از 0.95 بسیار مطلوب است.", step: 0.01 },
+  { key: "gfi", label: "GFI", scientificRange: "≥ 0.90", interpretation: "بالاتر از 0.90 نشان‌دهنده برازش مطلوب است.", step: 0.01 },
+  { key: "srmr", label: "SRMR", scientificRange: "≤ 0.08", interpretation: "شاخص تکمیلی؛ کمتر از 0.08 قابل قبول است.", step: 0.01 },
+];
 
 const sectionTones = [
   "border-blue-300 bg-blue-50/50 dark:border-blue-900 dark:bg-slate-900",
@@ -108,6 +132,33 @@ function starP(p: number): string {
 
 function fmtChi2Df(fit: SemResults["fit"]): string {
   return fit.df === 0 ? "تعریف‌نشده (مدل اشباع)" : fmt(fit.chi2df);
+}
+
+type FitReportRow = { index: string; value: string; criterion: string; interpretation: string; pass: boolean | null };
+
+function fitReportRows(fit: SemResults["fit"]): FitReportRow[] {
+  const cminPass = Number.isFinite(fit.chi2df) && fit.chi2df >= 1 && fit.chi2df <= 3;
+  const rmseaPass = fit.rmsea <= 0.08 && (!Number.isFinite(fit.rmseaHigh) || fit.rmseaHigh <= 0.1);
+  return [
+    { index: "χ²", value: fmt(fit.chi2), criterion: "آستانه ثابت ندارد", interpretation: fit.pValue > 0.05 ? "قابل قبول" : "با احتیاط تفسیر شود", pass: null },
+    { index: "Df", value: String(fit.df), criterion: "> 0 برای مدل قابل‌آزمون", interpretation: fit.df > 0 ? "مطلوب" : "مدل اشباع", pass: fit.df > 0 },
+    { index: "P-value", value: fmtP(fit.pValue), criterion: "> 0.05 مطلوب", interpretation: fit.pValue > 0.05 ? "مطلوب" : "نامطلوب", pass: fit.pValue > 0.05 },
+    { index: "CMIN/df", value: fmtChi2Df(fit), criterion: "1 تا 3 مطلوب", interpretation: cminPass ? "مطلوب" : "خارج از دامنه مطلوب", pass: cminPass },
+    {
+      index: "RMSEA (CI90%)",
+      value: `${fmt(fit.rmsea)} (${fmt(fit.rmseaLow)}–${fmt(fit.rmseaHigh)})`,
+      criterion: "≤ 0.08 و حد بالای CI ≤ 0.10",
+      interpretation: rmseaPass ? (fit.rmsea <= 0.05 ? "بسیار مطلوب" : "مطلوب") : "نامطلوب",
+      pass: rmseaPass,
+    },
+    { index: "PNFI", value: fmt(fit.pnfi), criterion: "≥ 0.50", interpretation: fit.pnfi >= 0.5 ? "مطلوب" : "نامطلوب", pass: fit.pnfi >= 0.5 },
+    { index: "CFI", value: fmt(fit.cfi), criterion: "≥ 0.90؛ عالی ≥ 0.95", interpretation: fit.cfi >= 0.95 ? "بسیار مطلوب" : fit.cfi >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.cfi >= 0.9 },
+    { index: "PCFI", value: fmt(fit.pcfi), criterion: "≥ 0.50", interpretation: fit.pcfi >= 0.5 ? "مطلوب" : "نامطلوب", pass: fit.pcfi >= 0.5 },
+    { index: "IFI", value: fmt(fit.ifi), criterion: "≥ 0.90", interpretation: fit.ifi >= 0.95 ? "بسیار مطلوب" : fit.ifi >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.ifi >= 0.9 },
+    { index: "GFI", value: fmt(fit.gfi), criterion: "≥ 0.90", interpretation: fit.gfi >= 0.95 ? "بسیار مطلوب" : fit.gfi >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.gfi >= 0.9 },
+    { index: "TLI", value: fmt(fit.tli), criterion: "≥ 0.90", interpretation: fit.tli >= 0.9 ? "مطلوب" : "نامطلوب", pass: fit.tli >= 0.9 },
+    { index: "SRMR", value: fmt(fit.srmr), criterion: "≤ 0.08", interpretation: fit.srmr <= 0.08 ? "مطلوب" : "نامطلوب", pass: fit.srmr <= 0.08 },
+  ];
 }
 
 function AssumptionNote({ condition, pass }: { condition: string; pass: boolean }) {
@@ -356,10 +407,7 @@ function defaultConstraints(): GenConstraints {
     pathTargets: {},
     indirectTargets: {},
     r2Range: { min: 0.3, max: 0.6 },
-    cfiMin: 0.9,
-    rmseaMax: 0.08,
-    chi2dfMax: 3,
-    srmrMax: 0.08,
+    fit: defaultSemFitConstraints(),
     missingPct: 0,
     outlierPct: 0,
     enforceNormality: true,
@@ -367,6 +415,40 @@ function defaultConstraints(): GenConstraints {
     enforceVif: true,
     enforceDw: true,
     bootSamples: 5000,
+  };
+}
+
+type LegacyGenConstraints = Partial<GenConstraints> & {
+  cfiMin?: number;
+  rmseaMax?: number;
+  chi2dfMax?: number;
+  srmrMax?: number;
+};
+
+function normalizeConstraints(input?: LegacyGenConstraints | null): GenConstraints {
+  const defaults = defaultConstraints();
+  if (!input) return defaults;
+  const savedFit = input.fit;
+  const fit = Object.fromEntries(
+    (Object.keys(defaults.fit) as (keyof SemFitConstraints)[]).map((key) => [
+      key,
+      { ...defaults.fit[key], ...(savedFit?.[key] ?? {}) },
+    ])
+  ) as SemFitConstraints;
+
+  if (!savedFit) {
+    if (input.cfiMin != null) fit.cfi.min = input.cfiMin;
+    if (input.rmseaMax != null) fit.rmsea.max = input.rmseaMax;
+    if (input.chi2dfMax != null) fit.cminDf.max = input.chi2dfMax;
+    if (input.srmrMax != null) fit.srmr.max = input.srmrMax;
+  }
+
+  return {
+    ...defaults,
+    ...input,
+    pathTargets: input.pathTargets ?? {},
+    indirectTargets: input.indirectTargets ?? {},
+    fit,
   };
 }
 
@@ -753,9 +835,10 @@ function buildReportText(
   L.push("");
   L.push("۱۰) شاخص‌های برازش:");
   if (sem.fit.valid) {
-    L.push(
-      `  χ²=${fmt(sem.fit.chi2)} | df=${sem.fit.df} | χ²/df=${fmtChi2Df(sem.fit)} | CFI=${fmt(sem.fit.cfi)} | TLI=${fmt(sem.fit.tli)} | RMSEA=${fmt(sem.fit.rmsea)} | SRMR=${fmt(sem.fit.srmr)}`
-    );
+    fitReportRows(sem.fit).forEach((row) => {
+      L.push(`  ${row.index}: ${row.value} | معیار: ${row.criterion} | تفسیر: ${row.interpretation}`);
+    });
+    if (sem.fit.message) L.push(`  روش محاسبه: ${sem.fit.message}`);
   } else {
     L.push(`  ${sem.fit.message ?? "نامشخص"}`);
   }
@@ -1029,20 +1112,11 @@ function buildDocxReport(
   if (sem.fit.valid) {
     children.push(
       docTable(
-        ["χ²", "df", "χ²/df", "CFI", "TLI", "RMSEA", "SRMR", "نتیجه"],
-        [[
-          fmt(sem.fit.chi2),
-          sem.fit.df,
-          fmtChi2Df(sem.fit),
-          fmt(sem.fit.cfi),
-          fmt(sem.fit.tli),
-          fmt(sem.fit.rmsea),
-          fmt(sem.fit.srmr),
-          sem.fit.cfi >= 0.9 && sem.fit.rmsea <= 0.08 ? "برازش خوب" : "برازش ضعیف",
-        ]]
+        ["شاخص", "مقدار", "معیار متداول", "تفسیر"],
+        fitReportRows(sem.fit).map((row) => [row.index, row.value, row.criterion, row.interpretation])
       )
     );
-    children.push(docP("معیار: CFI ≥ 0.90 ، RMSEA ≤ 0.08", { size: 20, color: "666666" }));
+    if (sem.fit.message) children.push(docP(sem.fit.message, { size: 20, color: "666666" }));
   } else {
     children.push(docP(sem.fit.message ?? "نامشخص"));
   }
@@ -1326,7 +1400,7 @@ function SemTool() {
     setSource(data.source);
     setVars(data.vars);
     setInactiveArrowIds(new Set(data.inactiveArrowIds ?? []));
-    setConstraints(data.constraints);
+    setConstraints(normalizeConstraints(data.constraints));
     setN(data.n ?? "250");
     setColumns(data.columns ?? []);
     setRows(data.rows ?? []);
@@ -1535,6 +1609,16 @@ function SemTool() {
     setConstraints((prev) => ({ ...prev, indirectTargets: { ...prev.indirectTargets, [key]: value } }));
   };
 
+  const setFitRange = (key: keyof SemFitConstraints, field: "min" | "max", value: number | null) => {
+    setConstraints((prev) => ({
+      ...prev,
+      fit: {
+        ...prev.fit,
+        [key]: { ...prev.fit[key], [field]: value },
+      },
+    }));
+  };
+
   // ---------- بوت‌استرپ ----------
   const runBootstrap = useCallback(
     (nodeColsArg?: number[][], nBoot?: number, silent = false) => {
@@ -1590,7 +1674,12 @@ function SemTool() {
         if (nodeCols.some((col) => col.every((v) => !Number.isFinite(v)))) {
           throw new Error("حداقل یکی از گره‌ها داده معتبر ندارد؛ نگاشت ستون‌ها را بررسی کنید.");
         }
-        const sem = estimateSem(modelNodes, modelArrows, nodeCols);
+        const measurementCols: SemMeasurementColumns = {};
+        modelNodes.forEach((node) => {
+          const indicators = indicatorCols[node.varId] ?? [];
+          measurementCols[node.nodeId] = node.kind === "total" && indicators.length ? indicators : [nodeCols[node.nodeId]];
+        });
+        const sem = estimateSem(modelNodes, modelArrows, nodeCols, measurementCols);
         const corr = correlationMatrixWithP(nodeCols);
         const maha = mahalanobisDistances(nodeCols);
         const mardia = mardiaTest(nodeCols);
@@ -1635,7 +1724,7 @@ function SemTool() {
               `تعداد موارد: ${r.length} | تعداد متغیرها/زیرمقیاس‌ها: ${modelNodes.length}`,
               `مسیرهای معنادار: ${sigCount} از ${sem.paths.length}`,
               sem.fit.valid
-                ? `برازش: CFI=${fmt(sem.fit.cfi)} | RMSEA=${fmt(sem.fit.rmsea)} | χ²/df=${fmtChi2Df(sem.fit)} | SRMR=${fmt(sem.fit.srmr)}`
+                ? `برازش: χ²=${fmt(sem.fit.chi2)} | df=${sem.fit.df} | p=${fmtP(sem.fit.pValue)} | CMIN/df=${fmtChi2Df(sem.fit)} | RMSEA=${fmt(sem.fit.rmsea)} | CFI=${fmt(sem.fit.cfi)}`
                 : `برازش: ${sem.fit.message ?? "نامشخص"}`,
               modelNodes
                 .filter((nd) => nd.role !== "exogenous")
@@ -2646,7 +2735,7 @@ function SemTool() {
                 </p>
                 <p className={`${tinyCls} mt-1`}>
                   بر اساس تعداد میانجی‌های شما ({medVars.length} میانجی)، حالت‌های زیر قابل انتخاب است. فقط یکی از مدل‌ها
-                  را انتخاب کنید؛ ادامه تحلیل بر اساس همان مدل پیش می‌رود. (مدل کامل اشباع است: CFI=1، RMSEA=0)
+                  را انتخاب کنید؛ ادامه تحلیل بر اساس همان مدل پیش می‌رود. برازش با ماتریس شاخص‌های مشاهده‌شده و مدل اندازه‌گیری محاسبه می‌شود.
                 </p>
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
                   {modelOptions.map((opt) => {
@@ -2838,7 +2927,7 @@ function SemTool() {
               ))}
             </div>
 
-            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <div className="mt-3 max-w-md">
               <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
                 <input
                   type="checkbox"
@@ -2854,35 +2943,79 @@ function SemTool() {
                   </span>
                 </span>
               </label>
+            </div>
 
-              <div className="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
-                <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">شاخص‌های برازش</p>
-                <div className="mt-2 grid grid-cols-2 gap-2">
-                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
-                    CFI ≥
-                    <input type="number" step={0.01} dir="ltr" className={`${inputCls} !w-20 !py-1`} value={constraints.cfiMin} onChange={(e) => setConstraints({ ...constraints, cfiMin: Number(e.target.value) })} />
-                  </label>
-                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
-                    RMSEA ≤
-                    <input type="number" step={0.01} dir="ltr" className={`${inputCls} !w-20 !py-1`} value={constraints.rmseaMax} onChange={(e) => setConstraints({ ...constraints, rmseaMax: Number(e.target.value) })} />
-                  </label>
-                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
-                    χ²/df ≤
-                    <input type="number" step={0.1} dir="ltr" className={`${inputCls} !w-20 !py-1`} value={constraints.chi2dfMax} onChange={(e) => setConstraints({ ...constraints, chi2dfMax: Number(e.target.value) })} />
-                  </label>
-                  <label className="flex items-center gap-2 text-[13px] font-bold text-stone-600 dark:text-stone-300">
-                    SRMR ≤
-                    <input type="number" step={0.01} dir="ltr" className={`${inputCls} !w-20 !py-1`} value={constraints.srmrMax} onChange={(e) => setConstraints({ ...constraints, srmrMax: Number(e.target.value) })} />
-                  </label>
+            <div className="mt-5 rounded-2xl border border-indigo-200 bg-indigo-50/50 p-4 dark:border-indigo-900 dark:bg-indigo-950/20">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-extrabold text-indigo-900 dark:text-indigo-100">قیود شاخص‌های برازش</h3>
+                  <p className="mt-1 text-[11px] leading-5 text-indigo-700 dark:text-indigo-300">
+                    حداقل و حداکثر هر شاخص قابل تنظیم است. خانه خالی یعنی برای آن سمت محدودیتی اعمال نشود. پیش‌فرض‌ها
+                    عمداً در محدوده قابل‌قبول اما غیرکامل تنظیم شده‌اند تا خروجی‌ها طبیعی و شبیه پژوهش واقعی باشند.
+                  </p>
                 </div>
-                <p className={`${tinyCls} mt-1`}>پیش‌فرض معقول: CFI ≥ 0.90 ، RMSEA ≤ 0.08 ، χ²/df ≤ 3 ، SRMR ≤ 0.08</p>
+                <button
+                  type="button"
+                  className={btnLight}
+                  onClick={() => setConstraints((prev) => ({ ...prev, fit: defaultSemFitConstraints() }))}
+                >
+                  بازنشانی دامنه‌های علمی
+                </button>
               </div>
 
-              <div className="rounded-xl border border-dashed border-emerald-300 bg-emerald-50/60 p-3 dark:border-emerald-800 dark:bg-emerald-950/30">
-                <p className="text-sm font-extrabold text-emerald-800 dark:text-emerald-300">پیش‌فرض‌های واقع‌گرایانه</p>
-                <p className={`${tinyCls} mt-1 text-emerald-700 dark:text-emerald-400`}>
-                  ضرایب مسیر، بارهای عاملی (0.6 تا 0.85) و R² در محدوده‌های متعارف پژوهش‌های واقعی ساخته می‌شوند تا خروجی
-                  برای داوری و آموزش قابل قبول باشد.
+              <div className="tool-table-wrap mt-3">
+                <table className="tool-table" style={{ minWidth: 920 }}>
+                  <thead>
+                    <tr>
+                      <th>شاخص</th>
+                      <th>حداقل تولیدی</th>
+                      <th>حداکثر تولیدی</th>
+                      <th>دامنه علمی متداول</th>
+                      <th>راهنمای تفسیر</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fitConstraintRows.map((row) => {
+                      const range = constraints.fit[row.key];
+                      return (
+                        <tr key={row.key}>
+                          <td className="font-black text-stone-800 dark:text-stone-200">{row.label}</td>
+                          <td>
+                            <input
+                              type="number"
+                              step={row.step}
+                              dir="ltr"
+                              className={`${inputCls} !min-w-24 !py-1.5`}
+                              placeholder="آزاد"
+                              value={range.min ?? ""}
+                              onChange={(e) => setFitRange(row.key, "min", e.target.value === "" ? null : Number(e.target.value))}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step={row.step}
+                              dir="ltr"
+                              className={`${inputCls} !min-w-24 !py-1.5`}
+                              placeholder="آزاد"
+                              value={range.max ?? ""}
+                              onChange={(e) => setFitRange(row.key, "max", e.target.value === "" ? null : Number(e.target.value))}
+                            />
+                          </td>
+                          <td className="font-extrabold text-emerald-700 dark:text-emerald-300">{row.scientificRange}</td>
+                          <td className="max-w-80 text-[11px] leading-5 text-stone-500 dark:text-stone-400">{row.interpretation}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="mt-3 rounded-xl border border-dashed border-emerald-300 bg-emerald-50/70 p-3 dark:border-emerald-800 dark:bg-emerald-950/30">
+                <p className="text-[12px] font-extrabold text-emerald-800 dark:text-emerald-300">پیش‌فرض واقع‌گرایانه</p>
+                <p className="mt-1 text-[11px] leading-5 text-emerald-700 dark:text-emerald-400">
+                  علاوه بر کف پذیرش علمی، برای بعضی شاخص‌ها سقف نیز گذاشته شده است؛ بنابراین موتور از خروجی‌های مصنوعیِ
+                  کاملاً بی‌نقص مانند CFI=1 و RMSEA=0 عبور می‌کند و برازش خوب اما طبیعی می‌سازد.
                 </p>
               </div>
             </div>
@@ -3455,25 +3588,29 @@ function SemTool() {
                   {analysis.sem.fit.valid ? (
                     <>
                       <div className="tool-table-wrap mt-2">
-                        <table className="tool-table">
+                        <table className="tool-table" style={{ minWidth: 720 }}>
                           <thead>
-                            <tr><th>χ²</th><th>df</th><th>χ²/df</th><th>CFI</th><th>TLI</th><th>RMSEA</th><th>SRMR</th><th>نتیجه کلی</th></tr>
+                            <tr><th>شاخص</th><th>مقدار</th><th>معیار معمول</th><th>تفسیر</th></tr>
                           </thead>
                           <tbody>
-                            <tr>
-                              <td className="number-cell">{fmt(analysis.sem.fit.chi2)}</td>
-                              <td className="number-cell">{analysis.sem.fit.df}</td>
-                              <td className="number-cell">{fmtChi2Df(analysis.sem.fit)}</td>
-                              <td className="number-cell">{fmt(analysis.sem.fit.cfi)}</td>
-                              <td className="number-cell">{fmt(analysis.sem.fit.tli)}</td>
-                              <td className="number-cell">{fmt(analysis.sem.fit.rmsea)}</td>
-                              <td className="number-cell">{fmt(analysis.sem.fit.srmr)}</td>
-                              <td dangerouslySetInnerHTML={{ __html: analysis.sem.fit.cfi >= 0.9 && analysis.sem.fit.rmsea <= 0.08 ? badge(true, "برازش خوب") : badge(false, "برازش ضعیف") }} />
-                            </tr>
+                            {fitReportRows(analysis.sem.fit).map((row) => (
+                              <tr key={row.index}>
+                                <td className="font-extrabold">{row.index}</td>
+                                <td className="number-cell font-black">{row.value}</td>
+                                <td>{row.criterion}</td>
+                                <td
+                                  dangerouslySetInnerHTML={{
+                                    __html: row.pass == null ? badgeWarn(row.interpretation) : badge(row.pass, row.interpretation),
+                                  }}
+                                />
+                              </tr>
+                            ))}
                           </tbody>
                         </table>
                       </div>
-                      <p className={`${tinyCls} mt-1 text-stone-500 dark:text-stone-400`}>معیار: CFI ≥ 0.90 ، RMSEA ≤ 0.08</p>
+                      {analysis.sem.fit.message && (
+                        <p className={`${tinyCls} mt-2 text-stone-500 dark:text-stone-400`}>{analysis.sem.fit.message}</p>
+                      )}
                     </>
                   ) : (
                     <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.sem.fit.message}</p>

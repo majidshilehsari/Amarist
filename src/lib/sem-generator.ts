@@ -13,6 +13,7 @@ import {
   type ModelArrow,
   type ModelNode,
   type Role,
+  type SemMeasurementColumns,
   type SemResults,
 } from "./sem-stats";
 
@@ -38,16 +39,70 @@ export type PathTarget = {
 
 export type IndirectTarget = "sig" | "ns" | "any";
 
+export type FitRange = { min: number | null; max: number | null };
+
+export type SemFitConstraints = {
+  chi2: FitRange;
+  df: FitRange;
+  pValue: FitRange;
+  cminDf: FitRange;
+  rmsea: FitRange;
+  rmseaCiHigh: FitRange;
+  pnfi: FitRange;
+  cfi: FitRange;
+  pcfi: FitRange;
+  ifi: FitRange;
+  gfi: FitRange;
+  srmr: FitRange;
+};
+
+export function defaultSemFitConstraints(): SemFitConstraints {
+  return {
+    chi2: { min: null, max: null },
+    df: { min: null, max: null },
+    pValue: { min: 0.05, max: 0.5 },
+    cminDf: { min: 1, max: 3 },
+    rmsea: { min: 0.03, max: 0.08 },
+    rmseaCiHigh: { min: null, max: 0.1 },
+    pnfi: { min: 0.5, max: 0.95 },
+    cfi: { min: 0.9, max: 0.99 },
+    pcfi: { min: 0.5, max: 0.95 },
+    ifi: { min: 0.9, max: 0.99 },
+    gfi: { min: 0.9, max: 0.99 },
+    srmr: { min: 0.02, max: 0.08 },
+  };
+}
+
+function resolveSemFitConstraints(constraints: GenConstraints): SemFitConstraints {
+  const defaults = defaultSemFitConstraints();
+  const legacy = constraints as GenConstraints & {
+    cfiMin?: number;
+    rmseaMax?: number;
+    chi2dfMax?: number;
+    srmrMax?: number;
+  };
+  const fit = Object.fromEntries(
+    (Object.keys(defaults) as (keyof SemFitConstraints)[]).map((key) => [
+      key,
+      { ...defaults[key], ...(constraints.fit?.[key] ?? {}) },
+    ])
+  ) as SemFitConstraints;
+  if (!constraints.fit) {
+    if (legacy.cfiMin != null) fit.cfi.min = legacy.cfiMin;
+    if (legacy.rmseaMax != null) fit.rmsea.max = legacy.rmseaMax;
+    if (legacy.chi2dfMax != null) fit.cminDf.max = legacy.chi2dfMax;
+    if (legacy.srmrMax != null) fit.srmr.max = legacy.srmrMax;
+  }
+  return fit;
+}
+
 export type GenConstraints = {
   /** قید مسیرها به شکل «varFrom:varTo» */
   pathTargets: Record<string, PathTarget>;
   /** قید اثر غیرمستقیم: «from:to» (کل) و «from:med:to» (هر مسیر میانجی) */
   indirectTargets: Record<string, IndirectTarget>;
   r2Range: { min: number; max: number } | null;
-  cfiMin: number;
-  rmseaMax: number;
-  chi2dfMax: number;
-  srmrMax: number;
+  fit: SemFitConstraints;
   missingPct: number;
   outlierPct: number;
   enforceNormality: boolean;
@@ -147,6 +202,7 @@ function toScale(sc: Scale, z: number): number {
 
 export function generateSemData(input: SemGenInput): SemGenOutput {
   const { variables, arrows, n, constraints } = input;
+  const fitTargets = resolveSemFitConstraints(constraints);
   const nodes = buildModelNodes(variables);
   const activeArrows = arrows.filter((a) => a.active);
   const exogVars = variables.filter((v) => v.role === "exogenous");
@@ -155,6 +211,11 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
 
   if (!exogVars.length || !outVars.length) {
     throw new Error("حداقل یک متغیر برون‌زا و یک متغیر درون‌زا لازم است.");
+  }
+  for (const [key, range] of Object.entries(fitTargets)) {
+    if (range.min != null && range.max != null && range.min > range.max) {
+      throw new Error(`در قید برازش «${key}»، حداقل نباید از حداکثر بزرگ‌تر باشد.`);
+    }
   }
 
   const maxAttempts = 6000;
@@ -285,14 +346,21 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
       });
     }
 
-    // بازسازی nodeCols از روی جدول (با null → NaN)
+    // بازسازی nodeCols و شاخص‌های اندازه‌گیری از روی جدول (با null → NaN)
     const nodeCols: number[][] = nodes.map(() => Array(n).fill(NaN));
+    const measurementCols: SemMeasurementColumns = {};
     for (const v of variables) {
       const vNodes = nodes.filter((x) => x.varId === v.id);
       if (v.subscales.length) {
         // ستون‌های زیرمقیاس این متغیر در جدول
         const startCol = columns.findIndex((c) => c.startsWith(v.name + " — "));
         if (v.hasTotal) {
+          measurementCols[vNodes[0].nodeId] = v.subscales.map((_, subscaleIndex) =>
+            rows.map((row) => {
+              const value = row[startCol + subscaleIndex];
+              return value != null && Number.isFinite(value) ? value : NaN;
+            })
+          );
           for (let i = 0; i < n; i++) {
             let sum = 0;
             let ok = true;
@@ -308,17 +376,27 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
           }
         } else {
           vNodes.forEach((node, si) => {
-            for (let i = 0; i < n; i++) nodeCols[node.nodeId][i] = (rows[i][startCol + si] as number | null) ?? NaN;
+            const observed = rows.map((row) => {
+              const value = row[startCol + si];
+              return value != null && Number.isFinite(value) ? value : NaN;
+            });
+            measurementCols[node.nodeId] = [observed];
+            nodeCols[node.nodeId] = observed;
           });
         }
       } else {
         const startCol = columns.findIndex((c) => c === v.name);
-        for (let i = 0; i < n; i++) nodeCols[vNodes[0].nodeId][i] = (rows[i][startCol] as number | null) ?? NaN;
+        const observed = rows.map((row) => {
+          const value = row[startCol];
+          return value != null && Number.isFinite(value) ? value : NaN;
+        });
+        measurementCols[vNodes[0].nodeId] = [observed];
+        nodeCols[vNodes[0].nodeId] = observed;
       }
     }
 
     // ---------- ۵) ارزیابی ----------
-    const sem = estimateSem(nodes, arrows, nodeCols);
+    const sem = estimateSem(nodes, arrows, nodeCols, measurementCols);
     const margins: number[] = [];
 
     // قید فلش‌ها
@@ -347,11 +425,27 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     }
 
     if (sem.fit.valid) {
-      margins.push(sem.fit.cfi - constraints.cfiMin);
-      margins.push(constraints.rmseaMax - sem.fit.rmsea);
-      // در مدل اشباع‌شده df=0 است و χ²/df تعریف نمی‌شود؛ این معیار نباید تلاش را با NaN رد کند.
-      if (sem.fit.df > 0) margins.push(constraints.chi2dfMax - sem.fit.chi2df);
-      margins.push(constraints.srmrMax - sem.fit.srmr);
+      const addFitRange = (value: number, range: { min: number | null; max: number | null }) => {
+        if (range.min == null && range.max == null) return;
+        if (!Number.isFinite(value)) {
+          margins.push(Number.NEGATIVE_INFINITY);
+          return;
+        }
+        if (range.min != null) margins.push(value - range.min);
+        if (range.max != null) margins.push(range.max - value);
+      };
+      addFitRange(sem.fit.chi2, fitTargets.chi2);
+      addFitRange(sem.fit.df, fitTargets.df);
+      addFitRange(sem.fit.pValue, fitTargets.pValue);
+      addFitRange(sem.fit.chi2df, fitTargets.cminDf);
+      addFitRange(sem.fit.rmsea, fitTargets.rmsea);
+      addFitRange(sem.fit.rmseaHigh, fitTargets.rmseaCiHigh);
+      addFitRange(sem.fit.pnfi, fitTargets.pnfi);
+      addFitRange(sem.fit.cfi, fitTargets.cfi);
+      addFitRange(sem.fit.pcfi, fitTargets.pcfi);
+      addFitRange(sem.fit.ifi, fitTargets.ifi);
+      addFitRange(sem.fit.gfi, fitTargets.gfi);
+      addFitRange(sem.fit.srmr, fitTargets.srmr);
     } else {
       // برازش غیرقابل‌محاسبه هرگز نباید صرفاً به‌دلیل نبودن حاشیه برازش پذیرفته شود.
       margins.push(Number.NEGATIVE_INFINITY);
@@ -447,7 +541,27 @@ export function generateSemData(input: SemGenInput): SemGenOutput {
     .map(([k]) => `اثر غیرمستقیم ${k} معنادار`);
   messages.push(...sigInd);
   if (constraints.r2Range) messages.push(`R² بین ${constraints.r2Range.min} تا ${constraints.r2Range.max}`);
-  messages.push(`CFI ≥ ${constraints.cfiMin}، RMSEA ≤ ${constraints.rmseaMax}، χ²/df ≤ ${constraints.chi2dfMax}، SRMR ≤ ${constraints.srmrMax}`);
+  const describeFitRange = (label: string, range: { min: number | null; max: number | null }) => {
+    if (range.min != null && range.max != null) return `${label} بین ${range.min} تا ${range.max}`;
+    if (range.min != null) return `${label} ≥ ${range.min}`;
+    if (range.max != null) return `${label} ≤ ${range.max}`;
+    return null;
+  };
+  const fitMessages = [
+    describeFitRange("χ²", fitTargets.chi2),
+    describeFitRange("df", fitTargets.df),
+    describeFitRange("p برازش", fitTargets.pValue),
+    describeFitRange("CMIN/df", fitTargets.cminDf),
+    describeFitRange("RMSEA", fitTargets.rmsea),
+    describeFitRange("حد بالای CI90% RMSEA", fitTargets.rmseaCiHigh),
+    describeFitRange("PNFI", fitTargets.pnfi),
+    describeFitRange("CFI", fitTargets.cfi),
+    describeFitRange("PCFI", fitTargets.pcfi),
+    describeFitRange("IFI", fitTargets.ifi),
+    describeFitRange("GFI", fitTargets.gfi),
+    describeFitRange("SRMR", fitTargets.srmr),
+  ].filter((message): message is string => message != null);
+  messages.push(...fitMessages);
   throw new Error(
     `با این تنظیمات، در ${maxAttempts} تلاش داده‌ای که همه قیود (${messages.join("، ")}) را پاس کند پیدا نشد. ` +
       `بهترین امتیاز معیار: ${scoreText}. پیشنهاد: حجم نمونه را بیشتر کنید، تعداد زیرمقیاس‌ها را افزایش دهید یا قیود را ملایم‌تر کنید.`

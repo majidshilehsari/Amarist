@@ -97,6 +97,8 @@ export function correlationMatrixWithP(cols: number[][]): { r: number[][]; p: nu
   const r = Array.from({ length: p }, () => Array(p).fill(0));
   const pv = Array.from({ length: p }, () => Array(p).fill(1));
   for (let i = 0; i < p; i++) {
+    r[i][i] = 1;
+    pv[i][i] = 0;
     for (let j = i + 1; j < p; j++) {
       const res = pearson(cols[i], cols[j]);
       r[i][j] = r[j][i] = res.r;
@@ -352,13 +354,22 @@ export type SemFit = {
   valid: boolean;
   chi2: number;
   df: number;
+  pValue: number;
   chi2df: number;
   cfi: number;
   tli: number;
   rmsea: number;
+  rmseaLow: number;
+  rmseaHigh: number;
   srmr: number;
+  pnfi: number;
+  pcfi: number;
+  ifi: number;
+  gfi: number;
   message?: string;
 };
+
+export type SemMeasurementColumns = Record<number, number[][]>;
 
 export type SemPathResult = {
   from: number;
@@ -391,7 +402,271 @@ export type SemResults = {
 
 const ROLE_ORDER_NODE: Record<Role, number> = { exogenous: 0, mediator: 1, outcome: 2 };
 
-export function estimateSem(nodes: ModelNode[], arrows: ModelArrow[], nodeCols: number[][]): SemResults {
+function noncentralChiSquareCdf(x: number, df: number, lambda: number): number {
+  if (!(x >= 0) || !(df > 0) || !(lambda >= 0)) return NaN;
+  if (lambda < 1e-12) return clamp(1 - chiSquareSurvival(x, df), 0, 1);
+  const half = lambda / 2;
+  let weight = Math.exp(-half);
+  let sum = 0;
+  const maxTerms = Math.max(200, Math.ceil(half + 12 * Math.sqrt(half + 1)));
+  for (let j = 0; j <= maxTerms; j++) {
+    sum += weight * (1 - chiSquareSurvival(x, df + 2 * j));
+    weight *= half / (j + 1);
+    if (j > half && weight < 1e-14) break;
+  }
+  return clamp(sum, 0, 1);
+}
+
+function noncentralityAtCdf(x: number, df: number, target: number): number {
+  const atZero = noncentralChiSquareCdf(x, df, 0);
+  if (!Number.isFinite(atZero) || atZero <= target) return 0;
+  let lo = 0;
+  let hi = Math.max(1, x + df);
+  while (noncentralChiSquareCdf(x, df, hi) > target && hi < 1e5) hi *= 2;
+  for (let i = 0; i < 70; i++) {
+    const mid = (lo + hi) / 2;
+    if (noncentralChiSquareCdf(x, df, mid) > target) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+function rmseaConfidence90(chi2: number, df: number, n: number): { low: number; high: number } {
+  if (!(df > 0) || !(n > 1) || !Number.isFinite(chi2)) return { low: NaN, high: NaN };
+  const denominator = df * (n - 1);
+  const lowLambda = noncentralityAtCdf(chi2, df, 0.95);
+  const highLambda = noncentralityAtCdf(chi2, df, 0.05);
+  return {
+    low: Math.sqrt(Math.max(0, lowLambda) / denominator),
+    high: Math.sqrt(Math.max(0, highLambda) / denominator),
+  };
+}
+
+function commonFactorLoadings(cols: number[][]): number[] {
+  const count = cols.length;
+  if (count <= 1) return [1];
+  const corr = correlationMatrixWithP(cols).r;
+  if (count === 2) {
+    const loading = Math.sqrt(clamp(Math.abs(corr[0][1]), 0.09, 0.9025));
+    return [loading, loading];
+  }
+
+  let averageCorrelation = 0;
+  let pairs = 0;
+  for (let i = 0; i < count; i++) {
+    for (let j = i + 1; j < count; j++) {
+      averageCorrelation += Math.max(0, corr[i][j]);
+      pairs++;
+    }
+  }
+  const initial = Math.sqrt(clamp(averageCorrelation / Math.max(1, pairs), 0.09, 0.9025));
+  let loadings = Array(count).fill(initial);
+  const learningRate = 0.04 / count;
+  for (let iteration = 0; iteration < 800; iteration++) {
+    const gradients = Array(count).fill(0);
+    for (let i = 0; i < count; i++) {
+      for (let j = i + 1; j < count; j++) {
+        const residual = corr[i][j] - loadings[i] * loadings[j];
+        gradients[i] -= 2 * loadings[j] * residual;
+        gradients[j] -= 2 * loadings[i] * residual;
+      }
+    }
+    loadings = loadings.map((loading, index) => clamp(loading - learningRate * gradients[index], 0.3, 0.95));
+  }
+  return loadings;
+}
+
+function measurementModelFit(
+  nodes: ModelNode[],
+  activeArrows: ModelArrow[],
+  nodeCols: number[][],
+  measurementCols: SemMeasurementColumns,
+  paths: SemPathResult[],
+  r2: Record<number, number>
+): SemFit | null {
+  const orderedNodes = [...nodes].sort((a, b) => a.nodeId - b.nodeId);
+  const blocks = orderedNodes.map((node) => {
+    const supplied = measurementCols[node.nodeId]?.filter((col) => col?.length) ?? [];
+    return { node, cols: supplied.length ? supplied : [nodeCols[node.nodeId]] };
+  });
+  const observedRaw = blocks.flatMap((block) => block.cols);
+  if (observedRaw.length < 2) return null;
+
+  const rawN = Math.min(
+    ...[...observedRaw, ...orderedNodes.map((node) => nodeCols[node.nodeId])].map((col) => col?.length ?? 0)
+  );
+  const complete: number[] = [];
+  for (let row = 0; row < rawN; row++) {
+    if (
+      observedRaw.every((col) => Number.isFinite(col[row])) &&
+      orderedNodes.every((node) => Number.isFinite(nodeCols[node.nodeId]?.[row]))
+    ) {
+      complete.push(row);
+    }
+  }
+  const nCases = complete.length;
+  if (nCases <= observedRaw.length + 2) return null;
+
+  const clean = (col: number[]) => complete.map((row) => col[row]);
+  const observed = observedRaw.map(clean);
+  const latent = orderedNodes.map((node) => clean(nodeCols[node.nodeId]));
+  const sample = correlationMatrixWithP(observed).r;
+  if (sample.some((row) => row.some((value) => !Number.isFinite(value)))) return null;
+
+  const latentIndex = new Map(orderedNodes.map((node, index) => [node.nodeId, index]));
+  const latentCount = orderedNodes.length;
+  const bStd = Array.from({ length: latentCount }, () => Array(latentCount).fill(0));
+  for (const path of paths) {
+    const from = latentIndex.get(path.from);
+    const to = latentIndex.get(path.to);
+    if (from != null && to != null && Number.isFinite(path.std)) bStd[to][from] = path.std;
+  }
+
+  const psi = Array.from({ length: latentCount }, () => Array(latentCount).fill(0));
+  const exogenous = orderedNodes.filter((node) => node.role === "exogenous");
+  for (const left of exogenous) {
+    for (const right of exogenous) {
+      const i = latentIndex.get(left.nodeId)!;
+      const j = latentIndex.get(right.nodeId)!;
+      psi[i][j] = i === j ? 1 : pearson(latent[i], latent[j]).r;
+    }
+  }
+  for (const node of orderedNodes) {
+    if (node.role === "exogenous") continue;
+    const index = latentIndex.get(node.nodeId)!;
+    psi[index][index] = Math.max(0.02, 1 - clamp(r2[node.nodeId] ?? 0, 0, 0.98));
+  }
+
+  const identity = Array.from({ length: latentCount }, (_, i) =>
+    Array.from({ length: latentCount }, (_, j) => (i === j ? 1 : 0))
+  );
+  const structural = identity.map((row, i) => row.map((value, j) => value - bStd[i][j]));
+  const structuralInv = invertMatrix(structural);
+  if (!structuralInv) return null;
+  const latentCov = matMul(matMul(structuralInv, psi), transpose(structuralInv));
+  const latentCorr = latentCov.map((row, i) =>
+    row.map((value, j) => {
+      const denominator = Math.sqrt(Math.max(1e-12, latentCov[i][i] * latentCov[j][j]));
+      return value / denominator;
+    })
+  );
+
+  const loadings: number[] = [];
+  const factorOfIndicator: number[] = [];
+  let observedOffset = 0;
+  for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
+    const block = blocks[blockIndex];
+    const blockObserved = observed.slice(observedOffset, observedOffset + block.cols.length);
+    const blockLoadings = block.cols.length > 1 ? commonFactorLoadings(blockObserved) : [1];
+    for (const loading of blockLoadings) {
+      loadings.push(block.cols.length > 1 ? clamp(Math.abs(loading), 0.3, 0.95) : 1);
+      factorOfIndicator.push(blockIndex);
+    }
+    observedOffset += block.cols.length;
+  }
+
+  const observedCount = observed.length;
+  const implied = Array.from({ length: observedCount }, () => Array(observedCount).fill(0));
+  for (let i = 0; i < observedCount; i++) {
+    for (let j = 0; j < observedCount; j++) {
+      if (i === j) implied[i][j] = 1;
+      else implied[i][j] = loadings[i] * loadings[j] * latentCorr[factorOfIndicator[i]][factorOfIndicator[j]];
+    }
+  }
+
+  const detSample = determinant(sample);
+  const detImplied = determinant(implied);
+  const invImplied = invertMatrix(implied);
+  if (!(detSample > 1e-12) || !(detImplied > 1e-12) || !invImplied) return null;
+
+  const trace = sample.reduce((total, row, i) => {
+    let diagonal = 0;
+    for (let j = 0; j < observedCount; j++) diagonal += row[j] * invImplied[j][i];
+    return total + diagonal;
+  }, 0);
+  const discrepancy = Math.max(0, Math.log(detImplied) + trace - Math.log(detSample) - observedCount);
+  const chi2 = Math.max(0, (nCases - 1) * discrepancy);
+
+  // برازش روی ماتریس همبستگی انجام می‌شود؛ واریانس‌ها استاندارد و خطاها از ۱-λ² به‌دست می‌آیند.
+  // بنابراین فقط مسیرها، کوواریانس بین برون‌زاها و بارهای آزاد در شمار پارامترها قرار می‌گیرند.
+  const exogenousCount = exogenous.length;
+  const measurementParameters = blocks.reduce(
+    (total, block) => total + Math.max(0, block.cols.length - 1),
+    0
+  );
+  const parameterCount =
+    activeArrows.length +
+    (exogenousCount * Math.max(0, exogenousCount - 1)) / 2 +
+    measurementParameters;
+  const moments = (observedCount * (observedCount - 1)) / 2;
+  const df = Math.max(0, moments - parameterCount);
+
+  const independenceDf = (observedCount * (observedCount - 1)) / 2;
+  const independenceChi2 = Math.max(0, (nCases - 1) * -Math.log(detSample));
+  const denominator = Math.max(chi2 - df, independenceChi2 - independenceDf, 1e-12);
+  const cfi = clamp(1 - Math.max(chi2 - df, 0) / denominator, 0, 1);
+  const tli =
+    df > 0 && independenceDf > 0 && independenceChi2 / independenceDf !== 1
+      ? clamp(
+          (independenceChi2 / independenceDf - chi2 / df) /
+            (independenceChi2 / independenceDf - 1),
+          0,
+          1
+        )
+      : 1;
+  const nfi = independenceChi2 > 0 ? clamp((independenceChi2 - chi2) / independenceChi2, 0, 1) : 1;
+  const parsimonyRatio = independenceDf > 0 ? clamp(df / independenceDf, 0, 1) : 0;
+  const pnfi = clamp(parsimonyRatio * nfi, 0, 1);
+  const pcfi = clamp(parsimonyRatio * cfi, 0, 1);
+  const ifi =
+    independenceChi2 - df > 0
+      ? clamp((independenceChi2 - chi2) / (independenceChi2 - df), 0, 1)
+      : 1;
+
+  let standardizedResidualSum = 0;
+  let gfiResidual = 0;
+  let gfiObserved = 0;
+  for (let i = 0; i < observedCount; i++) {
+    for (let j = 0; j < observedCount; j++) {
+      const residual = sample[i][j] - implied[i][j];
+      gfiResidual += residual * residual;
+      gfiObserved += sample[i][j] * sample[i][j];
+      if (j >= i) standardizedResidualSum += residual * residual;
+    }
+  }
+  const srmr = Math.sqrt(standardizedResidualSum / ((observedCount * (observedCount + 1)) / 2));
+  const gfi = gfiObserved > 0 ? clamp(1 - gfiResidual / gfiObserved, 0, 1) : NaN;
+  const pValue = df > 0 ? chiSquareSurvival(chi2, df) : NaN;
+  const chi2df = df > 0 ? chi2 / df : NaN;
+  const rmsea = df > 0 ? Math.sqrt(Math.max(chi2 - df, 0) / (df * (nCases - 1))) : 0;
+  const rmseaCi = rmseaConfidence90(chi2, df, nCases);
+
+  return {
+    valid: true,
+    chi2,
+    df,
+    pValue,
+    chi2df,
+    cfi,
+    tli,
+    rmsea,
+    rmseaLow: rmseaCi.low,
+    rmseaHigh: rmseaCi.high,
+    srmr,
+    pnfi,
+    pcfi,
+    ifi,
+    gfi,
+    message: "برازش بر پایه ماتریس همبستگی شاخص‌های مشاهده‌شده و مدل اندازه‌گیری محاسبه شده است.",
+  };
+}
+
+export function estimateSem(
+  nodes: ModelNode[],
+  arrows: ModelArrow[],
+  nodeCols: number[][],
+  measurementCols?: SemMeasurementColumns
+): SemResults {
   const p = nodes.length;
   const ordered = [...nodes]
     .sort((a, b) => ROLE_ORDER_NODE[a.role] - ROLE_ORDER_NODE[b.role])
@@ -466,12 +741,19 @@ export function estimateSem(nodes: ModelNode[], arrows: ModelArrow[], nodeCols: 
       valid: false,
       chi2: NaN,
       df: 0,
+      pValue: NaN,
       chi2df: NaN,
       cfi: NaN,
       tli: NaN,
       rmsea: NaN,
+      rmseaLow: NaN,
+      rmseaHigh: NaN,
       srmr: NaN,
-      message: "برازش مدل قابل محاسبه نیست (ماتریس کوواریانس تکین است).",
+      pnfi: NaN,
+      pcfi: NaN,
+      ifi: NaN,
+      gfi: NaN,
+      message: "برازش مدل قابل محاسبه نیست (ماتریس کوواریانس تکین است)."
     };
   } else {
     const Sigma = matMul(matMul(Ainv, Psi), transpose(Ainv));
@@ -482,12 +764,19 @@ export function estimateSem(nodes: ModelNode[], arrows: ModelArrow[], nodeCols: 
         valid: false,
         chi2: NaN,
         df: 0,
+        pValue: NaN,
         chi2df: NaN,
         cfi: NaN,
         tli: NaN,
         rmsea: NaN,
+        rmseaLow: NaN,
+        rmseaHigh: NaN,
         srmr: NaN,
-        message: "برازش مدل قابل محاسبه نیست (ماتریس کوواریانس مدل تکین است).",
+        pnfi: NaN,
+        pcfi: NaN,
+        ifi: NaN,
+        gfi: NaN,
+        message: "برازش مدل قابل محاسبه نیست (ماتریس کوواریانس مدل تکین است)."
       };
     } else {
       const logDetS = Math.log(detS);
@@ -525,21 +814,46 @@ export function estimateSem(nodes: ModelNode[], arrows: ModelArrow[], nodeCols: 
         }
       }
       const srmr = Math.sqrt(srSum / ((p * (p + 1)) / 2));
+      const nfi = chi2i > 0 ? clamp((chi2i - chi2) / chi2i, 0, 1) : 1;
+      const parsimonyRatio = dfi > 0 ? clamp(df / dfi, 0, 1) : 0;
+      const pValue = df > 0 ? chiSquareSurvival(chi2, df) : NaN;
+      const rmseaCi = rmseaConfidence90(chi2, df, nCases);
+      let gfiResidual = 0;
+      let gfiObserved = 0;
+      for (let i = 0; i < p; i++) {
+        for (let j = 0; j < p; j++) {
+          const residual = S[i][j] - Sigma[i][j];
+          gfiResidual += residual * residual;
+          gfiObserved += S[i][j] * S[i][j];
+        }
+      }
 
       fit = {
         valid: true,
         chi2,
         df,
+        pValue,
         chi2df: df > 0 ? chi2 / df : NaN,
         cfi: clamp(cfi, 0, 1),
         tli: clamp(tli, 0, 1),
         rmsea,
+        rmseaLow: rmseaCi.low,
+        rmseaHigh: rmseaCi.high,
         srmr,
+        pnfi: clamp(parsimonyRatio * nfi, 0, 1),
+        pcfi: clamp(parsimonyRatio * cfi, 0, 1),
+        ifi: chi2i - df > 0 ? clamp((chi2i - chi2) / (chi2i - df), 0, 1) : 1,
+        gfi: gfiObserved > 0 ? clamp(1 - gfiResidual / gfiObserved, 0, 1) : NaN,
       };
-      if (df === 0) {
-        warnings.push("مدل اشباع‌شده است؛ شاخص‌های برازش کامل (CFI=1 و RMSEA=0) محاسبه می‌شوند.");
-      }
     }
+  }
+
+  if (measurementCols) {
+    const measuredFit = measurementModelFit(nodes, active, nodeCols, measurementCols, pathResults, r2);
+    if (measuredFit) fit = measuredFit;
+  }
+  if (fit.valid && fit.df === 0) {
+    warnings.push("مدل اشباع‌شده است؛ شاخص‌های برازش کامل (CFI=1 و RMSEA=0) محاسبه می‌شوند.");
   }
 
   // اثرات در سطح متغیر (مستقیم / غیرمستقیم / کل)

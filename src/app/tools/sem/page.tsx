@@ -802,6 +802,65 @@ const shirdelVars: VariableSpec[] = [
   },
 ];
 
+// پروژه پیش‌فرض (تارا رضوانی) — سناریوی SEM از فصل سوم پایان‌نامه:
+// اثرات مستقیم و غیرمستقیم «اعتیاد به بازی‌های آنلاین» و «تنظیم هیجان» بر «پرخاشگری»
+// با میانجی‌گری «احساس ناکامی» در نوجوانان شهر رشت.
+// دامنه‌ها مطابق متن فصل سوم (تأییدشده توسط کاربر: تطابق کامل).
+const taraRazvaniVars: VariableSpec[] = [
+  {
+    id: 0,
+    name: "اعتیاد به بازی‌های آنلاین",
+    role: "exogenous",
+    hasTotal: true,
+    totalMin: 20,
+    totalMax: 100,
+    subscales: [
+      { name: "مشکلات اجتماعی و خلقی", min: 10, max: 50 },
+      { name: "مشکلات عملکرد تحصیلی و شغلی", min: 10, max: 50 },
+    ],
+  },
+  {
+    id: 1,
+    name: "تنظیم هیجان",
+    role: "exogenous",
+    // ERQ نمره کل ندارد؛ دو زیرمقیاس مستقل وارد مدل می‌شوند.
+    // (totalMin/totalMax در حالت غیرجمع‌پذیر استفاده نمی‌شود؛ ۱ تا ۷ = طیف لیکرت ۷ درجه‌ای)
+    hasTotal: false,
+    totalMin: 1,
+    totalMax: 7,
+    subscales: [
+      { name: "ارزیابی مجدد شناختی", min: 6, max: 42 },
+      { name: "فرونشانی هیجانی", min: 4, max: 28 },
+    ],
+  },
+  {
+    id: 2,
+    name: "احساس ناکامی",
+    role: "mediator",
+    hasTotal: true,
+    totalMin: 16,
+    totalMax: 80,
+    subscales: [
+      { name: "احساس ناکامی درونی", min: 6, max: 30 },
+      { name: "احساس ناکامی بیرونی", min: 10, max: 50 },
+    ],
+  },
+  {
+    id: 3,
+    name: "پرخاشگری",
+    role: "outcome",
+    hasTotal: true,
+    totalMin: 29,
+    totalMax: 145,
+    subscales: [
+      { name: "پرخاشگری بدنی", min: 9, max: 45 },
+      { name: "پرخاشگری کلامی", min: 5, max: 25 },
+      { name: "خشم", min: 7, max: 35 },
+      { name: "خصومت", min: 8, max: 40 },
+    ],
+  },
+];
+
 function cloneVariableSpecs(vars: VariableSpec[]): VariableSpec[] {
   return vars.map((variable) => ({
     ...variable,
@@ -866,6 +925,10 @@ const SHIRDEL_PROJECT_ID = "default-shirdel-v3";
 const SHIRDEL_PROJECT_NAME = "پروژه پیش‌فرض (شیردل)";
 const SHIRDEL_PROJECT_SEED_KEY = "amarist-sem-shirdel-project-seeded-v3";
 
+const TARA_RAZVANI_PROJECT_ID = "default-tara-razvani-v1";
+const TARA_RAZVANI_PROJECT_NAME = "پروژه پیش‌فرض (تارا رضوانی)";
+const TARA_RAZVANI_PROJECT_SEED_KEY = "amarist-sem-tara-razvani-project-seeded-v1";
+
 function createSeedProject(id: string, name: string, vars: VariableSpec[]): Project {
   return {
     id,
@@ -875,12 +938,20 @@ function createSeedProject(id: string, name: string, vars: VariableSpec[]): Proj
   };
 }
 
-function markShirdelProjectSeeded() {
+function markSeeded(key: string) {
   try {
-    localStorage.setItem(SHIRDEL_PROJECT_SEED_KEY, "1");
+    localStorage.setItem(key, "1");
   } catch {
     // ignore
   }
+}
+
+function markShirdelProjectSeeded() {
+  markSeeded(SHIRDEL_PROJECT_SEED_KEY);
+}
+
+function markTaraRazvaniProjectSeeded() {
+  markSeeded(TARA_RAZVANI_PROJECT_SEED_KEY);
 }
 
 function isUntouchedLegacyShirdelProject(project: Project, expectedVars: VariableSpec[]): boolean {
@@ -897,19 +968,8 @@ function isUntouchedLegacyShirdelProject(project: Project, expectedVars: Variabl
   );
 }
 
-function loadInitialProjects(): Project[] {
-  const existing = loadProjects();
-
-  if (!existing.length) {
-    const seeded = [
-      createSeedProject(uid(), "پروژه پیش‌فرض", initialVars),
-      createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars),
-    ];
-    saveProjects(seeded);
-    markShirdelProjectSeeded();
-    return seeded;
-  }
-
+// افزودن/به‌روزرسانی پروژه پیش‌فرض «شیردل» (همراه مهاجرت از نسخه‌های قدیمی v1/v2).
+function ensureShirdelProject(existing: Project[]): Project[] {
   if (existing.some((project) => project.id === SHIRDEL_PROJECT_ID)) {
     markShirdelProjectSeeded();
     return existing;
@@ -951,6 +1011,47 @@ function loadInitialProjects(): Project[] {
   saveProjects(seeded);
   markShirdelProjectSeeded();
   return seeded;
+}
+
+// افزودن پروژه پیش‌فرض «تارا رضوانی» — ادغام‌پذیر و غیرمخرب:
+// فقط در صورت نبودِ پروژه اضافه می‌شود و به پروژه‌های کاربر دست نمی‌زند.
+function ensureTaraRazvaniProject(existing: Project[]): Project[] {
+  if (existing.some((project) => project.id === TARA_RAZVANI_PROJECT_ID)) {
+    markTaraRazvaniProjectSeeded();
+    return existing;
+  }
+
+  try {
+    if (localStorage.getItem(TARA_RAZVANI_PROJECT_SEED_KEY) === "1") return existing;
+  } catch {
+    // localStorage is unavailable; continue with an in-memory seed
+  }
+
+  const seeded = [
+    ...existing,
+    createSeedProject(TARA_RAZVANI_PROJECT_ID, TARA_RAZVANI_PROJECT_NAME, taraRazvaniVars),
+  ];
+  saveProjects(seeded);
+  markTaraRazvaniProjectSeeded();
+  return seeded;
+}
+
+function loadInitialProjects(): Project[] {
+  const existing = loadProjects();
+
+  if (!existing.length) {
+    const seeded = [
+      createSeedProject(uid(), "پروژه پیش‌فرض", initialVars),
+      createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars),
+      createSeedProject(TARA_RAZVANI_PROJECT_ID, TARA_RAZVANI_PROJECT_NAME, taraRazvaniVars),
+    ];
+    saveProjects(seeded);
+    markShirdelProjectSeeded();
+    markTaraRazvaniProjectSeeded();
+    return seeded;
+  }
+
+  return ensureTaraRazvaniProject(ensureShirdelProject(existing));
 }
 
 

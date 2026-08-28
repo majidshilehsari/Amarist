@@ -54,12 +54,11 @@
 ## ۶. نکات فنی
 - `AGENTS.md` توسط خودِ Next.js مدیریت می‌شود (بلوک قوانین فریمورک)؛ آن را دستی تغییر ندهید.
   راهنمای فریمورک را از `node_modules/next/dist/docs/` بخوانید.
-- خطای تایپِ از پیش موجود: `src/app/layout.tsx` از `LayoutProps` استفاده می‌کند که در
-  Next.js 16 حذف/تغییر کرده. `npm run dev` با این خطا کار می‌کند (Turbopack/SWC تایپ را چک
-  نمی‌کند)، ولی `npx tsc --noEmit` و `npm run build` خطای
-  `TS2304: Cannot find name 'LayoutProps'` می‌دهند. اگر خواستید build بگیرید، اول این خطا را
-  بر اساس مستندات نسخهٔ ۱۶ اصلاح کنید (احتمالاً امضای RootLayout باید
-  `{ children: React.ReactNode }` شود).
+- `src/app/layout.tsx` از `LayoutProps<"/">` استفاده می‌کند — این API معتبرِ Next.js 16 است،
+  نه خطا. تایپِ آن را خودِ Next در `.next/types` (و `.next/dev/types`) تولید می‌کند. بنابراین
+  در یک clone تازه، اگر قبل از اجرای `next dev` یا `next build` مستقیماً `npx tsc --noEmit`
+  بزنید، خطای `TS2304: Cannot find name 'LayoutProps'` می‌بینید؛ بعد از اولین اجرای dev/build
+  این خطا از بین می‌رود و `npm run build` کاملاً موفق است (در نسخهٔ ۲ تأیید شد).
 - متن فارسی: نیم‌فاصله (ZWNJ) را مثل بقیهٔ کد حفظ کنید (مثلاً «بازی‌های»، «پیش‌فرض»).
 - پرسشنامهٔ ERQ نمرهٔ کل ندارد؛ در SEM به‌صورت `hasTotal: false` با دو زیرمقیاس مستقل مدل می‌شود.
 

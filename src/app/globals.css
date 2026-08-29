@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme inline {
   --font-sans: "Vazirmatn Variable", ui-sans-serif, system-ui, -apple-system,
     "Segoe UI", sans-serif;
@@ -22,7 +24,194 @@ body {
   font-family: "Vazirmatn Variable", ui-sans-serif, system-ui, sans-serif;
 }
 
+/* ---------- حالت تاریک ---------- */
+.dark body {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.dark .tool-table-wrap {
+  background: #0f172a;
+  border-color: #334155;
+}
+
+.dark .tool-table th {
+  background: #1e293b;
+  color: #cbd5e1;
+  border-color: #334155;
+}
+
+.dark .tool-table td {
+  border-color: #334155;
+  color: #e2e8f0;
+}
+
+.dark .group-head-1 {
+  background: #1e3a5f !important;
+}
+
+.dark .group-head-2 {
+  background: #14532d !important;
+}
+
+.dark .group-head-3 {
+  background: #78350f !important;
+}
+
+.dark .row-index {
+  background: #1e293b;
+  color: #94a3b8;
+}
+
+.dark .delta-cell {
+  background: #1e293b;
+}
+
+.dark .muted {
+  color: #94a3b8;
+}
+
 ::selection {
   background-color: #c7d2fe;
   color: #1e1b4b;
+}
+
+/* همه عناصر کلیک‌پذیر دست‌مانند */
+button:not(:disabled),
+[role="button"],
+label:has(input[type="radio"]),
+label:has(input[type="checkbox"]),
+select,
+input[type="file"] {
+  cursor: pointer;
+}
+
+/* ---------- جدول‌های ابزارها ---------- */
+.tool-table-wrap {
+  width: 100%;
+  overflow: auto;
+  border: 1px solid #dfe5f1;
+  border-radius: 14px;
+  background: #fff;
+}
+
+/* جدول داده: ارتفاع محدود و اسکرول عمودی داخل کادر */
+.tool-table-scroll {
+  max-height: 430px;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+.tool-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+.tool-table th,
+.tool-table td {
+  border-bottom: 1px solid #dfe5f1;
+  border-left: 1px solid #dfe5f1;
+  padding: 9px 10px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.tool-table th:last-child,
+.tool-table td:last-child {
+  border-left: 0;
+}
+
+.tool-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.tool-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f1f5f9;
+  color: #273449;
+  font-weight: 900;
+}
+
+.group-head-1 {
+  background: #eff6ff !important;
+}
+
+.group-head-2 {
+  background: #f0fdf4 !important;
+}
+
+.group-head-3 {
+  background: #fff7ed !important;
+}
+
+.row-index {
+  background: #f8fafc;
+  font-weight: 800;
+  color: #475569;
+}
+
+.number-cell {
+  font-variant-numeric: tabular-nums;
+  direction: ltr;
+}
+
+.delta-cell {
+  font-variant-numeric: tabular-nums;
+  direction: ltr;
+  background: #fbfdff;
+  font-weight: 900;
+}
+
+.up {
+  color: #047857;
+  font-weight: 800;
+}
+
+.down {
+  color: #b91c1c;
+  font-weight: 800;
+}
+
+.flat {
+  color: #647089;
+  font-weight: 800;
+}
+
+.assumption-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 86px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  border: 1px solid transparent;
+}
+
+.assumption-ok {
+  background: #dcfce7;
+  color: #166534;
+  border-color: #86efac;
+}
+
+.assumption-bad {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fca5a5;
+}
+
+.assumption-warn {
+  background: #fef3c7;
+  color: #92400e;
+  border-color: #fcd34d;
+}
+
+.muted {
+  color: #647089;
+  font-size: 13px;
 }

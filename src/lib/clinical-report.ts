@@ -1,6 +1,6 @@
 // ============================================================
 // گزارش بالینی (متن / docx / TSV) — آماریست
-// ساخت گزارش مشترک برای ابزارهای «اثربخشی یک درمان» و «مقایسه اثربخشی دو درمان».
+// ساخت گزارش مشترک برای ابزارهای «اثربخشی یک مداخله» و «مقایسه اثربخشی دو درمان».
 // ============================================================
 
 import {
@@ -36,14 +36,23 @@ export type ClinicalReportInput = {
   design: ClinicalDesign;
   projectName: string;
   source: "generate" | "real";
-  groupLabels: [string, string];
+  /** نام/عنوان مداخله و نوع آن */
+  interventionTitle?: string;
+  interventionType?: string;
+  /** متغیر وابسته */
+  dvName?: string;
+  dvMeasure?: string;
+  dvLevel?: string;
+  groupLabels: string[];
   timeLabels: string[];
+  nGroups: number;
+  nTimes: number;
   nTotal: number;
-  nPerGroup: [number, number];
+  nPerGroup: number[];
   alpha: number;
   independentT?: IndependentTResult;
   ancova?: AncovaResult;
-  pairedT?: { group0: PairedTResult; group1: PairedTResult };
+  pairedT?: PairedTResult[];
   mixedAnova?: MixedAnovaResult;
   mauchly?: MauchlyResult;
   boxM?: BoxMResult;
@@ -84,27 +93,38 @@ function etaInterpretation(eta: number): string {
   return "بزرگ";
 }
 
+function designLabel(input: ClinicalReportInput): string {
+  if (input.design === "control") return "گروه آزمایش/درمان در برابر گروه کنترل (پیش/پس)";
+  return `${input.nGroups} گروه مستقل${input.nTimes >= 3 ? " با مرحله پیگیری (پیش/پس/پیگیری)" : " (پیش/پس)"}`;
+}
+
 // ---------- متن گزارش ----------
 
 export function buildClinicalReportText(input: ClinicalReportInput): string {
   const L: string[] = [];
-  const designLabel = input.design === "control" ? "گروه مداخله در برابر گروه کنترل (پیش/پس)" : "دو گروه مستقل با مرحله پیگیری (پیش/پس/پیگیری)";
   L.push("گزارش آماری — آماریست (کارآزمایی مداخله‌ای)");
   L.push("==========================================");
-  L.push(`پروژه: ${input.projectName} | طرح: ${designLabel} | منبع داده: ${input.source === "generate" ? "تولید تمرینی" : "داده واقعی"}`);
-  L.push(`حجم نمونه: ${input.nTotal} (گروه «${input.groupLabels[0]}»: ${input.nPerGroup[0]}، گروه «${input.groupLabels[1]}»: ${input.nPerGroup[1]})`);
+  L.push(`پروژه: ${input.projectName} | طرح: ${designLabel(input)} | منبع داده: ${input.source === "generate" ? "تولید تمرینی" : "داده واقعی"}`);
+  if (input.interventionTitle) L.push(`مداخله: ${input.interventionTitle}${input.interventionType ? ` (نوع: ${input.interventionType})` : ""}`);
+  if (input.dvName) L.push(`متغیر وابسته: ${input.dvName}${input.dvMeasure ? ` — ${input.dvMeasure}` : ""}${input.dvLevel ? ` — سطح: ${input.dvLevel}` : ""}`);
+  const groupCountLine = input.groupLabels.map((g, i) => `گروه «${g}»: ${input.nPerGroup[i] ?? 0}`).join("، ");
+  L.push(`حجم نمونه: ${input.nTotal} (${groupCountLine})`);
+  L.push(`سطح معناداری (α): ${input.alpha}`);
   L.push("");
 
+  L.push("یافته‌های توصیفی:");
   if (input.descriptives && input.descriptives.length) {
-    L.push("آمار توصیفی:");
     L.push("  گروه/زمان | n | میانگین | انحراف معیار | کمینه | بیشینه");
     input.descriptives.forEach((d) => L.push(`  ${d.label} | ${d.n} | ${fmt(d.mean)} | ${fmt(d.sd)} | ${fmt(d.min)} | ${fmt(d.max)}`));
-    L.push("");
+  } else {
+    L.push("  (داده توصیفی در دسترس نیست)");
   }
+  L.push("");
 
+  L.push("یافته‌های استنباطی:");
   if (input.design === "control" && input.independentT) {
     const t = input.independentT;
-    L.push("تحلیل اصلی (گروه مداخله در برابر کنترل):");
+    L.push("تحلیل اصلی (گروه آزمایش/درمان در برابر کنترل):");
     L.push(`  نمرهٔ تغییر (پس − پیش): گروه «${input.groupLabels[0]}» = ${fmt(t.mean1)}، گروه «${input.groupLabels[1]}» = ${fmt(t.mean2)}`);
     L.push(`  t(${t.df}) = ${fmt(t.t)}، p = ${fmtP(t.p)}${starP(t.p)}، d کوهن = ${fmt(t.cohensD)} (اثر ${dInterpretation(t.cohensD)})`);
     L.push(`  فاصله اطمینان ۹۵٪ تفاوت میانگین‌ها: ${fmt(t.ciLo)} تا ${fmt(t.ciHi)}`);
@@ -119,10 +139,9 @@ export function buildClinicalReportText(input: ClinicalReportInput): string {
     }
     if (input.pairedT) {
       L.push("تغییر درون‌گروهی:");
-      const p0 = input.pairedT.group0;
-      const p1 = input.pairedT.group1;
-      L.push(`  «${input.groupLabels[0]}»: t(${p0.df}) = ${fmt(p0.t)}، p = ${fmtP(p0.p)}${starP(p0.p)}، d = ${fmt(p0.cohensDz)}`);
-      L.push(`  «${input.groupLabels[1]}»: t(${p1.df}) = ${fmt(p1.t)}، p = ${fmtP(p1.p)}${starP(p1.p)}، d = ${fmt(p1.cohensDz)}`);
+      input.pairedT.forEach((p, i) => {
+        L.push(`  «${input.groupLabels[i] ?? `گروه ${i + 1}`}»: t(${p.df}) = ${fmt(p.t)}، p = ${fmtP(p.p)}${starP(p.p)}، d = ${fmt(p.cohensDz)}`);
+      });
       L.push("");
     }
   }
@@ -147,26 +166,24 @@ export function buildClinicalReportText(input: ClinicalReportInput): string {
     }
   }
 
+  L.push("پیش‌فرض‌ها:");
   if (input.normality && input.normality.length) {
-    L.push("پیش‌فرض نرمال بودن (شاپیرو-ویلک):");
-    input.normality.forEach((n) => L.push(`  ${n.label}: W = ${fmt(n.w, 3)}، p = ${fmtP(n.p)} — ${n.pass ? "برقرار" : "برقرار نیست"}`));
-    L.push("");
+    L.push("  نرمال بودن (شاپیرو-ویلک):");
+    input.normality.forEach((n) => L.push(`    ${n.label}: W = ${fmt(n.w, 3)}، p = ${fmtP(n.p)} — ${n.pass ? "برقرار" : "برقرار نیست"}`));
   }
   if (input.homogeneity && input.homogeneity.length) {
-    L.push("پیش‌فرض همگنی واریانس‌ها (لوین):");
-    input.homogeneity.forEach((h) => L.push(`  ${h.label}: F = ${fmt(h.f, 3)}، p = ${fmtP(h.p)} — ${h.pass ? "برقرار" : "برقرار نیست"}`));
-    L.push("");
+    L.push("  همگنی واریانس‌ها (لوین):");
+    input.homogeneity.forEach((h) => L.push(`    ${h.label}: F = ${fmt(h.f, 3)}، p = ${fmtP(h.p)} — ${h.pass ? "برقرار" : "برقرار نیست"}`));
   }
   if (input.mauchly) {
-    L.push("پیش‌فرض کرویت (موچلی):");
-    L.push(`  W = ${fmt(input.mauchly.w, 3)}، χ²(${input.mauchly.df}) = ${fmt(input.mauchly.chi, 3)}، p = ${fmtP(input.mauchly.p)} — ${input.mauchly.p >= input.alpha ? "برقرار" : "برقرار نیست"}`);
-    L.push("");
+    L.push("  کرویت (موچلی):");
+    L.push(`    W = ${fmt(input.mauchly.w, 3)}، χ²(${input.mauchly.df}) = ${fmt(input.mauchly.chi, 3)}، p = ${fmtP(input.mauchly.p)} — ${input.mauchly.p >= input.alpha ? "برقرار" : "برقرار نیست"}`);
   }
   if (input.boxM) {
-    L.push("همگنی ماتریس‌های کوواریانس (Box's M):");
-    L.push(`  M = ${fmt(input.boxM.m, 3)}، χ²(${input.boxM.df}) = ${fmt(input.boxM.chi, 3)}، p = ${fmtP(input.boxM.p)} — ${input.boxM.p >= input.alpha ? "برقرار" : "برقرار نیست"}`);
-    L.push("");
+    L.push("  همگنی ماتریس‌های کوواریانس (Box's M):");
+    L.push(`    M = ${fmt(input.boxM.m, 3)}، χ²(${input.boxM.df}) = ${fmt(input.boxM.chi, 3)}، p = ${fmtP(input.boxM.p)} — ${input.boxM.p >= input.alpha ? "برقرار" : "برقرار نیست"}`);
   }
+  L.push("");
 
   if (input.answerKey) {
     L.push("کلید پاسخ (مخصوص استاد):");
@@ -225,21 +242,33 @@ function docTable(headers: string[], rows: (string | number)[][]) {
 export function buildClinicalDocx(input: ClinicalReportInput): Document {
   const children: (Paragraph | Table)[] = [];
   children.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 200 }, children: [new TextRun({ text: "گزارش آماری — آماریست", font: FA_HEAD, size: 40, bold: true, color: "1F3864" })] }));
-  children.push(docP(`پروژه: ${input.projectName} | منبع داده: ${input.source === "generate" ? "تولید تمرینی" : "داده واقعی"} | حجم نمونه: ${faNum(input.nTotal)}`, { align: AlignmentType.CENTER, bold: true }));
+  children.push(docP(`پروژه: ${input.projectName} | طرح: ${designLabel(input)} | منبع داده: ${input.source === "generate" ? "تولید تمرینی" : "داده واقعی"}`, { align: AlignmentType.CENTER, bold: true }));
+  if (input.interventionTitle) children.push(docP(`مداخله: ${input.interventionTitle}${input.interventionType ? ` (نوع: ${input.interventionType})` : ""}`, { bold: true }));
+  if (input.dvName) children.push(docP(`متغیر وابسته: ${input.dvName}${input.dvMeasure ? ` — ${input.dvMeasure}` : ""}`, { bold: true }));
+  const groupCountLine = input.groupLabels.map((g, i) => `گروه «${g}»: ${faNum(input.nPerGroup[i] ?? 0)}`).join("، ");
+  children.push(docP(`حجم نمونه: ${faNum(input.nTotal)} (${groupCountLine}) | سطح معناداری α = ${input.alpha}`, { bold: true }));
 
+  children.push(docH("یافته‌های توصیفی"));
   if (input.descriptives && input.descriptives.length) {
-    children.push(docH("آمار توصیفی"));
     children.push(docTable(["گروه / زمان", "n", "میانگین", "انحراف معیار", "کمینه", "بیشینه"], input.descriptives.map((d) => [d.label, d.n, fmt(d.mean), fmt(d.sd), fmt(d.min), fmt(d.max)])));
+  } else {
+    children.push(docP("(داده توصیفی در دسترس نیست)"));
   }
 
+  children.push(docH("یافته‌های استنباطی"));
   if (input.design === "control" && input.independentT) {
     const t = input.independentT;
-    children.push(docH("تحلیل اصلی (گروه مداخله در برابر کنترل)"));
-    children.push(docTable(["شاخص", "مقدار"], [["گروه «" + input.groupLabels[0] + "» — تغییر (پس − پیش)", fmt(t.mean1)], ["گروه «" + input.groupLabels[1] + "» — تغییر (پس − پیش)", fmt(t.mean2)], [`t(${t.df})`, fmt(t.t)], ["p", `${fmtP(t.p)}${starP(t.p)}`], ["d کوهن", `${fmt(t.cohensD)} (${dInterpretation(t.cohensD)})`], ["CI ۹۵٪", `${fmt(t.ciLo)} تا ${fmt(t.ciHi)}`]]));
+    children.push(docH("تحلیل اصلی (گروه آزمایش/درمان در برابر کنترل)"));
+    children.push(docTable(["شاخص", "مقدار"], [[`گروه «${input.groupLabels[0]}» — تغییر (پس − پیش)`, fmt(t.mean1)], [`گروه «${input.groupLabels[1]}» — تغییر (پس − پیش)`, fmt(t.mean2)], [`t(${t.df})`, fmt(t.t)], ["p", `${fmtP(t.p)}${starP(t.p)}`], ["d کوهن", `${fmt(t.cohensD)} (${dInterpretation(t.cohensD)})`], ["CI ۹۵٪", `${fmt(t.ciLo)} تا ${fmt(t.ciHi)}`]]));
     if (input.ancova) {
       const a = input.ancova;
       children.push(docH("تحلیل کوواریانس (ANCOVA)"));
       children.push(docTable(["شاخص", "مقدار"], [[`F(1، ${a.df2})`, fmt(a.F)], ["p", `${fmtP(a.p)}${starP(a.p)}`], ["η² جزئی", `${fmt(a.eta2)} (${etaInterpretation(a.eta2)})`], [`میانگین تعدیل‌شده «${input.groupLabels[0]}»`, fmt(a.adjMeans[0])], [`میانگین تعدیل‌شده «${input.groupLabels[1]}»`, fmt(a.adjMeans[1])]]));
+    }
+    if (input.pairedT) {
+      children.push(docH("تغییر درون‌گروهی"));
+      const rows: (string | number)[][] = input.pairedT.map((p, i) => [`گروه «${input.groupLabels[i] ?? `گروه ${i + 1}`}»`, `t(${p.df})`, fmt(p.t), `${fmtP(p.p)}${starP(p.p)}`, fmt(p.cohensDz)]);
+      children.push(docTable(["گروه", "t", "مقدار", "p", "d (dz)"], rows));
     }
   }
 
@@ -263,20 +292,17 @@ export function buildClinicalDocx(input: ClinicalReportInput): Document {
     }
   }
 
+  children.push(docH("پیش‌فرض‌ها"));
   if (input.normality && input.normality.length) {
-    children.push(docH("پیش‌فرض نرمال بودن (شاپیرو-ویلک)"));
     children.push(docTable(["متغیر", "W", "p", "نتیجه"], input.normality.map((n) => [n.label, fmt(n.w, 3), fmtP(n.p), n.pass ? "برقرار" : "برقرار نیست"])));
   }
   if (input.homogeneity && input.homogeneity.length) {
-    children.push(docH("پیش‌فرض همگنی واریانس‌ها (لوین)"));
     children.push(docTable(["متغیر", "F", "p", "نتیجه"], input.homogeneity.map((h) => [h.label, fmt(h.f, 3), fmtP(h.p), h.pass ? "برقرار" : "برقرار نیست"])));
   }
   if (input.mauchly) {
-    children.push(docH("پیش‌فرض کرویت (موچلی)"));
     children.push(docTable(["W", "χ²", "df", "p", "نتیجه"], [[fmt(input.mauchly.w, 3), fmt(input.mauchly.chi, 3), input.mauchly.df, fmtP(input.mauchly.p), input.mauchly.p >= input.alpha ? "برقرار" : "برقرار نیست"]]));
   }
   if (input.boxM) {
-    children.push(docH("همگنی ماتریس‌های کوواریانس (Box's M)"));
     children.push(docTable(["M", "χ²", "df", "p", "نتیجه"], [[fmt(input.boxM.m, 3), fmt(input.boxM.chi, 3), input.boxM.df, fmtP(input.boxM.p), input.boxM.p >= input.alpha ? "برقرار" : "برقرار نیست"]]));
   }
 

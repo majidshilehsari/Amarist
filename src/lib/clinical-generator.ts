@@ -1,33 +1,31 @@
 // ============================================================
 // موتور تولید دادهٔ تمرینی بالینی (کارآزمایی مداخله‌ای) — آماریست
 // دو طرح:
-//   - «کنترل»: گروه مداخله در برابر گروه کنترل؛ پیش‌آزمون و پس‌آزمون
+//   - «کنترل»: گروه آزمایش/درمان در برابر گروه کنترل؛ پیش‌آزمون و پس‌آزمون
 //     (تحلیل با t مستقل روی نمرهٔ تغییر + ANCOVA؛ هدف = d کوهن بین‌گروهی)
-//   - «پیگیری»: دو گروه مستقل × سه زمان (پیش/پس/پیگیری)
+//   - «پیگیری»: دو یا سه گروه مستقل × دو یا سه زمان (پیش/پس/پیگیری)
 //     (تحلیل با تحلیل واریانس اندازه‌گیری مکرر؛ هدف = مجذور اتای جزئی تعامل زمان*گروه)
 // تولید فقط خروجی‌ای را می‌پذیرد که قیود (معناداری، اندازه اثر، پیش‌فرض‌ها) برقرار باشند.
 // ============================================================
 
-import { randomNormal, clamp, mean, sampleStd, shapiroWilkTest, leveneTest, type Lists } from "./statistics";
+import { randomNormal, clamp, shapiroWilkTest, leveneTest, type Lists } from "./statistics";
 import {
   independentTTest,
   ancova,
   mixedAnova,
   mauchlyPooled,
-  pooledCovarianceOf,
-  boxMGeneral,
-  withinGroupBonferroni,
   type ClinicalRows,
-  type MixedAnovaResult,
-  type MauchlyResult,
-  type BoxMResult,
 } from "./clinical-stats";
 
 export type ClinicalDesign = "control" | "followup";
 
 export type ClinicalGenConstraints = {
   design: ClinicalDesign;
+  /** تعداد گروه‌های مستقل (۲ یا ۳) */
+  nGroups: number;
   nPerGroup: number;
+  /** تعداد زمان‌های اندازه‌گیری (۲ یا ۳) */
+  nTimes: number;
   alpha: number;
   scoreMin: number;
   scoreMax: number;
@@ -61,13 +59,13 @@ export type ClinicalEvaluation = {
   interactionEta2?: number;
 };
 
-const TIME_LABELS: Record<ClinicalDesign, string[]> = {
-  control: ["پیش‌آزمون", "پس‌آزمون"],
-  followup: ["پیش‌آزمون", "پس‌آزمون", "پیگیری"],
-};
+export function clinicalTimeLabels(design: ClinicalDesign, nTimes: number): string[] {
+  if (design === "control" || nTimes === 2) return ["پیش‌آزمون", "پس‌آزمون"];
+  return ["پیش‌آزمون", "پس‌آزمون", "پیگیری"];
+}
 
-export function clinicalColumns(design: ClinicalDesign): string[] {
-  return ["گروه", ...TIME_LABELS[design]];
+export function clinicalColumns(design: ClinicalDesign, nTimes = design === "control" ? 2 : 3): string[] {
+  return ["گروه", ...clinicalTimeLabels(design, nTimes)];
 }
 
 // ---------- تولید دادهٔ خام ----------
@@ -78,7 +76,6 @@ function controlSample(constraints: ClinicalGenConstraints, groupEffect: number)
   const mu0 = (scoreMin + scoreMax) / 2;
   const sdB = Math.max(2, range / 6);
   const sdC = Math.max(2, range / 7);
-  const sdE = Math.max(1.5, range / 9);
   const rows: number[][] = [];
   for (let g = 0; g < 2; g++) {
     const eff = g === 0 ? 0 : groupEffect;
@@ -88,7 +85,6 @@ function controlSample(constraints: ClinicalGenConstraints, groupEffect: number)
       rows.push([g + 1, roundClip(pre), roundClip(post)]);
     }
   }
-  void sdE;
   return rows;
 
   function roundClip(v: number): number {
@@ -96,22 +92,40 @@ function controlSample(constraints: ClinicalGenConstraints, groupEffect: number)
   }
 }
 
+/** بردار اثر زمان برای هر گروه: گروه ۰ (کنترل) روند جزئی طبیعی؛ بقیه با شدت متفاوت. */
+function groupTimeEffects(G: number, T: number, slope: number): number[][] {
+  const effects: number[][] = [];
+  for (let g = 0; g < G; g++) {
+    const e = [0];
+    if (g === 0) {
+      for (let t = 1; t < T; t++) e.push(0.4 + 0.2 * (t - 1));
+    } else {
+      const mult = G === 2 ? 1 : 0.7 + 0.5 * (g - 1);
+      for (let t = 1; t < T; t++) e.push(slope * mult * (1 + 0.2 * (t - 1)));
+    }
+    effects.push(e);
+  }
+  return effects;
+}
+
 function followupSample(constraints: ClinicalGenConstraints, slope: number): number[][] {
-  const { nPerGroup, scoreMin, scoreMax } = constraints;
+  const { nGroups: G, nPerGroup, nTimes: T, scoreMin, scoreMax } = constraints;
   const range = scoreMax - scoreMin;
   const mu0 = (scoreMin + scoreMax) / 2;
   const sdB = Math.max(2, range / 6);
   const sdW = Math.max(1.5, range / 8);
   const sdS = sdB * 0.65;
+  const effects = groupTimeEffects(G, T, slope);
   const rows: number[][] = [];
-  for (let g = 0; g < 2; g++) {
-    const timeEffect = g === 0 ? [0, 0.6, 0.9] : [0, slope, slope * 1.15];
+  for (let g = 0; g < G; g++) {
     for (let i = 0; i < nPerGroup; i++) {
       const base = mu0 + randomNormal(Math.random) * sdS;
-      const pre = base + randomNormal(Math.random) * sdW;
-      const post = base + timeEffect[1] + randomNormal(Math.random) * sdW;
-      const fu = base + timeEffect[2] + randomNormal(Math.random) * sdW;
-      rows.push([g + 1, roundClip(pre), roundClip(post), roundClip(fu)]);
+      const row: number[] = [g + 1];
+      for (let t = 0; t < T; t++) {
+        const v = t === 0 ? base + randomNormal(Math.random) * sdW : base + effects[g][t] + randomNormal(Math.random) * sdW;
+        row.push(roundClip(v));
+      }
+      rows.push(row);
     }
   }
   return rows;
@@ -159,10 +173,7 @@ function homogeneityMargin(timeGroups: number[][][], alpha: number, enforce: boo
   return { score, messages };
 }
 
-export function evaluateControl(
-  rows: number[][],
-  constraints: ClinicalGenConstraints
-): ClinicalEvaluation {
+export function evaluateControl(rows: number[][], constraints: ClinicalGenConstraints): ClinicalEvaluation {
   const pre = rows.map((r) => r[1]);
   const post = rows.map((r) => r[2]);
   const group = rows.map((r) => r[0]);
@@ -191,12 +202,7 @@ export function evaluateControl(
   score = Math.min(score, constraints.alpha - anc.p);
   if (anc.p >= constraints.alpha) messages.push(`ANCOVA معنی‌دار نشد (پ=${anc.p.toFixed(4)}).`);
 
-  const cells = [
-    g0.map((i) => pre[i]),
-    g0.map((i) => post[i]),
-    g1.map((i) => pre[i]),
-    g1.map((i) => post[i]),
-  ];
+  const cells = [g0.map((i) => pre[i]), g0.map((i) => post[i]), g1.map((i) => pre[i]), g1.map((i) => post[i])];
   const norm = normalityMargin(cells, constraints.alpha, constraints.enforceNormality);
   score = Math.min(score, norm.score);
   messages.push(...norm.messages);
@@ -212,18 +218,17 @@ export function evaluateControl(
   return { pass: score >= 0, score, messages, d };
 }
 
-export function evaluateFollowup(
-  rows: number[][],
-  constraints: ClinicalGenConstraints
-): ClinicalEvaluation {
-  const groupIds = rows.map((r) => (r[0] === 1 ? 0 : 1));
+export function evaluateFollowup(rows: number[][], constraints: ClinicalGenConstraints): ClinicalEvaluation {
+  const G = constraints.nGroups;
+  const T = constraints.nTimes;
+  const groupIds = rows.map((r) => Math.round(r[0]) - 1);
   const timeData = rows.map((r) => r.slice(1));
-  const grouped: number[][][] = [[], []];
+  const grouped: number[][][] = Array.from({ length: G }, () => []);
   groupIds.forEach((gi, i) => grouped[gi].push(timeData[i]));
 
   const anova = mixedAnova(grouped);
   const interactionEta2 = anova.timeGroup.eta;
-  const mauchly = mauchlyPooled(grouped);
+  const mauchly = T >= 3 ? mauchlyPooled(grouped) : null;
 
   let score = Infinity;
   const messages: string[] = [];
@@ -243,20 +248,20 @@ export function evaluateFollowup(
   if (anova.group.p >= constraints.alpha) messages.push(`اثر بین‌گروهی معنی‌دار نشد (پ=${anova.group.p.toFixed(4)}).`);
 
   const cells: number[][] = [];
-  for (let g = 0; g < 2; g++) {
-    for (let t = 0; t < 3; t++) cells.push(grouped[g].map((subj) => subj[t]));
+  for (let g = 0; g < G; g++) {
+    for (let t = 0; t < T; t++) cells.push(grouped[g].map((subj) => subj[t]));
   }
   const norm = normalityMargin(cells, constraints.alpha, constraints.enforceNormality);
   score = Math.min(score, norm.score);
   messages.push(...norm.messages);
 
   const timeGroups: number[][][] = [];
-  for (let t = 0; t < 3; t++) timeGroups.push([grouped[0].map((s) => s[t]), grouped[1].map((s) => s[t])]);
+  for (let t = 0; t < T; t++) timeGroups.push(grouped.map((g) => g.map((s) => s[t])));
   const hom = homogeneityMargin(timeGroups, constraints.alpha, constraints.enforceHomogeneity);
   score = Math.min(score, hom.score);
   messages.push(...hom.messages);
 
-  if (constraints.enforceSphericity) {
+  if (constraints.enforceSphericity && mauchly) {
     score = Math.min(score, mauchly.p - constraints.alpha);
     if (mauchly.p < constraints.alpha) messages.push(`کرویت برقرار نشد (موچلی پ=${mauchly.p.toFixed(4)}).`);
   }
@@ -290,14 +295,11 @@ function generateControl(constraints: ClinicalGenConstraints, maxAttempts: numbe
         rows,
         answerKey: {
           design: "control",
-          targetD: constraints.targetD
-            ? { target: dMid, actual: evaluation.d ?? NaN }
-            : { target: NaN, actual: evaluation.d ?? NaN },
+          targetD: constraints.targetD ? { target: dMid, actual: evaluation.d ?? NaN } : { target: NaN, actual: evaluation.d ?? NaN },
           attempts: attempt + 1,
         },
       };
     }
-    // بازخورد: تنظیم effect تا d به وسط بازهٔ هدف نزدیک شود
     if (constraints.targetD && typeof evaluation.d === "number" && Number.isFinite(evaluation.d) && Math.abs(evaluation.d) > 1e-3) {
       const ratio = dMid / Math.abs(evaluation.d);
       effect = Math.max(0.1, effect * clamp(ratio, 0.5, 1.5));
@@ -308,9 +310,7 @@ function generateControl(constraints: ClinicalGenConstraints, maxAttempts: numbe
 }
 
 function generateFollowup(constraints: ClinicalGenConstraints, maxAttempts: number): ClinicalGenResult {
-  const etaMid = constraints.targetInteractionEta2
-    ? (constraints.targetInteractionEta2.min + constraints.targetInteractionEta2.max) / 2
-    : 0.15;
+  const etaMid = constraints.targetInteractionEta2 ? (constraints.targetInteractionEta2.min + constraints.targetInteractionEta2.max) / 2 : 0.15;
   const range = constraints.scoreMax - constraints.scoreMin;
   let slope = Math.max(1.5, range * 0.16 * (etaMid / 0.15));
   let best: { rows: number[][]; evaluation: ClinicalEvaluation } | null = null;
@@ -321,7 +321,7 @@ function generateFollowup(constraints: ClinicalGenConstraints, maxAttempts: numb
     if (!best || evaluation.score > best.evaluation.score) best = { rows, evaluation };
     if (evaluation.pass) {
       return {
-        columns: clinicalColumns("followup"),
+        columns: clinicalColumns(constraints.design, constraints.nTimes),
         rows,
         answerKey: {
           design: "followup",
@@ -347,7 +347,7 @@ function buildError(evaluation: ClinicalEvaluation | undefined, constraints: Cli
   if (constraints.targetD) suggestions.push("بازهٔ d کوهن را بازتر کنید یا حجم نمونهٔ هر گروه را بیشتر کنید.");
   if (constraints.targetInteractionEta2) suggestions.push("بازهٔ مجذور اتای تعامل را بازتر کنید یا حجم نمونه را بیشتر کنید.");
   if (constraints.enforceNormality) suggestions.push("اگر پیش‌فرض نرمال بودن سخت‌گیر است، آن را خاموش کنید.");
-  if (constraints.enforceSphericity) suggestions.push("اگر کرویت برقرار نمی‌شود، آن را خاموش کنید (در عمل اصلاحات گرینهاوس-گایسر هم رایج است).");
+  if (constraints.enforceSphericity) suggestions.push("اگر کرویت برقرار نمی‌شود، آن را خاموش کنید (در عمل اصلاحات گرین‌هاوس-گایسر هم رایج است).");
   suggestions.push("بازهٔ نمره را بازتر بگذارید تا فضای تولید بیشتر شود.");
   return `با این تنظیمات در ${maxAttempts} تلاش دادهٔ مطلوب پیدا نشد. ${why} پیشنهاد: ${suggestions.slice(0, 4).join(" ")}`;
 }
@@ -359,8 +359,8 @@ export function clinicalRowsToGrouped(rows: (number | null)[][]): ClinicalRows {
   const timeData: number[][] = [];
   rows.forEach((row) => {
     const g = row[0];
-    if (g == null) return;
-    groupIds.push(g === 1 ? 0 : 1);
+    if (g == null || !Number.isFinite(g) || g < 1) return;
+    groupIds.push(Math.round(g) - 1);
     timeData.push(row.slice(1).map((v) => (v == null || !Number.isFinite(v) ? NaN : v)));
   });
   return { groupIds, timeData };

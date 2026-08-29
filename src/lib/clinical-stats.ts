@@ -464,14 +464,14 @@ export function withinGroupBonferroni(groupData: number[][]): WithinPair[] {
 
 export type ClinicalRows = { groupIds: number[]; timeData: number[][] };
 
-/** ردیف‌های جدول: ستون ۰ = شماره گروه (۱ یا ۲)، بقیه ستون‌ها = نمره‌های زمانی. */
+/** ردیف‌های جدول: ستون ۰ = شماره گروه (۱، ۲، ۳، ...)، بقیه ستون‌ها = نمره‌های زمانی. */
 export function rowsToGrouped(rows: (number | null)[][]): ClinicalRows {
   const groupIds: number[] = [];
   const timeData: number[][] = [];
   rows.forEach((row) => {
     const g = row[0];
-    if (g == null) return;
-    const gi = g === 1 ? 0 : 1;
+    if (g == null || !Number.isFinite(g) || g < 1) return;
+    const gi = Math.round(g) - 1;
     const vals = row.slice(1);
     groupIds.push(gi);
     timeData.push(vals.map((v) => (v == null || !Number.isFinite(v) ? NaN : v)));
@@ -495,9 +495,10 @@ export function completeCases(groupIds: number[], timeData: number[][]): { group
   return { groupIds: g, timeData: t, dropped };
 }
 
-/** ساخت ساختار [گروه][فرد][زمان] از ردیف‌های کامل. */
+/** ساخت ساختار [گروه][فرد][زمان] از ردیف‌های کامل — عمومی برای هر تعداد گروه. */
 export function groupedByGroup(groupIds: number[], timeData: number[][]): number[][][] {
-  const groups: number[][][] = [[], []];
+  const maxG = groupIds.length ? groupIds.reduce((m, g) => Math.max(m, g), 0) : 0;
+  const groups: number[][][] = Array.from({ length: maxG + 1 }, () => []);
   groupIds.forEach((gi, i) => groups[gi].push(timeData[i]));
   return groups;
 }

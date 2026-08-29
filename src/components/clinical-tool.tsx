@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { Packer } from "docx";
-import { fmt, fmtP, mean, sampleStd, covarianceMatrix, shapiroWilkTest, leveneTest } from "@/lib/statistics";
+import { fmt, fmtP, sampleStd, covarianceMatrix, shapiroWilkTest, leveneTest } from "@/lib/statistics";
 import {
   ancova,
   boxMGeneral,
@@ -27,7 +27,6 @@ import {
   mauchlyPooled,
   mixedAnova,
   pairedTTest,
-  rowsToGrouped,
   withinGroupBonferroni,
   type AncovaResult,
   type BoxMResult,
@@ -39,6 +38,7 @@ import {
 } from "@/lib/clinical-stats";
 import {
   clinicalColumns,
+  clinicalTimeLabels,
   generateClinicalData,
   type ClinicalAnswerKey,
   type ClinicalDesign,
@@ -62,32 +62,56 @@ import { type StepStatus } from "@/components/progress-stepper";
 
 export type ClinicalMode = "one" | "compare";
 
-const MODE_CONFIG: Record<
-  ClinicalMode,
-  {
-    title: string;
-    subtitle: string;
-    storageKey: string;
-    defaultProjectName: string;
-    groupDefaults: [string, string];
-    allowFollowup: boolean;
-  }
-> = {
+const INTERVENTION_TYPES = ["آموزشی", "روان‌درمانی", "دارویی", "توان‌بخشی", "مشاوره‌ای", "سایر"];
+const DV_LEVELS = ["فاصله‌ای", "نسبی", "رتبه‌ای"];
+
+type ModeConfig = {
+  title: string;
+  subtitle: string;
+  storageKey: string;
+  defaultProjectName: string;
+  groupCount: number;
+  groupDefaults: string[];
+  /** نقش هر گروه (نمایش زیر نام گروه) */
+  groupRoles: string[];
+  allowFollowup: boolean;
+  interventionTitle: string;
+  interventionType: string;
+  dvName: string;
+  dvMeasure: string;
+  dvLevel: string;
+};
+
+const MODE_CONFIG: Record<ClinicalMode, ModeConfig> = {
   one: {
-    title: "اثربخشی یک درمان",
-    subtitle: "گروه مداخله در برابر گروه کنترل (پیش/پس)",
+    title: "اثربخشی یک مداخله",
+    subtitle: "گروه آزمایش/درمان در برابر گروه کنترل (پیش/پس)",
     storageKey: "amarist-one-treatment-projects",
-    defaultProjectName: "پروژه پیش‌فرض (اثربخشی یک درمان)",
-    groupDefaults: ["کنترل", "مداخله"],
+    defaultProjectName: "پروژه پیش‌فرض (اثربخشی یک مداخله)",
+    groupCount: 2,
+    groupDefaults: ["کنترل", "آزمایش/درمان"],
+    groupRoles: ["کنترل", "آزمایش / درمان"],
     allowFollowup: false,
+    interventionTitle: "آموزش مهارت‌های تنظیم هیجان",
+    interventionType: "آموزشی",
+    dvName: "نمره افسردگی (BDI-II)",
+    dvMeasure: "پرسشنامه افسردگی بک (۲۱ گویه)",
+    dvLevel: "فاصله‌ای",
   },
   compare: {
     title: "مقایسه اثربخشی دو درمان",
-    subtitle: "دو گروه مستقل — با یا بدون مرحله پیگیری",
+    subtitle: "سه گروه مستقل (کنترل، درمان ۱، درمان ۲) — با/بدون مرحله پیگیری",
     storageKey: "amarist-compare-treatments-projects",
     defaultProjectName: "پروژه پیش‌فرض (مقایسه دو درمان)",
-    groupDefaults: ["درمان الف", "درمان ب"],
+    groupCount: 3,
+    groupDefaults: ["کنترل", "درمان ۱", "درمان ۲"],
+    groupRoles: ["کنترل", "آزمایش / درمان ۱", "آزمایش / درمان ۲"],
     allowFollowup: true,
+    interventionTitle: "روان‌درمانی گروهی شناختی-رفتاری",
+    interventionType: "روان‌درمانی",
+    dvName: "نمره اضطراب (BAI)",
+    dvMeasure: "پرسشنامه اضطراب بک (۲۱ گویه)",
+    dvLevel: "فاصله‌ای",
   },
 };
 
@@ -123,7 +147,12 @@ const sectionTones = [
 
 type ClinicalProjectData = {
   source: "generate" | "real";
-  groupLabels: [string, string];
+  interventionTitle: string;
+  interventionType: string;
+  dvName: string;
+  dvMeasure: string;
+  dvLevel: string;
+  groupLabels: string[];
   followup: boolean;
   scoreMin: string;
   scoreMax: string;
@@ -153,9 +182,15 @@ function uid(): string {
 }
 
 function defaultProjectData(mode: ClinicalMode, followup: boolean): ClinicalProjectData {
+  const cfg = MODE_CONFIG[mode];
   return {
     source: "generate",
-    groupLabels: [...MODE_CONFIG[mode].groupDefaults] as [string, string],
+    interventionTitle: cfg.interventionTitle,
+    interventionType: cfg.interventionType,
+    dvName: cfg.dvName,
+    dvMeasure: cfg.dvMeasure,
+    dvLevel: cfg.dvLevel,
+    groupLabels: [...cfg.groupDefaults],
     followup,
     scoreMin: "0",
     scoreMax: "100",
@@ -183,14 +218,14 @@ type ClinicalAnalysis = {
   message?: string;
   dropped: number;
   nTotal: number;
-  nPerGroup: [number, number];
+  nPerGroup: number[];
   T: number;
   descriptives: ClinicalDescriptive[];
   normality: ClinicalNormality[];
   homogeneity: ClinicalHomogeneity[];
   independentT?: IndependentTResult;
   ancova?: AncovaResult;
-  pairedT?: { group0: PairedTResult; group1: PairedTResult };
+  pairedT?: PairedTResult[];
   mixedAnova?: MixedAnovaResult;
   mauchly?: MauchlyResult;
   boxM?: BoxMResult;
@@ -211,18 +246,15 @@ function parseLocalizedNumber(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function computeAnalysis(
-  rows: (number | null)[][],
-  groupLabels: [string, string],
-  followup: boolean,
-  alpha: number
-): ClinicalAnalysis {
+function computeAnalysis(rows: (number | null)[][], groupLabels: string[], followup: boolean, alpha: number): ClinicalAnalysis {
+  const G = groupLabels.length;
+  const T = followup ? 3 : 2;
   const base: ClinicalAnalysis = {
     valid: false,
     dropped: 0,
     nTotal: 0,
-    nPerGroup: [0, 0],
-    T: followup ? 3 : 2,
+    nPerGroup: Array(G).fill(0),
+    T,
     descriptives: [],
     normality: [],
     homogeneity: [],
@@ -233,23 +265,24 @@ function computeAnalysis(
   const timeData: number[][] = [];
   for (const row of rows) {
     const g = row[0];
-    if (g == null || !Number.isFinite(g)) return { ...base, message: "مقادیر ستون «گروه» باید عدد ۱ یا ۲ باشد." };
-    const gi = g === 1 ? 0 : g === 2 ? 1 : -1;
-    if (gi < 0) return { ...base, message: "مقادیر ستون «گروه» باید عدد ۱ یا ۲ باشد." };
+    if (g == null || !Number.isFinite(g)) return { ...base, message: `مقادیر ستون «گروه» باید عدد صحیح ۱ تا ${G} باشد.` };
+    const gi = Math.round(g) - 1;
+    if (gi < 0 || gi >= G) return { ...base, message: `مقادیر ستون «گروه» باید عدد صحیح ۱ تا ${G} باشد.` };
     groupIds.push(gi);
     timeData.push(row.slice(1).map((v) => (v == null || !Number.isFinite(v) ? NaN : v)));
   }
-  const T = timeData[0]?.length ?? 0;
-  const expectedT = followup ? 3 : 2;
-  if (T !== expectedT) {
-    return { ...base, message: `این طرح به ${expectedT} زمان (${expectedT} ستون نمره) نیاز دارد؛ تعداد ستون‌های فعلی ${T} است.` };
+  const actualT = timeData[0]?.length ?? 0;
+  if (actualT !== T) {
+    return { ...base, message: `این طرح به ${T} زمان (${T} ستون نمره) نیاز دارد؛ تعداد ستون‌های فعلی ${actualT} است.` };
   }
 
   const cc = completeCases(groupIds, timeData);
   if (cc.groupIds.length === 0) return { ...base, message: "هیچ ردیف کاملی (بدون داده گمشده) وجود ندارد." };
-  const counts = [cc.groupIds.filter((g) => g === 0).length, cc.groupIds.filter((g) => g === 1).length];
-  if (counts[0] < 3 || counts[1] < 3) {
-    return { ...base, message: `هر گروه باید حداقل ۳ مورد کامل داشته باشد (گروه «${groupLabels[0]}»: ${counts[0]}، گروه «${groupLabels[1]}»: ${counts[1]}).` };
+  const counts = Array.from({ length: G }, (_, g) => cc.groupIds.filter((x) => x === g).length);
+  for (let g = 0; g < G; g++) {
+    if (counts[g] < 3) {
+      return { ...base, message: `هر گروه باید حداقل ۳ مورد کامل داشته باشد (گروه «${groupLabels[g]}»: ${counts[g]}).` };
+    }
   }
 
   const grouped = groupedByGroup(cc.groupIds, cc.timeData);
@@ -257,14 +290,13 @@ function computeAnalysis(
 
   const descriptives: ClinicalDescriptive[] = [];
   const normality: ClinicalNormality[] = [];
-  const homogeneity: ClinicalHomogeneity[] = [];
-  for (let g = 0; g < 2; g++) {
+  for (let g = 0; g < G; g++) {
     for (let t = 0; t < T; t++) {
       const col = grouped[g].map((s) => s[t]);
       descriptives.push({
         label: `${groupLabels[g]} — ${timeLabels[t]}`,
         n: col.length,
-        mean: mean(col),
+        mean: meanOf(col),
         sd: sampleStd(col),
         min: Math.min(...col),
         max: Math.max(...col),
@@ -273,8 +305,9 @@ function computeAnalysis(
       normality.push({ label: `${groupLabels[g]} — ${timeLabels[t]}`, w: sw.w, p: sw.p, pass: sw.p >= alpha });
     }
   }
+  const homogeneity: ClinicalHomogeneity[] = [];
   for (let t = 0; t < T; t++) {
-    const lev = leveneFor([grouped[0].map((s) => s[t]), grouped[1].map((s) => s[t])]);
+    const lev = leveneFor(grouped.map((g) => g.map((s) => s[t])));
     homogeneity.push({ label: timeLabels[t], f: lev.f, p: lev.p, pass: lev.p >= alpha });
   }
 
@@ -282,35 +315,37 @@ function computeAnalysis(
     valid: true,
     dropped: cc.dropped,
     nTotal: cc.groupIds.length,
-    nPerGroup: counts as [number, number],
+    nPerGroup: counts,
     T,
     descriptives,
     normality,
     homogeneity,
   };
 
-  if (!followup) {
+  if (G === 2 && !followup) {
     const pre = grouped.flatMap((g) => g.map((s) => s[0]));
     const post = grouped.flatMap((g) => g.map((s) => s[1]));
     const group = [0, 1].flatMap((g) => grouped[g].map(() => g));
-    const change0 = grouped[0].map((s) => s[1] - s[0]);
-    const change1 = grouped[1].map((s) => s[1] - s[0]);
-    out.independentT = independentTTest(change0, change1);
+    out.independentT = independentTTest(grouped[0].map((s) => s[1] - s[0]), grouped[1].map((s) => s[1] - s[0]));
     out.ancova = ancova(group, pre, post);
-    out.pairedT = {
-      group0: pairedTTest(grouped[0].map((s) => s[0]), grouped[0].map((s) => s[1])),
-      group1: pairedTTest(grouped[1].map((s) => s[0]), grouped[1].map((s) => s[1])),
-    };
+    out.pairedT = [
+      pairedTTest(grouped[0].map((s) => s[0]), grouped[0].map((s) => s[1])),
+      pairedTTest(grouped[1].map((s) => s[0]), grouped[1].map((s) => s[1])),
+    ];
   } else {
     out.mixedAnova = mixedAnova(grouped);
-    out.mauchly = mauchlyPooled(grouped);
+    if (T >= 3) out.mauchly = mauchlyPooled(grouped);
     const covs = grouped.map((g) => covarianceMatrix(g));
     const ns = grouped.map((g) => g.length);
     out.boxM = boxMGeneral(covs, ns);
-    out.bonferroni = [0, 1].map((g) => ({ groupLabel: groupLabels[g], pairs: withinGroupBonferroni(grouped[g]) }));
+    out.bonferroni = grouped.map((gData, gi) => ({ groupLabel: groupLabels[gi], pairs: withinGroupBonferroni(gData) }));
   }
 
   return out;
+}
+
+function meanOf(col: number[]): number {
+  return col.reduce((s, v) => s + v, 0) / col.length;
 }
 
 function shapiroFor(col: number[]): { w: number; p: number } {
@@ -350,7 +385,7 @@ function starP(p: number): string {
 // کامپوننت اصلی
 // ------------------------------------------------------------
 
-export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
+export default function ClinicalTool({ mode, initialFollowup }: { mode: ClinicalMode; initialFollowup?: boolean }) {
   const cfg = MODE_CONFIG[mode];
 
   // ---------- پروژه‌ها ----------
@@ -368,7 +403,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
       id: uid(),
       name: cfg.defaultProjectName,
       updatedAt: new Date().toISOString(),
-      data: defaultProjectData(mode, mode === "compare"),
+      data: defaultProjectData(mode, mode === "compare" && initialFollowup !== false),
     };
     return [p];
   });
@@ -377,7 +412,12 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
 
   // ---------- state ----------
   const [source, setSource] = useState<"generate" | "real">("generate");
-  const [groupLabels, setGroupLabels] = useState<[string, string]>([...cfg.groupDefaults]);
+  const [interventionTitle, setInterventionTitle] = useState(cfg.interventionTitle);
+  const [interventionType, setInterventionType] = useState(cfg.interventionType);
+  const [dvName, setDvName] = useState(cfg.dvName);
+  const [dvMeasure, setDvMeasure] = useState(cfg.dvMeasure);
+  const [dvLevel, setDvLevel] = useState(cfg.dvLevel);
+  const [groupLabels, setGroupLabels] = useState<string[]>([...cfg.groupDefaults]);
   const [followup, setFollowup] = useState(mode === "compare");
   const [scoreMin, setScoreMin] = useState("0");
   const [scoreMax, setScoreMax] = useState("100");
@@ -411,6 +451,10 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
   const alphaNum = Number(alpha);
   const safeAlpha = Number.isFinite(alphaNum) && alphaNum > 0 && alphaNum < 1 ? alphaNum : 0.05;
   const timeLabels = followup ? ["پیش‌آزمون", "پس‌آزمون", "پیگیری"] : ["پیش‌آزمون", "پس‌آزمون"];
+  const design: ClinicalDesign = followup ? "followup" : "control";
+  const nTimes = followup ? 3 : 2;
+
+  const setGroupLabel = (idx: number, value: string) => setGroupLabels((prev) => prev.map((x, i) => (i === idx ? value : x)));
 
   // ---------- مراحل ----------
   const steps = useMemo(() => {
@@ -418,6 +462,8 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
       { id: "project", label: "پروژه", short: "پروژه" },
       { id: "source", label: "منبع داده", short: "منبع" },
       { id: "spec", label: "مشخصات طرح", short: "مشخصات" },
+      { id: "variables", label: "متغیرها", short: "متغیرها" },
+      { id: "alpha", label: "سطح معناداری", short: "آلفا" },
     ];
     if (source === "generate") {
       list.push({ id: "constraints", label: "قیود تولید داده", short: "قیود" });
@@ -427,7 +473,8 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
       { id: "data", label: "جدول داده‌ها", short: "داده" },
       { id: "analysis", label: "تحلیل", short: "تحلیل" },
       { id: "assumptions", label: "پیش‌فرض‌ها", short: "پیش‌فرض" },
-      { id: "findings", label: "یافته‌ها", short: "یافته‌ها" },
+      { id: "descriptive", label: "یافته‌های توصیفی", short: "توصیفی" },
+      { id: "inferential", label: "یافته‌های استنباطی", short: "استنباطی" },
       { id: "report", label: "نگارش گزارش", short: "گزارش" },
       { id: "save", label: "ذخیره", short: "ذخیره" }
     );
@@ -436,7 +483,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
 
   const stepIdx = (id: string) => steps.findIndex((s) => s.id === id);
   const currentStep = Math.min(activeStep, steps.length - 1);
-  const analysisSteps = new Set(["assumptions", "findings", "report"]);
+  const analysisSteps = new Set(["assumptions", "descriptive", "inferential", "report"]);
 
   const analysis = useMemo(
     () => computeAnalysis(rows, groupLabels, followup, safeAlpha),
@@ -511,6 +558,11 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
                 updatedAt: new Date().toISOString(),
                 data: {
                   source,
+                  interventionTitle,
+                  interventionType,
+                  dvName,
+                  dvMeasure,
+                  dvLevel,
                   groupLabels,
                   followup,
                   scoreMin,
@@ -544,6 +596,11 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
     projectId,
     cfg.storageKey,
     source,
+    interventionTitle,
+    interventionType,
+    dvName,
+    dvMeasure,
+    dvLevel,
     groupLabels,
     followup,
     scoreMin,
@@ -564,7 +621,13 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
 
   function applyProjectData(data: ClinicalProjectData) {
     setSource(data.source);
-    setGroupLabels(data.groupLabels ?? [...cfg.groupDefaults]);
+    setInterventionTitle(data.interventionTitle ?? cfg.interventionTitle);
+    setInterventionType(data.interventionType ?? cfg.interventionType);
+    setDvName(data.dvName ?? cfg.dvName);
+    setDvMeasure(data.dvMeasure ?? cfg.dvMeasure);
+    setDvLevel(data.dvLevel ?? cfg.dvLevel);
+    const labels = Array.isArray(data.groupLabels) && data.groupLabels.length ? data.groupLabels : [...cfg.groupDefaults];
+    setGroupLabels(Array.from({ length: cfg.groupCount }, (_, i) => labels[i] ?? cfg.groupDefaults[i] ?? `گروه ${i + 1}`));
     setFollowup(mode === "compare" ? !!data.followup : false);
     setScoreMin(data.scoreMin);
     setScoreMax(data.scoreMax);
@@ -649,10 +712,11 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
     } else {
       if (!Number.isFinite(eMin) || !Number.isFinite(eMax) || eMin < 0 || eMax > 1 || eMin > eMax) throw new Error("بازهٔ مجذور اتای تعامل باید بین 0 و 1 باشد.");
     }
-    const design: ClinicalDesign = followup ? "followup" : "control";
     return {
       design,
+      nGroups: cfg.groupCount,
       nPerGroup: nn,
+      nTimes,
       alpha: safeAlpha,
       scoreMin: smin,
       scoreMax: smax,
@@ -678,7 +742,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
       setModal({ ok: false, lines: [(err as Error).message] });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scoreMin, scoreMax, nPerGroup, alpha, targetDMin, targetDMax, targetEta2Min, targetEta2Max, followup, enforceNormality, enforceHomogeneity, enforceSphericity]);
+  }, [scoreMin, scoreMax, nPerGroup, alpha, targetDMin, targetDMax, targetEta2Min, targetEta2Max, followup, enforceNormality, enforceHomogeneity, enforceSphericity, design, nTimes]);
 
   const runAnalysis = () => {
     if (!rows.length) {
@@ -702,27 +766,26 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
       if (!ws) throw new Error("فایل اکسل خالی است.");
       const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null }) as unknown[][];
       if (!aoa.length) throw new Error("فایل اکسل خالی است.");
-      const expectedCols = followup ? 4 : 3;
+      const expectedCols = nTimes + 1;
       const first = aoa[0] ?? [];
       const hasHeader = first.some((v) => typeof v === "string" && v.trim() !== "" && parseLocalizedNumber(v) == null);
       const dataRows = hasHeader ? aoa.slice(1) : aoa;
       const parsed = dataRows.map((r) => Array.from({ length: expectedCols }, (_, j) => parseLocalizedNumber((r as unknown[])[j])));
-      const groupVals = parsed.map((r) => r[0]);
-      let shifted = false;
-      let groups = groupVals.map((v) => (v == null ? null : Math.round(v)));
-      if (groups.some((v) => v != null && (v < 0 || v > 2))) throw new Error("مقادیر ستون «گروه» باید ۱ و ۲ (یا ۰ و ۱) باشند.");
-      if (groups.every((v) => v == null || (v >= 0 && v <= 1))) {
-        shifted = true;
-        groups = groups.map((v) => (v == null ? null : v + 1));
+      const groups = parsed.map((r) => (r[0] == null ? null : Math.round(r[0])));
+      const maxGroup = Math.max(...groups.filter((v): v is number => v != null));
+      const minGroup = Math.min(...groups.filter((v): v is number => v != null));
+      if (groups.some((v) => v != null && (v < 0 || v > cfg.groupCount))) {
+        throw new Error(`مقادیر ستون «گروه» باید عدد صحیح ۱ تا ${cfg.groupCount} باشد.`);
       }
-      const outRows: (number | null)[][] = parsed.map((r, i) => [groups[i], ...r.slice(1)]);
+      const shifted = minGroup === 0;
+      const outRows: (number | null)[][] = parsed.map((r, i) => [groups[i] == null ? null : groups[i]! + (shifted ? 1 : 0), ...r.slice(1)]);
+      void maxGroup;
       setSource("real");
-      setColumns(clinicalColumns(followup ? "followup" : "control"));
+      setColumns(clinicalColumns(design, nTimes));
       setRows(outRows);
       setAnswerKey(null);
       setAnalysisRun(false);
       setStatus({ text: `داده واقعی وارد شد: ${outRows.length} ردیف × ${expectedCols} ستون. «اجرای تحلیل» را بزنید.`, kind: "ok" });
-      void shifted;
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
       setModal({ ok: false, lines: [(err as Error).message] });
@@ -731,14 +794,12 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
 
   const downloadTemplate = () => {
     try {
-      const headers = clinicalColumns(followup ? "followup" : "control");
-      const sample: (string | number | null)[][] = [
-        headers,
-        [1, 45, 50, followup ? 52 : null].slice(0, headers.length),
-        [1, 48, 52, followup ? 53 : null].slice(0, headers.length),
-        [2, 44, 58, followup ? 61 : null].slice(0, headers.length),
-        [2, 47, 60, followup ? 63 : null].slice(0, headers.length),
-      ];
+      const headers = clinicalColumns(design, nTimes);
+      const sample: (string | number | null)[][] = [headers];
+      for (let g = 1; g <= cfg.groupCount; g++) {
+        sample.push([g, 45, 50, ...(nTimes >= 3 ? [52] : [])].slice(0, headers.length));
+        sample.push([g, 48, 52, ...(nTimes >= 3 ? [53] : [])].slice(0, headers.length));
+      }
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sample), "قالب داده");
       XLSX.writeFile(wb, "amarist-clinical-template.xlsx");
@@ -751,11 +812,18 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
   // ---------- خروجی‌ها ----------
   const reportInput = useMemo(() => {
     return {
-      design: followup ? "followup" : "control",
+      design,
       projectName: currentProject?.name ?? "پروژه",
       source,
+      interventionTitle,
+      interventionType,
+      dvName,
+      dvMeasure,
+      dvLevel,
       groupLabels,
       timeLabels,
+      nGroups: cfg.groupCount,
+      nTimes,
       nTotal: analysis.nTotal,
       nPerGroup: analysis.nPerGroup,
       alpha: safeAlpha,
@@ -771,7 +839,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
       homogeneity: analysis.homogeneity,
       answerKey: answerKey ?? undefined,
     } as const;
-  }, [followup, currentProject, source, groupLabels, timeLabels, analysis, safeAlpha, answerKey]);
+  }, [design, currentProject, source, interventionTitle, interventionType, dvName, dvMeasure, dvLevel, groupLabels, timeLabels, cfg.groupCount, nTimes, analysis, safeAlpha, answerKey]);
 
   const reportText = useMemo(() => buildClinicalReportText(reportInput), [reportInput]);
 
@@ -868,7 +936,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
   const doBackup = () => {
     try {
       const safeName = backupName.trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\.json$/i, "") || "بکاپ";
-      const data = backupScope === "all" ? { version: 1, type: "projects", projects } : { version: 1, type: "project", project: currentProject };
+      const data = backupScope === "all" ? { version: 2, type: "projects", projects } : { version: 2, type: "project", project: currentProject };
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -925,14 +993,14 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
   // ---------- خلاصه تشخیص ----------
   const genSummary = useMemo(() => {
     const lines: string[] = [];
-    lines.push(`طرح: ${followup ? "دو گروه × پیش/پس/پیگیری" : "گروه مداخله در برابر کنترل (پیش/پس)"}`);
-    lines.push(`گروه‌ها: «${groupLabels[0]}» در برابر «${groupLabels[1]}»`);
+    lines.push(`طرح: ${followup ? `${cfg.groupCount} گروه × پیش/پس/پیگیری` : "گروه آزمایش/درمان در برابر کنترل (پیش/پس)"}`);
+    lines.push(`گروه‌ها: ${groupLabels.map((g) => `«${g}»`).join("، ")}`);
     lines.push(`حجم نمونهٔ هر گروه: ${nPerGroup}`);
-    lines.push(`مقیاس نمره: ${scoreMin} تا ${scoreMax} | α = ${alpha}`);
+    lines.push(`متغیر وابسته: ${dvName || "—"} (نمره ${scoreMin} تا ${scoreMax}) | α = ${alpha}`);
     if (!followup) lines.push(`هدف: d کوهن بین ${targetDMin} تا ${targetDMax} (تفاوت بین‌گروهی در تغییر)`);
     else lines.push(`هدف: مجذور اتای تعامل زمان*گروه بین ${targetEta2Min} تا ${targetEta2Max}`);
     return lines;
-  }, [followup, groupLabels, nPerGroup, scoreMin, scoreMax, alpha, targetDMin, targetDMax, targetEta2Min, targetEta2Max]);
+  }, [followup, cfg.groupCount, groupLabels, nPerGroup, dvName, scoreMin, scoreMax, alpha, targetDMin, targetDMax, targetEta2Min, targetEta2Max]);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-50/70 via-[#f5f7fb] to-[#f5f7fb] pb-24 dark:from-slate-950 dark:via-slate-900 dark:to-slate-900">
@@ -951,9 +1019,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
         {/* ============ مرحله ۰: پروژه ============ */}
         {currentStep === stepIdx("project") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">پروژه‌ها</h2>
-            </div>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">پروژه‌ها</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               همه داده‌ها در مرورگر شما ذخیره می‌شوند. یک پروژه انتخاب کنید یا پروژه جدید بسازید؛ با «بکاپ» می‌توانید
               پروژه‌ها را ذخیره یا منتقل کنید.
@@ -1056,7 +1122,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
               >
                 <p className="font-extrabold text-stone-900 dark:text-stone-100">داده واقعی خودم</p>
                 <p className="mt-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
-                  فایل اکسل را در مرحله «جدول داده‌ها» وارد کنید؛ ستون اول گروه (۱ یا ۲) و بقیه نمره‌های زمانی است.
+                  فایل اکسل را در مرحله «جدول داده‌ها» وارد کنید؛ ستون اول گروه (۱ تا {cfg.groupCount}) و بقیه نمره‌های زمانی است.
                 </p>
               </button>
             </div>
@@ -1068,8 +1134,23 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[2]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">مشخصات طرح</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-              نام گروه‌ها، ساختار زمانی و مقیاس نمره را مشخص کنید.
+              عنوان و نوع مداخله، نام گروه‌ها و ساختار زمانی را مشخص کنید.
             </p>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className={labelCls}>عنوان مداخله</label>
+                <input className={inputCls} value={interventionTitle} onChange={(e) => setInterventionTitle(e.target.value)} placeholder="مثلاً آموزش مهارت‌های تنظیم هیجان" />
+              </div>
+              <div>
+                <label className={labelCls}>نوع مداخله</label>
+                <select className={inputCls} value={interventionType} onChange={(e) => setInterventionType(e.target.value)}>
+                  {INTERVENTION_TYPES.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
 
             {cfg.allowFollowup && (
               <div className="mt-4 rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
@@ -1090,23 +1171,14 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
               </div>
             )}
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <div>
-                <label className={labelCls}>نام گروه ۱ (ستون گروه = ۱)</label>
-                <input className={inputCls} value={groupLabels[0]} onChange={(e) => setGroupLabels([e.target.value, groupLabels[1]])} />
-              </div>
-              <div>
-                <label className={labelCls}>نام گروه ۲ (ستون گروه = ۲)</label>
-                <input className={inputCls} value={groupLabels[1]} onChange={(e) => setGroupLabels([groupLabels[0], e.target.value])} />
-              </div>
-              <div>
-                <label className={labelCls}>حداقل نمره مقیاس</label>
-                <input type="number" dir="ltr" className={inputCls} value={scoreMin} onChange={(e) => setScoreMin(e.target.value)} />
-              </div>
-              <div>
-                <label className={labelCls}>حداکثر نمره مقیاس</label>
-                <input type="number" dir="ltr" className={inputCls} value={scoreMax} onChange={(e) => setScoreMax(e.target.value)} />
-              </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {groupLabels.map((label, i) => (
+                <div key={i}>
+                  <label className={labelCls}>نام گروه {i + 1} (ستون گروه = {i + 1})</label>
+                  <input className={inputCls} value={label} onChange={(e) => setGroupLabel(i, e.target.value)} />
+                  <p className={tinyCls}>نقش: {cfg.groupRoles[i] ?? "—"}</p>
+                </div>
+              ))}
             </div>
 
             <div className="mt-4 rounded-xl border border-dashed border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
@@ -1122,24 +1194,115 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           </section>
         )}
 
-        {/* ============ مرحله ۳: قیود تولید ============ */}
-        {currentStep === stepIdx("constraints") && source === "generate" && (
+        {/* ============ مرحله ۳: متغیرها ============ */}
+        {currentStep === stepIdx("variables") && (
           <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[3]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">متغیرها</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              در این طرح فقط یک <b>متغیر وابسته</b> داریم؛ مشخصات آن را دقیق وارد کنید.
+            </p>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className={labelCls}>نام متغیر وابسته</label>
+                <input className={inputCls} value={dvName} onChange={(e) => setDvName(e.target.value)} placeholder="مثلاً نمره افسردگی (BDI-II)" />
+              </div>
+              <div>
+                <label className={labelCls}>سطح اندازه‌گیری</label>
+                <select className={inputCls} value={dvLevel} onChange={(e) => setDvLevel(e.target.value)}>
+                  {DV_LEVELS.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="sm:col-span-2">
+                <label className={labelCls}>ابزار / مقیاس اندازه‌گیری</label>
+                <input className={inputCls} value={dvMeasure} onChange={(e) => setDvMeasure(e.target.value)} placeholder="مثلاً پرسشنامه افسردگی بک (۲۱ گویه)" />
+              </div>
+              <div>
+                <label className={labelCls}>حداقل نمره مقیاس</label>
+                <input type="number" dir="ltr" className={inputCls} value={scoreMin} onChange={(e) => setScoreMin(e.target.value)} />
+              </div>
+              <div>
+                <label className={labelCls}>حداکثر نمره مقیاس</label>
+                <input type="number" dir="ltr" className={inputCls} value={scoreMax} onChange={(e) => setScoreMax(e.target.value)} />
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-dashed border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
+              <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">ساختار متغیرها:</p>
+              <ul className="mt-2 space-y-1 text-[12px] leading-6 text-stone-500 dark:text-stone-400">
+                <li>• متغیر وابسته: «{dvName || "—"}» در {nTimes} زمان ({timeLabels.join("، ")})</li>
+                <li>• متغیر مستقل بین‌گروهی: گروه ({groupLabels.map((g) => `«${g}»`).join("، ")})</li>
+                <li>• متغیر مستقل درون‌گروهی: زمان (اندازه‌گیری مکرر)</li>
+              </ul>
+            </div>
+          </section>
+        )}
+
+        {/* ============ مرحله ۴: سطح معناداری ============ */}
+        {currentStep === stepIdx("alpha") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[7]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">سطح معناداری (آلفا)</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
+              سطح معناداری ملاک تصمیم‌گیری در همه آزمون‌های فرضیه است؛ نتیجه وقتی «معنی‌دار» است که p کمتر از α باشد.
+            </p>
+
+            <div className="mt-4 flex flex-wrap items-end gap-4">
+              <div>
+                <label className={labelCls}>سطح معناداری α</label>
+                <input type="number" step={0.001} min={0.001} max={0.1} dir="ltr" className={inputCls} value={alpha} onChange={(e) => setAlpha(e.target.value)} />
+              </div>
+              <div className="flex flex-wrap gap-2 pb-1">
+                {[
+                  { v: "0.05", label: "۰٫۰۵ (معمول)" },
+                  { v: "0.01", label: "۰٫۰۱" },
+                  { v: "0.001", label: "۰٫۰۰۱" },
+                ].map((p) => (
+                  <button
+                    key={p.v}
+                    type="button"
+                    onClick={() => setAlpha(p.v)}
+                    className={`rounded-xl border px-3 py-2 text-[12px] font-extrabold transition ${
+                      alpha === p.v ? "border-indigo-500 bg-indigo-600 text-white" : "border-stone-200 bg-white text-stone-600 hover:border-indigo-300 dark:border-stone-700 dark:bg-slate-800 dark:text-stone-300"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[12px] font-extrabold text-stone-800 dark:text-stone-200">ملاک تصمیم</p>
+                <p className={`${tinyCls} mt-1`}>p &lt; {alpha} → تفاوت معنی‌دار (رد فرض صفر)</p>
+              </div>
+              <div className="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[12px] font-extrabold text-stone-800 dark:text-stone-200">سطح اطمینان</p>
+                <p className={`${tinyCls} mt-1`}>فاصله اطمینان ۹۵٪ معادل α = ۰٫۰۵ است (۱ − α).</p>
+              </div>
+              <div className="rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[12px] font-extrabold text-stone-800 dark:text-stone-200">اثر بر تولید داده</p>
+                <p className={`${tinyCls} mt-1`}>این α در قیود تولید داده و همه آزمون‌ها استفاده می‌شود.</p>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* ============ مرحله ۵: قیود تولید ============ */}
+        {currentStep === stepIdx("constraints") && source === "generate" && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">قیود تولید داده</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               مشخص کنید داده تولیدی چه شرایطی را حتماً رعایت کند؛ تولید فقط خروجی‌ای را می‌پذیرد که این شرایط برقرار باشد.
             </p>
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>حجم نمونهٔ هر گروه</label>
                 <input type="number" dir="ltr" className={inputCls} value={nPerGroup} onChange={(e) => setNPerGroup(e.target.value)} />
                 <p className={tinyCls}>پیش‌فرض: 30</p>
-              </div>
-              <div>
-                <label className={labelCls}>سطح معنی‌داری α</label>
-                <input type="number" step={0.001} dir="ltr" className={inputCls} value={alpha} onChange={(e) => setAlpha(e.target.value)} />
-                <p className={tinyCls}>پیش‌فرض: 0.05</p>
               </div>
               {!followup ? (
                 <>
@@ -1181,7 +1344,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
                 <input type="checkbox" checked={enforceHomogeneity} onChange={(e) => setEnforceHomogeneity(e.target.checked)} className="mt-1 h-4 w-4 accent-indigo-600" />
                 <span>
                   <span className="block text-sm font-extrabold text-stone-800 dark:text-stone-200">همگنی واریانس‌ها</span>
-                  <span className={tinyCls}>آزمون لوین در هر زمان بین دو گروه (p ≥ α).</span>
+                  <span className={tinyCls}>آزمون لوین در هر زمان بین گروه‌ها (p ≥ α).</span>
                 </span>
               </label>
               {followup && (
@@ -1197,9 +1360,9 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           </section>
         )}
 
-        {/* ============ مرحله ۴: تشخیص ============ */}
+        {/* ============ مرحله ۶: تشخیص ============ */}
         {currentStep === stepIdx("diagnose") && source === "generate" && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">تشخیص</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               خلاصه وضعیت طرح را مرور کنید؛ تولید داده از اینجا انجام می‌شود.
@@ -1239,16 +1402,16 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           </section>
         )}
 
-        {/* ============ مرحله ۵: جدول داده‌ها ============ */}
+        {/* ============ مرحله ۷: جدول داده‌ها ============ */}
         {currentStep === stepIdx("data") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[6]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">جدول داده‌ها</h2>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
                   {source === "generate"
                     ? "داده‌ها در مرحله «تشخیص» تولید می‌شوند؛ اینجا می‌توانید داده موجود را ویرایش یا اکسپورت کنید."
-                    : "فایل اکسل داده‌های واقعی را وارد کنید (ستون اول گروه ۱/۲، بقیه نمره‌های زمانی) یا از قالب استفاده کنید."}
+                    : `فایل اکسل داده‌های واقعی را وارد کنید (ستون اول گروه ۱ تا ${cfg.groupCount}، بقیه نمره‌های زمانی) یا از قالب استفاده کنید.`}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -1312,9 +1475,9 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           </section>
         )}
 
-        {/* ============ مرحله ۶: تحلیل ============ */}
+        {/* ============ مرحله ۸: تحلیل ============ */}
         {currentStep === stepIdx("analysis") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">تحلیل</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               داده آماده است؛ با «اجرای تحلیل» مدل روی داده فعلی برآورد می‌شود و مراحل بعدی فعال می‌شوند.
@@ -1337,7 +1500,7 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
                   </p>
                   {analysis.valid && (
                     <p>
-                      <b>موارد کامل:</b> {analysis.nTotal} (گروه «{groupLabels[0]}»: {analysis.nPerGroup[0]}، گروه «{groupLabels[1]}»: {analysis.nPerGroup[1]})
+                      <b>موارد کامل:</b> {analysis.nTotal} ({analysis.nPerGroup.map((n, i) => `گروه «${groupLabels[i]}»: ${n}`).join("، ")})
                       {analysis.dropped > 0 ? ` — ${analysis.dropped} ردیف ناقص حذف شد.` : ""}
                     </p>
                   )}
@@ -1368,9 +1531,9 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           </section>
         )}
 
-        {/* ============ مرحله ۷: پیش‌فرض‌ها ============ */}
+        {/* ============ مرحله ۹: پیش‌فرض‌ها ============ */}
         {currentStep === stepIdx("assumptions") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[7]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">بررسی پیش‌فرض‌ها</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">پیش‌فرض‌های آماری روی داده فعلی محاسبه می‌شوند.</p>
             {!analysisReady ? (
@@ -1469,40 +1632,50 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           </section>
         )}
 
-        {/* ============ مرحله ۸: یافته‌ها ============ */}
-        {currentStep === stepIdx("findings") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[0]}`}>
-            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌ها</h2>
-            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">آمار توصیفی و نتایج تحلیل‌ها.</p>
+        {/* ============ مرحله ۱۰: یافته‌های توصیفی ============ */}
+        {currentStep === stepIdx("descriptive") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[2]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های توصیفی</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">میانگین، انحراف معیار و دامنه نمرات در هر گروه و زمان.</p>
+            {!analysisReady ? (
+              <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
+                ابتدا تحلیل را اجرا کنید.
+              </div>
+            ) : (
+              <div className="tool-table-wrap mt-4">
+                <table className="tool-table">
+                  <thead>
+                    <tr><th>گروه / زمان</th><th>n</th><th>میانگین</th><th>انحراف معیار</th><th>کمینه</th><th>بیشینه</th></tr>
+                  </thead>
+                  <tbody>
+                    {analysis.descriptives.map((d, i) => (
+                      <tr key={i}>
+                        <td style={{ fontWeight: 800 }}>{d.label}</td>
+                        <td className="number-cell">{d.n}</td>
+                        <td className="number-cell">{fmt(d.mean)}</td>
+                        <td className="number-cell">{fmt(d.sd)}</td>
+                        <td className="number-cell">{fmt(d.min)}</td>
+                        <td className="number-cell">{fmt(d.max)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ============ مرحله ۱۱: یافته‌های استنباطی ============ */}
+        {currentStep === stepIdx("inferential") && (
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[3]}`}>
+            <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">یافته‌های استنباطی</h2>
+            <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">آزمون‌های فرضیه و اندازه اثر.</p>
             {!analysisReady ? (
               <div className="mt-4 rounded-xl border border-dashed border-stone-300 p-8 text-center text-sm text-stone-400 dark:border-stone-600 dark:text-stone-500">
                 ابتدا تحلیل را اجرا کنید.
               </div>
             ) : (
               <div className="mt-4 space-y-6">
-                <div>
-                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">آمار توصیفی</h3>
-                  <div className="tool-table-wrap mt-2">
-                    <table className="tool-table">
-                      <thead>
-                        <tr><th>گروه / زمان</th><th>n</th><th>میانگین</th><th>انحراف معیار</th><th>کمینه</th><th>بیشینه</th></tr>
-                      </thead>
-                      <tbody>
-                        {analysis.descriptives.map((d, i) => (
-                          <tr key={i}>
-                            <td style={{ fontWeight: 800 }}>{d.label}</td>
-                            <td className="number-cell">{d.n}</td>
-                            <td className="number-cell">{fmt(d.mean)}</td>
-                            <td className="number-cell">{fmt(d.sd)}</td>
-                            <td className="number-cell">{fmt(d.min)}</td>
-                            <td className="number-cell">{fmt(d.max)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
                 {!followup && analysis.independentT && (
                   <div>
                     <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۱) آزمون t مستقل روی نمرهٔ تغییر (پس − پیش)</h3>
@@ -1554,18 +1727,15 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
                           <tr><th>گروه</th><th>t</th><th>p</th><th>d (dz)</th><th>نتیجه</th></tr>
                         </thead>
                         <tbody>
-                          {([0, 1] as const).map((g) => {
-                            const pt = g === 0 ? analysis.pairedT!.group0 : analysis.pairedT!.group1;
-                            return (
-                              <tr key={g}>
-                                <td style={{ fontWeight: 800 }}>{groupLabels[g]}</td>
-                                <td className="number-cell">{fmt(pt.t)}</td>
-                                <td className="number-cell">{fmtP(pt.p)}{starP(pt.p)}</td>
-                                <td className="number-cell">{fmt(pt.cohensDz)}</td>
-                                <td><Badge ok={pt.p < safeAlpha} text={pt.p < safeAlpha ? "معنی‌دار" : "غیرمعنی‌دار"} /></td>
-                              </tr>
-                            );
-                          })}
+                          {analysis.pairedT.map((pt, g) => (
+                            <tr key={g}>
+                              <td style={{ fontWeight: 800 }}>{groupLabels[g]}</td>
+                              <td className="number-cell">{fmt(pt.t)}</td>
+                              <td className="number-cell">{fmtP(pt.p)}{starP(pt.p)}</td>
+                              <td className="number-cell">{fmt(pt.cohensDz)}</td>
+                              <td><Badge ok={pt.p < safeAlpha} text={pt.p < safeAlpha ? "معنی‌دار" : "غیرمعنی‌دار"} /></td>
+                            </tr>
+                          ))}
                         </tbody>
                       </table>
                     </div>
@@ -1669,9 +1839,9 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           </section>
         )}
 
-        {/* ============ مرحله ۹: گزارش ============ */}
+        {/* ============ مرحله ۱۲: گزارش ============ */}
         {currentStep === stepIdx("report") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[1]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[4]}`}>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">نگارش گزارش</h2>
@@ -1701,9 +1871,9 @@ export default function ClinicalTool({ mode }: { mode: ClinicalMode }) {
           </section>
         )}
 
-        {/* ============ مرحله ۱۰: ذخیره ============ */}
+        {/* ============ مرحله ۱۳: ذخیره ============ */}
         {currentStep === stepIdx("save") && (
-          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[2]}`}>
+          <section className={`mt-4 rounded-2xl border p-5 shadow-sm sm:p-6 ${sectionTones[5]}`}>
             <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">ذخیره</h2>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
               پروژه به‌صورت خودکار در مرورگر ذخیره می‌شود؛ برای انتقال یا بکاپ، فایل بکاپ بگیرید.

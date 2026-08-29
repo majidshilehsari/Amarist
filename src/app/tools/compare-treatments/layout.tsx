@@ -1,15 +1,11 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "تولید داده تمرینی — مقایسه اثربخشی دو درمان | آماریست",
+  title: "مقایسه اثربخشی دو درمان | آماریست",
   description:
-    "ابزار تولید سه لیست ۴۵تایی با سه گروه ۱۵نفره برای طراحی کارآزمایی مقایسه اثربخشی دو درمان؛ با تحلیل واریانس اندازه‌گیری مکرر، بررسی پیش‌فرض‌ها، بن‌فرونی و خروجی آماده اکسل.",
+    "ابزار طراحی و تحلیل کارآزمایی مقایسه اثربخشی دو درمان: دو گروه مستقل با یا بدون مرحله پیگیری؛ تولید داده تمرینی هدفمند یا تحلیل داده واقعی با تحلیل واریانس اندازه‌گیری مکرر، ANCOVA، بن‌فرونی و بررسی پیش‌فرض‌ها.",
 };
 
-export default function CompareTreatmentsLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function CompareTreatmentsLayout({ children }: { children: React.ReactNode }) {
   return children;
 }

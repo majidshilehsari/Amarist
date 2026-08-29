@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
   FlaskConical,
   GitCompareArrows,
@@ -7,13 +8,12 @@ import {
   Waypoints,
   type LucideIcon,
 } from "lucide-react";
-import FollowUpToggle from "./follow-up-toggle";
 
 type Mode = {
   icon: LucideIcon;
   title: string;
   description: string;
-  /** حالت‌های اثربخشی: تیک «مرحله پیگیری» (کوواریانس / واریانس اندازه‌گیری مکرر) */
+  /** حالت‌های اثربخشی: توضیح ساختار زمانی و روش تحلیل */
   followUp?: boolean;
   /** حالت‌های مدل‌سازی: برچسب‌های روش‌ها */
   tags?: string[];
@@ -59,6 +59,7 @@ const categories: Category[] = [
         description:
           "بررسی اثر یک مداخله روی یک گروه؛ مقایسه‌ی پیش و پس از مداخله، یا گروه مداخله با گروه کنترل.",
         followUp: true,
+        href: "/tools/one-treatment",
       },
       {
         icon: GitCompareArrows,
@@ -147,52 +148,67 @@ export default function ResearchModes() {
 
               {/* حالت‌ها */}
               <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                {category.modes.map((mode) => (
-                  <div
-                    key={mode.title}
-                    className={`flex flex-col rounded-2xl border border-stone-200 bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${category.accent.cardRing}`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span
-                        className={`flex h-10 w-10 items-center justify-center rounded-xl ${category.accent.iconBg}`}
-                      >
-                        <mode.icon className="h-5 w-5" />
-                      </span>
-                      {mode.href ? (
-                        <a
-                          href={mode.href}
-                          className="rounded-full bg-indigo-600 px-3.5 py-1.5 text-[11px] font-bold text-white shadow-sm transition-colors hover:bg-indigo-500"
+                {category.modes.map((mode) => {
+                  const inner = (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <span
+                          className={`flex h-10 w-10 items-center justify-center rounded-xl ${category.accent.iconBg}`}
                         >
-                          ورود به ابزار
-                        </a>
-                      ) : (
-                        <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700 ring-1 ring-amber-200">
-                          در دست ساخت
+                          <mode.icon className="h-5 w-5" />
                         </span>
-                      )}
-                    </div>
-                    <h4 className="mt-4 font-extrabold text-stone-900">
-                      {mode.title}
-                    </h4>
-                    <p className="mt-2 flex-1 text-[13px] leading-6 text-stone-600">
-                      {mode.description}
-                    </p>
-                    {mode.followUp ? (
-                      <FollowUpToggle />
-                    ) : (
-                      <div className="mt-4 flex flex-wrap gap-1.5">
-                        {mode.tags?.map((tag) => (
-                          <span
-                            key={tag}
-                            className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600"
-                          >
-                            {tag}
+                        {mode.href ? (
+                          <span className="rounded-full bg-emerald-100 px-3 py-1.5 text-[11px] font-bold text-emerald-700 ring-1 ring-emerald-200">
+                            ابزار آماده
                           </span>
-                        ))}
+                        ) : (
+                          <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold text-amber-700 ring-1 ring-amber-200">
+                            در دست ساخت
+                          </span>
+                        )}
                       </div>
-                    )}
-                  </div>
-                ))}
+                      <h4 className="mt-4 font-extrabold text-stone-900">
+                        {mode.title}
+                      </h4>
+                      <p className="mt-2 flex-1 text-[13px] leading-6 text-stone-600">
+                        {mode.description}
+                      </p>
+                      {mode.followUp ? (
+                        <div className="mt-4 rounded-xl border border-dashed border-stone-200 bg-stone-50 px-3 py-2.5">
+                          <p className="text-[11px] font-bold text-stone-600">
+                            با / بدون مرحله پیگیری — قابل انتخاب در ابزار
+                          </p>
+                          <p className="mt-1 text-[11px] leading-5 text-stone-500">
+                            روش تحلیل: واریانس اندازه‌گیری مکرر (میکس‌آنوا) یا t مستقل + ANCOVA
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="mt-4 flex flex-wrap gap-1.5">
+                          {mode.tags?.map((tag) => (
+                            <span
+                              key={tag}
+                              className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  );
+
+                  const cardCls = `flex flex-col rounded-2xl border border-stone-200 bg-white p-5 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${category.accent.cardRing}`;
+
+                  return mode.href ? (
+                    <Link key={mode.title} href={mode.href} className={cardCls}>
+                      {inner}
+                    </Link>
+                  ) : (
+                    <div key={mode.title} className={cardCls}>
+                      {inner}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ))}

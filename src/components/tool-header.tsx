@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Moon, Sigma, Sun } from "lucide-react";
+import AboutApp from "@/components/about-app";
 
 export default function ToolHeader({
   title,
@@ -39,6 +40,11 @@ export default function ToolHeader({
         )}
 
         {actions && <div className="ms-auto flex shrink-0 items-center gap-2">{actions}</div>}
+
+        {/* دربارهٔ برنامه */}
+        <div className={`flex shrink-0 items-center ${actions ? "" : "ms-auto"}`}>
+          <AboutApp />
+        </div>
 
         {/* سوییچ لایت / دارک */}
         <div

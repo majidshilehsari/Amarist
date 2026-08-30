@@ -683,7 +683,9 @@ export function estimateSem(
   arrows: ModelArrow[],
   nodeCols: number[][],
   measurementCols?: SemMeasurementColumns,
-  estimator: "approx" | "ml" = "approx"
+  estimator: "approx" | "ml" = "approx",
+  /** غیرفعال‌سازی محاسبهٔ خطای معیار (هسین عددی) برای حلقه‌های غربالِ پُرتکرار */
+  options?: { standardErrors?: boolean }
 ): SemResults {
   const p = nodes.length;
   const ordered = [...nodes]
@@ -873,7 +875,9 @@ export function estimateSem(
   let usedEstimator: "composite" | "ml" = "composite";
   let mlLoadings: MlLoadingEstimate[] | undefined;
   if (measurementCols && estimator === "ml") {
-    const ml = estimateSemMl(nodes, active, nodeCols, measurementCols, { computeStandardErrors: true });
+    const ml = estimateSemMl(nodes, active, nodeCols, measurementCols, {
+      computeStandardErrors: options?.standardErrors !== false,
+    });
     if (ml.valid) {
       usedEstimator = "ml";
       fit = ml.fit;
@@ -970,10 +974,12 @@ export function bootstrapIndirectEffects(
   nodeCols: number[][],
   nBoot: number,
   measurementCols?: SemMeasurementColumns,
-  estimator: "approx" | "ml" = "approx"
+  estimator: "approx" | "ml" = "approx",
+  /** گزارش پیشرفتِ نمونه‌به‌نمونه (اختیاری) */
+  onProgress?: (done: number, total: number) => void
 ): IndirectBootRow[] {
   if (measurementCols && estimator === "ml") {
-    return bootstrapSemMlIndirect(nodes, arrows, nodeCols, measurementCols, nBoot).map((result) => ({
+    return bootstrapSemMlIndirect(nodes, arrows, nodeCols, measurementCols, nBoot, undefined, onProgress).map((result) => ({
       fromVar: result.fromVar,
       toVar: result.toVar,
       viaVar: result.viaVar,

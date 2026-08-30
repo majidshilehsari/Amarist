@@ -874,7 +874,9 @@ export function bootstrapSemMlIndirect(
   nodeColumns: number[][],
   measurementColumns: MlMeasurementColumns,
   samples: number,
-  original?: MlSemEstimate
+  original?: MlSemEstimate,
+  /** گزارش پیشرفتِ نمونه‌به‌نمونه — برای نمایش زنده در مودال تولید (اختیاری) */
+  onProgress?: (done: number, total: number) => void
 ): MlBootstrapIndirect[] {
   const active = arrows.filter((arrow) => arrow.active);
   const allObserved = nodes.flatMap((node) => {
@@ -949,6 +951,7 @@ export function bootstrapSemMlIndirect(
       start: full.parameterVector,
       multipleStarts: false,
     });
+    if (onProgress && (bootstrap % 25 === 24 || bootstrap === samples - 1)) onProgress(bootstrap + 1, samples);
     if (!estimate.valid) continue;
     for (const definition of definitions) {
       const fromNodes = nodes.filter((node) => node.varId === definition.fromVar);

@@ -11,6 +11,7 @@ import {
   FileSpreadsheet,
   FileText,
   FolderPlus,
+  ListChecks,
   Play,
   Plus,
   RefreshCw,
@@ -53,14 +54,23 @@ import {
   buildModelArrows,
   defaultSemFitConstraints,
   defaultIndirectConstraint,
+  DEFAULT_MAX_ATTEMPTS,
+  MAX_MAX_ATTEMPTS,
+  MIN_MAX_ATTEMPTS,
+  type ConstraintGroup,
   type GenConstraints,
   type IndirectConstraint,
   type IndirectTarget,
   type SemFitConstraints,
   type PathTarget,
   type SemAnswerKey,
+  type SemConstraintReport,
+  type SemGenProgress,
+  type SemGenOutput,
   type VariableSpec,
 } from "@/lib/sem-generator";
+import type { SemGeneratorWorkerResponse } from "@/workers/sem-generator.worker";
+import SemGenerationModal, { type GenerationPhase } from "@/components/sem-generation-modal";
 import ErrorBoundary from "@/components/error-boundary";
 import HelpButtons from "@/components/help-buttons";
 import PathDiagram from "@/components/path-diagram";
@@ -599,6 +609,7 @@ function defaultConstraints(): GenConstraints {
     enforceVif: true,
     enforceDw: true,
     bootSamples: 5000,
+    maxAttempts: DEFAULT_MAX_ATTEMPTS,
   };
 }
 
@@ -637,12 +648,18 @@ function normalizeConstraints(input?: LegacyGenConstraints | null): GenConstrain
     })
   );
 
+  const rawAttempts = Math.round(Number(input.maxAttempts));
+  const maxAttempts = Number.isFinite(rawAttempts)
+    ? Math.max(MIN_MAX_ATTEMPTS, Math.min(MAX_MAX_ATTEMPTS, rawAttempts))
+    : DEFAULT_MAX_ATTEMPTS;
+
   return {
     ...defaults,
     ...input,
     pathTargets: input.pathTargets ?? {},
     indirectTargets,
     fit,
+    maxAttempts,
   };
 }
 
@@ -1545,12 +1562,24 @@ function SemTool() {
   const [newProjectName, setNewProjectName] = useState("");
   const [diagnoseModal, setDiagnoseModal] = useState(false);
   const [analysisInputs, setAnalysisInputs] = useState<string>("");
+  // ---------- وضعیتِ تولید داده (مودالِ پیشرفت + گزارش قیود) ----------
+  const [genPhase, setGenPhase] = useState<GenerationPhase>("running");
+  const [genOpen, setGenOpen] = useState(false);
+  const [genProgress, setGenProgress] = useState<SemGenProgress | null>(null);
+  const [genReport, setGenReport] = useState<SemConstraintReport | null>(null);
+  const [genError, setGenError] = useState<string | null>(null);
+  const [genAttempts, setGenAttempts] = useState(0);
+  const [genCancelled, setGenCancelled] = useState(false);
+  const genWorkerRef = useRef<Worker | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
   const bootstrapWorkerRef = useRef<Worker | null>(null);
 
   useEffect(() => {
-    return () => bootstrapWorkerRef.current?.terminate();
+    return () => {
+      bootstrapWorkerRef.current?.terminate();
+      genWorkerRef.current?.terminate();
+    };
   }, []);
 
   // ---------- گره‌ها و فلش‌ها ----------
@@ -2246,27 +2275,116 @@ function SemTool() {
     [rows, colMap, columns, vars, modelNodes, modelArrows, constraints.bootSamples, runBootstrap, setModal, source, inactiveArrowIds, constraints, n, setAnalysisInputs]
   );
 
-  // ---------- تولید داده ----------
+  // ---------- تولید داده (چندتلاشه + مودالِ پیشرفت + گزارش قیود) ----------
+  const genCancelRef = useRef(false);
+
   const generate = useCallback(() => {
-    try {
-      const nn = Math.round(Number(n));
-      if (!Number.isFinite(nn) || nn < 20) throw new Error("حجم نمونه باید عددی بزرگ‌تر از ۲۰ باشد.");
-      const out = generateSemData({
-        n: nn,
-        variables: modelVars,
-        arrows: modelArrows,
-        constraints,
-      });
+    const nn = Math.round(Number(n));
+    if (!Number.isFinite(nn) || nn < 20) {
+      setStatus({ text: "حجم نمونه باید عددی بزرگ‌تر از ۲۰ باشد.", kind: "err" });
+      setGenError("حجم نمونه باید عددی بزرگ‌تر از ۲۰ باشد.");
+      setGenPhase("error");
+      setGenOpen(true);
+      return;
+    }
+
+    const input = { n: nn, variables: modelVars, arrows: modelArrows, constraints };
+    const maxAttempts = constraints.maxAttempts || DEFAULT_MAX_ATTEMPTS;
+
+    // --- بازنشانیِ وضعیتِ مودال ---
+    genCancelRef.current = false;
+    setGenOpen(true);
+    setGenPhase("running");
+    setGenProgress(null);
+    setGenReport(null);
+    setGenError(null);
+    setGenAttempts(0);
+    setGenCancelled(false);
+    setStatus({ text: "در حال تولید داده...", kind: "" });
+
+    const finish = (out: SemGenOutput) => {
       setColumns(out.columns);
       setRows(out.rows);
       setColMap(autoMap(out.columns, vars));
       setAnswerKey(out.answerKey);
-      setStatus({ text: `داده تولید شد (${out.answerKey.attempts} تلاش).`, kind: "ok" });
+      setGenAttempts(out.attempts);
+      setGenReport(out.report);
+      setGenCancelled(out.cancelled);
+      setGenPhase("done");
       const cm = autoMap(out.columns, vars);
       analyze(out.rows, cm, out.columns, false, true);
+      // پیامِ وضعیت بعد از analyze ست می‌شود تا هم نتیجهٔ تولید و هم نتیجهٔ تحلیل را داشته باشد
+      setStatus({
+        text: out.success
+          ? `داده تولید و تحلیل شد — همهٔ ${out.report.total} قید رعایت شد (${out.attempts} تلاش).`
+          : `داده تولید و تحلیل شد اما ${out.report.failed} قید از ${out.report.total} قید رعایت نشد (${out.attempts} تلاش).`,
+        kind: out.success ? "ok" : "err",
+      });
+    };
+
+    const fail = (message: string) => {
+      setGenError(message);
+      setGenPhase("error");
+      setStatus({ text: message, kind: "err" });
+    };
+
+    genWorkerRef.current?.terminate();
+    genWorkerRef.current = null;
+
+    if (typeof Worker === "undefined") {
+      // مسیرِ پشتیبان: اجرا روی نخ اصلی (صفحه در فواصلِ تلاش‌ها به‌روزرسانی می‌شود)
+      void (async () => {
+        try {
+          const out = await generateSemData(input, {
+            maxAttempts,
+            shouldCancel: () => genCancelRef.current,
+            onProgress: (p) => setGenProgress(p),
+          });
+          if (genCancelRef.current) {
+            setGenCancelled(true);
+            setGenPhase("done");
+            setStatus({ text: "تولید متوقف شد.", kind: "err" });
+            return;
+          }
+          finish(out);
+        } catch (err) {
+          fail((err as Error).message);
+        }
+      })();
+      return;
+    }
+
+    try {
+      const worker = new Worker(new URL("../../../workers/sem-generator.worker.ts", import.meta.url), {
+        type: "module",
+      });
+      genWorkerRef.current = worker;
+      worker.onmessage = (event: MessageEvent<SemGeneratorWorkerResponse>) => {
+        const data = event.data;
+        if (data.type === "progress") {
+          setGenProgress(data.progress);
+          return;
+        }
+        worker.terminate();
+        if (genWorkerRef.current === worker) genWorkerRef.current = null;
+        if (data.type === "done") {
+          finish(data.output);
+        } else if (data.type === "error") {
+          fail(data.message);
+        }
+      };
+      worker.onerror = (event) => {
+        worker.terminate();
+        if (genWorkerRef.current === worker) genWorkerRef.current = null;
+        fail(event.message || "خطای ناشناخته در Worker تولید داده.");
+      };
+      worker.postMessage({
+        type: "generate",
+        input,
+        options: { maxAttempts, verifyBootSamples: Math.min(constraints.bootSamples || 500, 300) },
+      });
     } catch (err) {
-      setStatus({ text: (err as Error).message, kind: "err" });
-      setModal({ ok: false, lines: [(err as Error).message] });
+      fail((err as Error).message);
     }
   }, [n, modelVars, modelArrows, constraints, analyze, vars]);
 
@@ -3314,6 +3432,30 @@ function SemTool() {
                 <label className={labelCls}>درصد داده پرت</label>
                 <input type="number" min={0} max={10} className={inputCls} value={constraints.outlierPct} onChange={(e) => setConstraints({ ...constraints, outlierPct: Number(e.target.value) })} />
               </div>
+              <div>
+                <label className={labelCls}>تعداد تلاش‌های تولید</label>
+                <input
+                  type="number"
+                  min={MIN_MAX_ATTEMPTS}
+                  max={MAX_MAX_ATTEMPTS}
+                  dir="ltr"
+                  className={inputCls}
+                  value={constraints.maxAttempts}
+                  onChange={(e) =>
+                    setConstraints({
+                      ...constraints,
+                      maxAttempts: Math.max(
+                        MIN_MAX_ATTEMPTS,
+                        Math.min(MAX_MAX_ATTEMPTS, Math.round(Number(e.target.value) || DEFAULT_MAX_ATTEMPTS))
+                      ),
+                    })
+                  }
+                />
+                <p className={tinyCls}>
+                  پیش‌فرض: {DEFAULT_MAX_ATTEMPTS} — هر تلاش یک دادهٔ تازه می‌سازد و در برابر همهٔ قیود سنجیده می‌شود؛
+                  تلاشِ بیشتر یعنی شانسِ بیشتر برای رعایتِ همهٔ قیود (و زمانِ بیشتر).
+                </p>
+              </div>
             </div>
 
             <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">قیود مسیرهای مستقیم</h3>
@@ -3621,6 +3763,19 @@ function SemTool() {
                 <Play className="h-4 w-4" />
                 {rows.length ? "تولید مجدد داده و تحلیل" : "تولید داده و تحلیل"}
               </button>
+              {genReport && (
+                <button
+                  type="button"
+                  className={btnLight}
+                  onClick={() => {
+                    setGenPhase("done");
+                    setGenOpen(true);
+                  }}
+                >
+                  <ListChecks className="h-4 w-4" />
+                  گزارش قیودِ آخرین تولید ({genReport.passed}/{genReport.total})
+                </button>
+              )}
               <span
                 className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${
                   status.kind === "ok"
@@ -3633,6 +3788,78 @@ function SemTool() {
                 {status.kind === "ok" ? "✓" : status.kind === "err" ? "✗" : "•"} {status.text}
               </span>
             </div>
+
+            {source === "generate" && genReport && (
+              <div
+                className={`mt-4 rounded-2xl border p-4 ${
+                  genReport.allPassed
+                    ? "border-emerald-300 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/30"
+                    : "border-amber-300 bg-amber-50/70 dark:border-amber-800 dark:bg-amber-950/30"
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p
+                    className={`text-[13px] font-black ${
+                      genReport.allPassed
+                        ? "text-emerald-800 dark:text-emerald-300"
+                        : "text-amber-800 dark:text-amber-300"
+                    }`}
+                  >
+                    {genReport.allPassed
+                      ? `همهٔ ${genReport.total} قید در ${genAttempts} تلاش رعایت شد`
+                      : `${genReport.failed} قید از ${genReport.total} قید در ${genAttempts} تلاش رعایت نشد`}
+                  </p>
+                  <button
+                    type="button"
+                    className={btnLight}
+                    onClick={() => {
+                      setGenPhase("done");
+                      setGenOpen(true);
+                    }}
+                  >
+                    <ListChecks className="h-4 w-4" />
+                    نمایش جدول قیود
+                  </button>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {(
+                    [
+                      "برازش مدل",
+                      "مسیر مستقیم",
+                      "اثر غیرمستقیم",
+                      "R² متغیر نتیجه",
+                      "پیش‌فرض‌های آماری",
+                    ] as ConstraintGroup[]
+                  ).map((group) => {
+                    const rowsOfGroup = genReport.checks.filter((check) => check.group === group);
+                    if (!rowsOfGroup.length) return null;
+                    const passedCount = rowsOfGroup.filter((check) => check.status === "pass").length;
+                    const all = passedCount === rowsOfGroup.length;
+                    return (
+                      <span
+                        key={group}
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-extrabold ${
+                          all
+                            ? "border-emerald-300 bg-white text-emerald-700 dark:border-emerald-800 dark:bg-slate-900 dark:text-emerald-300"
+                            : "border-amber-300 bg-white text-amber-700 dark:border-amber-800 dark:bg-slate-900 dark:text-amber-300"
+                        }`}
+                      >
+                        {group}
+                        <span className="rounded-full bg-stone-100 px-1.5 dark:bg-slate-800">
+                          {passedCount}/{rowsOfGroup.length}
+                        </span>
+                      </span>
+                    );
+                  })}
+                </div>
+                {!genReport.allPassed && (
+                  <p className="mt-2 text-[11px] leading-5 text-amber-700 dark:text-amber-400">
+                    تعداد تلاش‌ها را بیشتر کنید یا دامنهٔ قیود را بازتر کنید؛ جدولِ گزارش دقیقاً نشان می‌دهد کدام قید و با
+                    چه مقداری نقض شده است.
+                  </p>
+                )}
+              </div>
+            )}
             <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4 text-[13px] leading-6 text-stone-700 dark:border-stone-700 dark:bg-slate-800 dark:text-stone-300">
               {rows.length ? (
                 <>
@@ -4877,6 +5104,24 @@ function SemTool() {
           </div>
         </div>
       )}
+
+      {/* ---------- مودال تولید داده: پیشرفتِ زنده + گزارش قیود ---------- */}
+      <SemGenerationModal
+        open={genOpen}
+        phase={genPhase}
+        progress={genProgress}
+        report={genReport}
+        errorMessage={genError}
+        attempts={genAttempts}
+        cancelled={genCancelled}
+        onCancel={() => {
+          genCancelRef.current = true;
+          genWorkerRef.current?.postMessage({ type: "cancel" });
+          setStatus({ text: "در حال توقف تولید...", kind: "" });
+        }}
+        onClose={() => setGenOpen(false)}
+        onRetry={() => generate()}
+      />
 
       {/* ---------- مودال نتیجه ---------- */}
       {modal && <ResultModal ok={modal.ok} lines={modal.lines} onClose={() => setModal(null)} />}

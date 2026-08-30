@@ -1,5 +1,6 @@
 import { Sigma } from "lucide-react";
 import GithubIcon from "./github-icon";
+import AboutApp from "./about-app";
 
 const githubUrl = "https://github.com/majidshilehsari/Amarist";
 
@@ -31,6 +32,8 @@ export default function Footer() {
           </a>
           <span className="text-stone-300">|</span>
           <span>ساخته‌شده با Next.js · آماده‌ی استقرار روی Vercel</span>
+          <span className="text-stone-300">|</span>
+          <AboutApp />
           <span className="text-stone-300">|</span>
           <span>© ۱۴۰۵</span>
         </div>

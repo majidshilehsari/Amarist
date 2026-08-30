@@ -90,7 +90,7 @@ export interface ModelVariable {
 /** یک پروژه پیش‌فرض (الگوی سناریوی پژوهشی قابل بارگذاری). */
 export interface DefaultProject {
   id: string;
-  /** مثلاً «پروژه پیش‌فرض (تارا رضوانی)» */
+  /** مثلاً «پروژه پیش‌فرض ۳» */
   name: string;
   slug: string;
   summary: string;

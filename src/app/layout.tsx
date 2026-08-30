@@ -18,6 +18,18 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="fa" dir="rtl" className="h-full antialiased">
+      <head>
+        {/*
+          پیش‌فرضِ برنامه «دارک» است. این اسکریپت پیش از هیدریشن اجرا می‌شود تا
+          از پرشِ لحظه‌ایِ تم (FOUC) جلوگیری شود و انتخابِ کاربر حفظ گردد.
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "try{document.documentElement.classList.toggle('dark',localStorage.getItem('amarist-theme')!=='light');}catch(e){}",
+          }}
+        />
+      </head>
       <body className="flex min-h-full flex-col bg-background text-foreground">
         {children}
       </body>

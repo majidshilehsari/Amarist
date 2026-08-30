@@ -311,7 +311,7 @@ function computeAnalysis(rows: (number | null)[][], groupLabels: string[], follo
     homogeneity.push({ label: timeLabels[t], f: lev.f, p: lev.p, pass: lev.p >= alpha });
   }
 
-  let out: ClinicalAnalysis = {
+  const out: ClinicalAnalysis = {
     valid: true,
     dropped: cc.dropped,
     nTotal: cc.groupIds.length,
@@ -522,6 +522,22 @@ export default function ClinicalTool({ mode, initialFollowup }: { mode: Clinical
   };
 
   const goPrev = () => setActiveStep(Math.max(activeStep - 1, 0));
+
+  // تغییرِ «مرحله پیگیری» ساختارِ طرح را عوض می‌کند (۲ زمان ← ۳ زمان)،
+  // بنابراین داده و تحلیلِ قبلی باطل می‌شود و باید دوباره تولید گردد.
+  const changeFollowup = (next: boolean) => {
+    if (next === followup) return;
+    setFollowup(next);
+    setRows([]);
+    setColumns([]);
+    setAnalysisRun(false);
+    setStatus({
+      text: next
+        ? "طرح به «پیش‌آزمون / پس‌آزمون / پیگیری» تغییر کرد؛ داده را دوباره تولید کنید."
+        : "طرح به «پیش‌آزمون / پس‌آزمون» تغییر کرد؛ داده را دوباره تولید کنید.",
+      kind: "",
+    });
+  };
 
   // تغییر ورودی‌ها → تحلیل باطل می‌شود
   const inputsKey = JSON.stringify({ source, followup, rows, columns, scoreMin, scoreMax, alpha, groupLabels });
@@ -1376,6 +1392,38 @@ export default function ClinicalTool({ mode, initialFollowup }: { mode: Clinical
                 </p>
               ))}
             </div>
+
+            {mode === "compare" && (
+              <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
+                <p className="text-[12px] font-extrabold text-stone-800 dark:text-stone-100">ساختار زمانیِ طرح</p>
+                <p className="mt-1 text-[11px] leading-5 text-stone-500 dark:text-stone-400">
+                  تعیین کنید اندازه‌گیریِ سوم (پیگیری) هم داشته باشید یا نه. با تغییرِ این گزینه، داده و تحلیلِ قبلی
+                  باطل می‌شود و باید دوباره تولید گردد.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {[
+                    { v: true, label: "پیش‌آزمون / پس‌آزمون / پیگیری" },
+                    { v: false, label: "فقط پیش‌آزمون / پس‌آزمون" },
+                  ].map((option) => (
+                    <button
+                      key={String(option.v)}
+                      type="button"
+                      onClick={() => changeFollowup(option.v)}
+                      className={`rounded-xl border px-3 py-2 text-[12px] font-extrabold transition ${
+                        followup === option.v
+                          ? "border-indigo-500 bg-indigo-600 text-white shadow"
+                          : "border-stone-200 bg-white text-stone-600 hover:border-indigo-300 dark:border-stone-600 dark:bg-slate-900 dark:text-stone-300"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-[12px] font-bold text-stone-600 dark:text-stone-300">
+                  ساختار فعلی: {nTimes} زمان ({timeLabels.join("، ")})
+                </p>
+              </div>
+            )}
 
             <div className="mt-5 flex flex-wrap items-center gap-3">
               <button type="button" className={btnPrimary} onClick={generate}>

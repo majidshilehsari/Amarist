@@ -1,18 +1,26 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, FlaskConical, GitCompareArrows, Network, TrendingUp, Waypoints, type LucideIcon } from "lucide-react";
+import {
+  ArrowLeft,
+  FlaskConical,
+  GitCompareArrows,
+  Network,
+  TrendingUp,
+  Waypoints,
+  type LucideIcon,
+} from "lucide-react";
 
 type Mode = {
   icon: LucideIcon;
   title: string;
-  bullets: string[];
   href: string;
+  /** گرادیانِ هویتِ هر ابزار (روشن و تاریک) */
   accent: {
-    cardRing: string;
-    iconBg: string;
-    chip: string;
+    gradient: string;
+    iconWrap: string;
+    ring: string;
+    glow: string;
   };
 };
 
@@ -20,124 +28,109 @@ const MODES: Mode[] = [
   {
     icon: FlaskConical,
     title: "اثربخشی یک مداخله",
-    bullets: ["یک گروه آزمایش و یک گروه کنترل", "پیش‌آزمون و پس‌آزمون"],
     href: "/tools/one-treatment",
     accent: {
-      cardRing: "hover:border-rose-300",
-      iconBg: "bg-rose-100 text-rose-700",
-      chip: "bg-rose-50 text-rose-600",
+      gradient: "from-rose-500 to-orange-500",
+      iconWrap: "bg-rose-50 text-rose-600 dark:bg-rose-500/15 dark:text-rose-300",
+      ring: "hover:border-rose-400/70 dark:hover:border-rose-500/60",
+      glow: "group-hover:shadow-rose-500/20",
     },
   },
   {
     icon: GitCompareArrows,
     title: "مقایسه اثربخشی دو درمان",
-    bullets: ["سه گروه: کنترل، درمان ۱، درمان ۲", "پیش/پس + مرحله پیگیری اختیاری"],
     href: "/tools/compare-treatments",
     accent: {
-      cardRing: "hover:border-violet-300",
-      iconBg: "bg-violet-100 text-violet-700",
-      chip: "bg-violet-50 text-violet-600",
+      gradient: "from-violet-500 to-purple-500",
+      iconWrap: "bg-violet-50 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300",
+      ring: "hover:border-violet-400/70 dark:hover:border-violet-500/60",
+      glow: "group-hover:shadow-violet-500/20",
     },
   },
   {
     icon: Waypoints,
     title: "تحلیل مسیر",
-    bullets: ["متغیرهای مشاهده‌شده", "روابط مستقیم و غیرمستقیم"],
     href: "/tools/sem",
     accent: {
-      cardRing: "hover:border-sky-300",
-      iconBg: "bg-sky-100 text-sky-700",
-      chip: "bg-sky-50 text-sky-600",
+      gradient: "from-sky-500 to-cyan-500",
+      iconWrap: "bg-sky-50 text-sky-600 dark:bg-sky-500/15 dark:text-sky-300",
+      ring: "hover:border-sky-400/70 dark:hover:border-sky-500/60",
+      glow: "group-hover:shadow-sky-500/20",
     },
   },
   {
     icon: Network,
     title: "مدل معادلات ساختاری (SEM)",
-    bullets: ["متغیر پنهان و اندازه‌گیری", "شاخص‌های برازش: CFI / RMSEA"],
     href: "/tools/sem",
     accent: {
-      cardRing: "hover:border-indigo-300",
-      iconBg: "bg-indigo-100 text-indigo-700",
-      chip: "bg-indigo-50 text-indigo-600",
+      gradient: "from-indigo-500 to-blue-500",
+      iconWrap: "bg-indigo-50 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300",
+      ring: "hover:border-indigo-400/70 dark:hover:border-indigo-500/60",
+      glow: "group-hover:shadow-indigo-500/20",
     },
   },
   {
     icon: TrendingUp,
     title: "پیش‌بینی رگرسیونی",
-    bullets: ["رگرسیون خطی چندگانه", "R² و ضرایب استاندارد"],
     href: "/tools/regression",
     accent: {
-      cardRing: "hover:border-emerald-300",
-      iconBg: "bg-emerald-100 text-emerald-700",
-      chip: "bg-emerald-50 text-emerald-600",
+      gradient: "from-emerald-500 to-teal-500",
+      iconWrap: "bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-300",
+      ring: "hover:border-emerald-400/70 dark:hover:border-emerald-500/60",
+      glow: "group-hover:shadow-emerald-500/20",
     },
   },
 ];
 
 export default function ResearchModes() {
-  const [followup, setFollowup] = useState(true);
-
   return (
-    <section id="modes" className="scroll-mt-20 bg-white py-10 lg:py-14">
-      <div className="mx-auto max-w-7xl px-4 sm:px-6">
+    <section
+      id="top"
+      className="relative overflow-hidden bg-[#faf9f6] py-14 dark:bg-slate-900 lg:py-20"
+    >
+      {/* هاله‌های رنگیِ پس‌زمینه */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
+        <div className="absolute -top-24 right-1/4 h-72 w-72 rounded-full bg-indigo-400/20 blur-3xl dark:bg-indigo-600/20" />
+        <div className="absolute -bottom-28 left-1/4 h-72 w-72 rounded-full bg-violet-400/20 blur-3xl dark:bg-violet-600/20" />
+      </div>
+
+      <div className="relative mx-auto max-w-7xl px-4 sm:px-6">
         <div className="text-center">
-          <h2 className="text-2xl font-black tracking-tight text-stone-900">حالت‌های پژوهشی</h2>
-          <p className="mx-auto mt-2 max-w-2xl text-sm leading-7 text-stone-500">
-            ابزار مناسب پژوهش خود را انتخاب کنید؛ هر ابزار داده تمرینی هدفمند تولید می‌کند و تحلیل و گزارش کامل می‌دهد.
-          </p>
+          <h1 className="text-balance text-3xl font-black leading-tight tracking-tight text-stone-900 dark:text-white sm:text-4xl lg:text-5xl">
+            دستیار هوشمند تحلیل آماری برای اساتید و دانشجویان
+          </h1>
         </div>
 
-        <div className="mt-8 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-          {MODES.map((mode) => {
-            const compareCard = mode.title === "مقایسه اثربخشی دو درمان";
-            const href = compareCard ? `${mode.href}?followup=${followup ? "1" : "0"}` : mode.href;
-
-            const inner = (
-              <>
-                <span className={`flex h-11 w-11 items-center justify-center rounded-xl ${mode.accent.iconBg}`}>
-                  <mode.icon className="h-6 w-6" />
-                </span>
-                <h3 className="mt-3 text-[15px] font-extrabold leading-6 text-stone-900">{mode.title}</h3>
-                <ul className="mt-2 flex-1 space-y-1.5">
-                  {mode.bullets.map((b) => (
-                    <li key={b} className="flex items-start gap-1.5 text-[12px] leading-5 text-stone-600">
-                      <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-stone-300" />
-                      {b}
-                    </li>
-                  ))}
-                </ul>
-
-                {compareCard && (
-                  <label className="mt-3 flex cursor-pointer items-center gap-2 rounded-lg border border-dashed border-stone-200 bg-stone-50 px-2.5 py-2 dark:border-stone-700 dark:bg-slate-800">
-                    <input
-                      type="checkbox"
-                      checked={followup}
-                      onChange={(e) => setFollowup(e.target.checked)}
-                      className="h-4 w-4 accent-indigo-600"
-                    />
-                    <span className="text-[11px] font-bold leading-4 text-stone-600 dark:text-stone-300">
-                      مرحله پیگیری داشته باشد
-                    </span>
-                  </label>
-                )}
-
-                <span className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-stone-200 bg-white px-3 py-2 text-[13px] font-extrabold text-stone-700 transition group-hover:border-indigo-300 group-hover:text-indigo-700 dark:border-stone-700 dark:bg-slate-800 dark:text-stone-200">
-                  ورود به ابزار
-                  <ArrowLeft className="h-4 w-4" />
-                </span>
-              </>
-            );
-
-            return (
+        <div id="modes" className="mt-12 scroll-mt-24">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
+            {MODES.map((mode) => (
               <Link
                 key={mode.title}
-                href={href}
-                className={`group flex flex-col rounded-2xl border border-stone-200 bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md ${mode.accent.cardRing}`}
+                href={mode.href}
+                className={`group relative flex flex-col overflow-hidden rounded-3xl border border-stone-200 bg-white p-5 shadow-sm transition-all duration-200 hover:-translate-y-1 hover:shadow-2xl dark:border-slate-700 dark:bg-slate-900 ${mode.accent.ring} ${mode.accent.glow}`}
               >
-                {inner}
+                {/* نوارِ رنگیِ بالای کارت */}
+                <span className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-l ${mode.accent.gradient}`} />
+
+                <span
+                  className={`flex h-12 w-12 items-center justify-center rounded-2xl ${mode.accent.iconWrap}`}
+                >
+                  <mode.icon className="h-6 w-6" strokeWidth={2.2} />
+                </span>
+
+                <h3 className="mt-4 flex-1 text-[15px] font-extrabold leading-7 text-stone-900 dark:text-stone-100">
+                  {mode.title}
+                </h3>
+
+                <span
+                  className={`mt-5 inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-gradient-to-l px-3 py-2.5 text-[13px] font-extrabold text-white shadow-md transition group-hover:brightness-110 ${mode.accent.gradient}`}
+                >
+                  ورود به ابزار
+                  <ArrowLeft className="h-4 w-4 transition-transform group-hover:-translate-x-0.5" />
+                </span>
               </Link>
-            );
-          })}
+            ))}
+          </div>
         </div>
       </div>
     </section>

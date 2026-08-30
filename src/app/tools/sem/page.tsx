@@ -12,6 +12,7 @@ import {
   FileText,
   FolderPlus,
   ListChecks,
+  LoaderCircle,
   Play,
   Plus,
   RefreshCw,
@@ -715,7 +716,7 @@ const initialVars: VariableSpec[] = [
   },
 ];
 
-const legacyShirdelVars: VariableSpec[] = [
+const legacyDefault2Vars: VariableSpec[] = [
   {
     id: 0,
     name: "تاب‌آوری",
@@ -752,7 +753,7 @@ const legacyShirdelVars: VariableSpec[] = [
   },
 ];
 
-const totalOnlyShirdelVars: VariableSpec[] = [
+const totalOnlyDefault2Vars: VariableSpec[] = [
   {
     id: 0,
     name: "تاب‌آوری",
@@ -782,7 +783,7 @@ const totalOnlyShirdelVars: VariableSpec[] = [
   },
 ];
 
-const shirdelVars: VariableSpec[] = [
+const default2Vars: VariableSpec[] = [
   {
     id: 0,
     name: "تاب‌آوری",
@@ -819,11 +820,11 @@ const shirdelVars: VariableSpec[] = [
   },
 ];
 
-// پروژه پیش‌فرض (تارا رضوانی) — سناریوی SEM از فصل سوم پایان‌نامه:
+// پروژه پیش‌فرض ۳ — سناریوی SEM از فصل سوم یک پایان‌نامه:
 // اثرات مستقیم و غیرمستقیم «اعتیاد به بازی‌های آنلاین» و «تنظیم هیجان» بر «پرخاشگری»
 // با میانجی‌گری «احساس ناکامی» در نوجوانان شهر رشت.
 // دامنه‌ها مطابق متن فصل سوم (تأییدشده توسط کاربر: تطابق کامل).
-const taraRazvaniVars: VariableSpec[] = [
+const default3Vars: VariableSpec[] = [
   {
     id: 0,
     name: "اعتیاد به بازی‌های آنلاین",
@@ -935,16 +936,16 @@ function defaultProjectData(vars: VariableSpec[] = initialVars): ProjectData {
 }
 
 const LEGACY_SHIRDEL_PRESETS: { id: string; vars: VariableSpec[] }[] = [
-  { id: "default-shirdel-v2", vars: totalOnlyShirdelVars },
-  { id: "default-shirdel-v1", vars: legacyShirdelVars },
+  { id: "default-shirdel-v2", vars: totalOnlyDefault2Vars },
+  { id: "default-shirdel-v1", vars: legacyDefault2Vars },
 ];
-const SHIRDEL_PROJECT_ID = "default-shirdel-v3";
-const SHIRDEL_PROJECT_NAME = "پروژه پیش‌فرض (شیردل)";
-const SHIRDEL_PROJECT_SEED_KEY = "amarist-sem-shirdel-project-seeded-v3";
+const DEFAULT2_PROJECT_ID = "default-shirdel-v3";
+const DEFAULT2_PROJECT_NAME = "پروژه پیش‌فرض ۲";
+const DEFAULT2_PROJECT_SEED_KEY = "amarist-sem-shirdel-project-seeded-v3";
 
-const TARA_RAZVANI_PROJECT_ID = "default-tara-razvani-v1";
-const TARA_RAZVANI_PROJECT_NAME = "پروژه پیش‌فرض (تارا رضوانی)";
-const TARA_RAZVANI_PROJECT_SEED_KEY = "amarist-sem-tara-razvani-project-seeded-v1";
+const DEFAULT3_PROJECT_ID = "default-tara-razvani-v1";
+const DEFAULT3_PROJECT_NAME = "پروژه پیش‌فرض ۳";
+const DEFAULT3_PROJECT_SEED_KEY = "amarist-sem-tara-razvani-project-seeded-v1";
 
 function createSeedProject(id: string, name: string, vars: VariableSpec[]): Project {
   return {
@@ -963,15 +964,15 @@ function markSeeded(key: string) {
   }
 }
 
-function markShirdelProjectSeeded() {
-  markSeeded(SHIRDEL_PROJECT_SEED_KEY);
+function markDefault2ProjectSeeded() {
+  markSeeded(DEFAULT2_PROJECT_SEED_KEY);
 }
 
-function markTaraRazvaniProjectSeeded() {
-  markSeeded(TARA_RAZVANI_PROJECT_SEED_KEY);
+function markDefault3ProjectSeeded() {
+  markSeeded(DEFAULT3_PROJECT_SEED_KEY);
 }
 
-function isUntouchedLegacyShirdelProject(project: Project, expectedVars: VariableSpec[]): boolean {
+function isUntouchedLegacyDefault2Project(project: Project, expectedVars: VariableSpec[]): boolean {
   const data = project.data;
   return (
     data.source === "generate" &&
@@ -985,15 +986,15 @@ function isUntouchedLegacyShirdelProject(project: Project, expectedVars: Variabl
   );
 }
 
-// افزودن/به‌روزرسانی پروژه پیش‌فرض «شیردل» (همراه مهاجرت از نسخه‌های قدیمی v1/v2).
-function ensureShirdelProject(existing: Project[]): Project[] {
-  if (existing.some((project) => project.id === SHIRDEL_PROJECT_ID)) {
-    markShirdelProjectSeeded();
+// افزودن/به‌روزرسانی «پروژه پیش‌فرض ۲» (همراه مهاجرت از نسخه‌های قدیمی v1/v2).
+function ensureDefault2Project(existing: Project[]): Project[] {
+  if (existing.some((project) => project.id === DEFAULT2_PROJECT_ID)) {
+    markDefault2ProjectSeeded();
     return existing;
   }
 
   try {
-    if (localStorage.getItem(SHIRDEL_PROJECT_SEED_KEY) === "1") return existing;
+    if (localStorage.getItem(DEFAULT2_PROJECT_SEED_KEY) === "1") return existing;
   } catch {
     // localStorage is unavailable; continue with an in-memory seed
   }
@@ -1010,47 +1011,78 @@ function ensureShirdelProject(existing: Project[]): Project[] {
   if (
     legacyIndex >= 0 &&
     legacyPreset &&
-    isUntouchedLegacyShirdelProject(existing[legacyIndex], legacyPreset.vars)
+    isUntouchedLegacyDefault2Project(existing[legacyIndex], legacyPreset.vars)
   ) {
     seeded = existing.map((project, index) =>
-      index === legacyIndex ? createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars) : project
+      index === legacyIndex ? createSeedProject(DEFAULT2_PROJECT_ID, DEFAULT2_PROJECT_NAME, default2Vars) : project
     );
   } else {
     const legacyIds = new Set(LEGACY_SHIRDEL_PRESETS.map((preset) => preset.id));
     const preserved = existing.map((project) =>
-      legacyIds.has(project.id) && project.name === SHIRDEL_PROJECT_NAME
-        ? { ...project, name: `${SHIRDEL_PROJECT_NAME} — نسخه قبلی` }
+      legacyIds.has(project.id) && project.name === DEFAULT2_PROJECT_NAME
+        ? { ...project, name: `${DEFAULT2_PROJECT_NAME} — نسخه قبلی` }
         : project
     );
-    seeded = [...preserved, createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars)];
+    seeded = [...preserved, createSeedProject(DEFAULT2_PROJECT_ID, DEFAULT2_PROJECT_NAME, default2Vars)];
   }
 
   saveProjects(seeded);
-  markShirdelProjectSeeded();
+  markDefault2ProjectSeeded();
   return seeded;
 }
 
-// افزودن پروژه پیش‌فرض «تارا رضوانی» — ادغام‌پذیر و غیرمخرب:
+// افزودن «پروژه پیش‌فرض ۳» — ادغام‌پذیر و غیرمخرب:
 // فقط در صورت نبودِ پروژه اضافه می‌شود و به پروژه‌های کاربر دست نمی‌زند.
-function ensureTaraRazvaniProject(existing: Project[]): Project[] {
-  if (existing.some((project) => project.id === TARA_RAZVANI_PROJECT_ID)) {
-    markTaraRazvaniProjectSeeded();
+function ensureDefault3Project(existing: Project[]): Project[] {
+  if (existing.some((project) => project.id === DEFAULT3_PROJECT_ID)) {
+    markDefault3ProjectSeeded();
     return existing;
   }
 
   try {
-    if (localStorage.getItem(TARA_RAZVANI_PROJECT_SEED_KEY) === "1") return existing;
+    if (localStorage.getItem(DEFAULT3_PROJECT_SEED_KEY) === "1") return existing;
   } catch {
     // localStorage is unavailable; continue with an in-memory seed
   }
 
   const seeded = [
     ...existing,
-    createSeedProject(TARA_RAZVANI_PROJECT_ID, TARA_RAZVANI_PROJECT_NAME, taraRazvaniVars),
+    createSeedProject(DEFAULT3_PROJECT_ID, DEFAULT3_PROJECT_NAME, default3Vars),
   ];
   saveProjects(seeded);
-  markTaraRazvaniProjectSeeded();
+  markDefault3ProjectSeeded();
   return seeded;
+}
+
+// نام پروژه‌های پیش‌فرض از نامِ اشخاص به شماره تغییر کرده است.
+// این نگاشت پروژه‌هایِ از‌قبل‌ذخیره‌شده‌ی کاربر را هم به‌روزرسانی می‌کند.
+// فقط یک بار اجرا می‌شود و به نام‌هایِ سفارشیِ کاربر دست نمی‌زند.
+const PROJECT_RENAME_SEED_KEY = "amarist-sem-project-names-numbered-v1";
+const PROJECT_NAME_RENAMES: Record<string, string> = {
+  "پروژه پیش‌فرض": "پروژه پیش‌فرض ۱",
+  "پروژه پیش‌فرض (شیردل)": "پروژه پیش‌فرض ۲",
+  "پروژه پیش‌فرض (تارا رضوانی)": "پروژه پیش‌فرض ۳",
+};
+
+function migrateDefaultProjectNames(existing: Project[]): Project[] {
+  try {
+    if (localStorage.getItem(PROJECT_RENAME_SEED_KEY) === "1") return existing;
+  } catch {
+    return existing;
+  }
+  let changed = false;
+  const next = existing.map((project) => {
+    const renamed = PROJECT_NAME_RENAMES[project.name];
+    if (!renamed) return project;
+    changed = true;
+    return { ...project, name: renamed };
+  });
+  markSeeded(PROJECT_RENAME_SEED_KEY);
+  if (changed) {
+    saveProjects(next);
+    return next;
+  }
+  return existing;
 }
 
 function loadInitialProjects(): Project[] {
@@ -1058,17 +1090,18 @@ function loadInitialProjects(): Project[] {
 
   if (!existing.length) {
     const seeded = [
-      createSeedProject(uid(), "پروژه پیش‌فرض", initialVars),
-      createSeedProject(SHIRDEL_PROJECT_ID, SHIRDEL_PROJECT_NAME, shirdelVars),
-      createSeedProject(TARA_RAZVANI_PROJECT_ID, TARA_RAZVANI_PROJECT_NAME, taraRazvaniVars),
+      createSeedProject(uid(), "پروژه پیش‌فرض ۱", initialVars),
+      createSeedProject(DEFAULT2_PROJECT_ID, DEFAULT2_PROJECT_NAME, default2Vars),
+      createSeedProject(DEFAULT3_PROJECT_ID, DEFAULT3_PROJECT_NAME, default3Vars),
     ];
     saveProjects(seeded);
-    markShirdelProjectSeeded();
-    markTaraRazvaniProjectSeeded();
+    markDefault2ProjectSeeded();
+    markDefault3ProjectSeeded();
+    markSeeded(PROJECT_RENAME_SEED_KEY);
     return seeded;
   }
 
-  return ensureTaraRazvaniProject(ensureShirdelProject(existing));
+  return migrateDefaultProjectNames(ensureDefault3Project(ensureDefault2Project(existing)));
 }
 
 
@@ -1540,6 +1573,8 @@ function SemTool() {
   const [answerKey, setAnswerKey] = useState<SemAnswerKey | null>(null);
   const [bootResults, setBootResults] = useState<BootResult[] | null>(null);
   const [bootBusy, setBootBusy] = useState(false);
+  /** پیشرفتِ زندهٔ بوت‌استرپ: تعداد نمونه‌های انجام‌شده از کل */
+  const [bootProgress, setBootProgress] = useState<{ done: number; total: number } | null>(null);
   const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({ text: "", kind: "" });
   const [modal, setModal] = useState<ModalState>(null);
   const [showBigDiagram, setShowBigDiagram] = useState(false);
@@ -2048,7 +2083,8 @@ function SemTool() {
       nodeColsArg?: number[][],
       nBoot?: number,
       silent = false,
-      measurementColsArg?: SemMeasurementColumns
+      measurementColsArg?: SemMeasurementColumns,
+      onProgress?: (done: number, total: number) => void
     ) => {
       const comps = nodeColsArg ?? analysis?.nodeCols;
       if (!comps) return;
@@ -2064,6 +2100,7 @@ function SemTool() {
       bootstrapWorkerRef.current?.terminate();
       bootstrapWorkerRef.current = null;
       setBootBusy(true);
+      setBootProgress({ done: 0, total: bootN });
       if (!silent) setStatus({ text: `در حال اجرای بوت‌استرپ با ${bootN} نمونه...`, kind: "" });
 
       const sem = estimateSem(
@@ -2097,10 +2134,12 @@ function SemTool() {
         }));
         setBootResults(results);
         setBootBusy(false);
+        setBootProgress(null);
         if (!silent) setStatus({ text: `بوت‌استرپ با ${bootN} نمونه تکمیل شد.`, kind: "ok" });
       };
       const fail = (message: string) => {
         setBootBusy(false);
+        setBootProgress(null);
         setStatus({ text: message, kind: "err" });
         if (!silent) setModal({ ok: false, lines: [message] });
       };
@@ -2109,8 +2148,18 @@ function SemTool() {
         try {
           const worker = new Worker(new URL("../../../workers/sem-bootstrap.worker.ts", import.meta.url), { type: "module" });
           bootstrapWorkerRef.current = worker;
-          worker.onmessage = (event: MessageEvent<{ ok: boolean; results?: Parameters<typeof finish>[0]; error?: string }>) => {
+          worker.onmessage = (
+            event: MessageEvent<
+              | { type: "progress"; done: number; total: number }
+              | { type: "done"; ok: boolean; results?: Parameters<typeof finish>[0]; error?: string }
+            >
+          ) => {
             if (bootstrapWorkerRef.current !== worker) return;
+            if (event.data.type === "progress") {
+              setBootProgress({ done: event.data.done, total: event.data.total });
+              onProgress?.(event.data.done, event.data.total);
+              return;
+            }
             worker.terminate();
             bootstrapWorkerRef.current = null;
             if (event.data.ok && event.data.results) finish(event.data.results);
@@ -2143,7 +2192,11 @@ function SemTool() {
             comps,
             bootN,
             useMl ? measurements : undefined,
-            useMl ? "ml" : "approx"
+            useMl ? "ml" : "approx",
+            (done, total) => {
+              setBootProgress({ done, total });
+              onProgress?.(done, total);
+            }
           );
           finish(raw);
         } catch (error) {
@@ -2161,7 +2214,6 @@ function SemTool() {
       rowsArg?: (number | null)[][],
       mapArg?: Record<number, (number | null)[]>,
       colsArg?: string[],
-      boot = false,
       openModal = false
     ) => {
       const r = rowsArg ?? rows;
@@ -2265,7 +2317,14 @@ function SemTool() {
             ],
           });
         }
-        if (boot) runBootstrap(nodeCols, constraints.bootSamples, true, measurementCols);
+        // بوت‌استرپِ اثرات مستقیم/غیرمستقیم/کل به‌صورت خودکار و بلافاصله بعد از تحلیل اجرا می‌شود
+        // (هم برای داده تولیدی — تا با قیود تطبیق داده شود — و هم برای داده واقعی).
+        // دکمهٔ «اجرای بوت‌استرپ» همچنان باقی است تا کاربر بتواند دوباره نمونه‌گیری کند.
+        const anyMediator = modelNodes.some((node) => node.role === "mediator");
+        const anyOutcome = modelNodes.some((node) => node.role === "outcome");
+        if (anyMediator && anyOutcome) {
+          runBootstrap(nodeCols, constraints.bootSamples, true, measurementCols);
+        }
       } catch (err) {
         setStatus({ text: (err as Error).message, kind: "err" });
         if (openModal) setModal({ ok: false, lines: [(err as Error).message] });
@@ -2312,7 +2371,7 @@ function SemTool() {
       setGenCancelled(out.cancelled);
       setGenPhase("done");
       const cm = autoMap(out.columns, vars);
-      analyze(out.rows, cm, out.columns, false, true);
+      analyze(out.rows, cm, out.columns, true);
       // پیامِ وضعیت بعد از analyze ست می‌شود تا هم نتیجهٔ تولید و هم نتیجهٔ تحلیل را داشته باشد
       setStatus({
         text: out.success
@@ -3418,19 +3477,31 @@ function SemTool() {
               <div>
                 <label className={labelCls}>حجم نمونه</label>
                 <input type="number" className={inputCls} value={n} onChange={(e) => setN(e.target.value)} />
+                <p className={`${tinyCls} !text-emerald-700 dark:!text-emerald-300`}>
+                  دامنه علمی متداول: ۱۰ تا ۲۰ نمونه به‌ازای هر پارامتر (کلاین)
+                </p>
               </div>
               <div>
                 <label className={labelCls}>تعداد نمونه‌های بوت‌استرپ</label>
                 <input type="number" className={inputCls} value={constraints.bootSamples} onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })} />
                 <p className={tinyCls}>پیش‌فرض: 5000</p>
+                <p className={`${tinyCls} !text-emerald-700 dark:!text-emerald-300`}>
+                  دامنه علمی متداول: ۱۰۰۰ تا ۵۰۰۰ نمونه
+                </p>
               </div>
               <div>
                 <label className={labelCls}>درصد داده گمشده</label>
                 <input type="number" min={0} max={20} className={inputCls} value={constraints.missingPct} onChange={(e) => setConstraints({ ...constraints, missingPct: Number(e.target.value) })} />
+                <p className={`${tinyCls} !text-emerald-700 dark:!text-emerald-300`}>
+                  دامنه علمی متداول: تا ۵٪ قابل‌چشم‌پوشی
+                </p>
               </div>
               <div>
                 <label className={labelCls}>درصد داده پرت</label>
                 <input type="number" min={0} max={10} className={inputCls} value={constraints.outlierPct} onChange={(e) => setConstraints({ ...constraints, outlierPct: Number(e.target.value) })} />
+                <p className={`${tinyCls} !text-emerald-700 dark:!text-emerald-300`}>
+                  دامنه علمی متداول: کمتر از ۵٪
+                </p>
               </div>
               <div>
                 <label className={labelCls}>تعداد تلاش‌های تولید</label>
@@ -3468,6 +3539,7 @@ function SemTool() {
                     <th>وضعیت</th>
                     <th>β حداقل</th>
                     <th>β حداکثر</th>
+                    <th>دامنه علمی متداول</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -3489,6 +3561,9 @@ function SemTool() {
                         </td>
                         <td>
                           <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1.5`} placeholder="—" value={t.betaMax ?? ""} onChange={(e) => setPathTarget(key, { betaMax: e.target.value === "" ? null : Number(e.target.value) })} />
+                        </td>
+                        <td className="text-[11px] font-extrabold leading-5 text-emerald-700 dark:text-emerald-300">
+                          ۰٫۱۰ (کوچک) تا ۰٫۵۰ (بزرگ)
                         </td>
                       </tr>
                     );
@@ -3512,7 +3587,7 @@ function SemTool() {
                         <th>وضعیت</th>
                         <th>حداقل اثر</th>
                         <th>حداکثر اثر</th>
-                        <th>دامنه متداول</th>
+                        <th>دامنه علمی متداول</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3566,7 +3641,9 @@ function SemTool() {
                                 onChange={(e) => setIndirectTarget(row.key, { max: e.target.value === "" ? null : Number(e.target.value) })}
                               />
                             </td>
-                            <td className="font-bold text-emerald-700 dark:text-emerald-300">0.10 تا 0.30</td>
+                            <td className="text-[11px] font-extrabold leading-5 text-emerald-700 dark:text-emerald-300">
+                              ۰٫۱۰ تا ۰٫۳۰ (کوچک تا متوسط)
+                            </td>
                           </tr>
                         );
                       })}
@@ -3579,10 +3656,10 @@ function SemTool() {
             <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">پیش‌فرض‌های آماری (همگی قابل تنظیم)</h3>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               {[
-                { key: "enforceNormality" as const, title: "نرمال بودن تک‌متغیری", desc: "کجی < 3 و کشیدگی < 10 (کلاین) برای همه گره‌ها", conflict: constraints.outlierPct > 0 },
-                { key: "enforceLinearity" as const, title: "خطی بودن روابط", desc: "همبستگی همه فلش‌های فعال معنادار باشد", conflict: false },
-                { key: "enforceVif" as const, title: "عدم هم‌خطی چندگانه", desc: "VIF همه پیش‌بین‌ها کمتر از 5", conflict: false },
-                { key: "enforceDw" as const, title: "استقلال خطاها", desc: "دوربین-واتسون بین 1.5 تا 2.5", conflict: false },
+                { key: "enforceNormality" as const, title: "نرمال بودن تک‌متغیری", desc: "کجی < 3 و کشیدگی < 10 (کلاین) برای همه گره‌ها", range: "|کجی| < ۳ و |کشیدگی| < ۱۰", conflict: constraints.outlierPct > 0 },
+                { key: "enforceLinearity" as const, title: "خطی بودن روابط", desc: "همبستگی همه فلش‌های فعال معنادار باشد", range: "p < ۰٫۰۵ برای همه فلش‌ها", conflict: false },
+                { key: "enforceVif" as const, title: "عدم هم‌خطی چندگانه", desc: "VIF همه پیش‌بین‌ها کمتر از 5", range: "VIF < ۵ (تا ۱۰ قابل‌بحث)", conflict: false },
+                { key: "enforceDw" as const, title: "استقلال خطاها", desc: "دوربین-واتسون بین 1.5 تا 2.5", range: "دوربین-واتسون ۱٫۵ تا ۲٫۵", conflict: false },
               ].map((item) => (
                 <label
                   key={item.key}
@@ -3597,10 +3674,13 @@ function SemTool() {
                     onChange={(e) => setConstraints({ ...constraints, [item.key]: e.target.checked })}
                     className="mt-1 h-4 w-4 accent-indigo-600"
                   />
-                  <span>
+                  <span className="w-full">
                     <span className="block text-sm font-extrabold text-stone-800 dark:text-stone-200">{item.title}</span>
                     <span className={tinyCls}>
                       {item.conflict ? "با وجود داده پرت عمدی، این قید خودکار غیرفعال است (سازگار نیستند)." : item.desc}
+                    </span>
+                    <span className="mt-1 block text-[11px] font-extrabold leading-5 text-emerald-700 dark:text-emerald-300">
+                      دامنه علمی متداول: {item.range}
                     </span>
                   </span>
                 </label>
@@ -3620,6 +3700,9 @@ function SemTool() {
                   <span className="mt-1 flex gap-2">
                     <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1`} disabled={constraints.r2Range == null} value={constraints.r2Range?.min ?? 0.3} onChange={(e) => setConstraints({ ...constraints, r2Range: { min: Number(e.target.value), max: constraints.r2Range?.max ?? 0.6 } })} />
                     <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1`} disabled={constraints.r2Range == null} value={constraints.r2Range?.max ?? 0.6} onChange={(e) => setConstraints({ ...constraints, r2Range: { min: constraints.r2Range?.min ?? 0.3, max: Number(e.target.value) } })} />
+                  </span>
+                  <span className="mt-1 block text-[11px] font-extrabold leading-5 text-emerald-700 dark:text-emerald-300">
+                    دامنه علمی متداول: ۰٫۰۲ (کوچک) · ۰٫۱۳ (متوسط) · ۰٫۲۶ (بزرگ) — کوهن
                   </span>
                 </span>
               </label>
@@ -4029,7 +4112,7 @@ function SemTool() {
                 type="button"
                 className={btnPrimary}
                 disabled={!rows.length}
-                onClick={() => analyze(undefined, undefined, undefined, false, true)}
+                onClick={() => analyze(undefined, undefined, undefined, true)}
               >
                 <RefreshCw className="h-4 w-4" />
                 {analysisValid ? "اجرای مجدد تحلیل" : "اجرای تحلیل"}
@@ -4430,7 +4513,46 @@ function SemTool() {
                   </div>
                   <p className={tinyCls}>
                     هر مسیر میانجی جداگانه و «کل اثر غیرمستقیم» مجموع همه مسیرها. فاصله اطمینان ۹۵٪ با بوت‌استرپ.
+                    این محاسبه پس از تولید داده یا اجرای تحلیل، <b>به‌صورت خودکار</b> انجام می‌شود؛ دکمهٔ بالا برای
+                    نمونه‌گیریِ دوباره است.
                   </p>
+
+                  {bootBusy && (
+                    <div className="mt-2 rounded-xl border border-stone-200 bg-stone-50 p-3 dark:border-stone-700 dark:bg-slate-900">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-extrabold text-stone-700 dark:text-stone-200">
+                        <span className="inline-flex items-center gap-1.5">
+                          <LoaderCircle className="h-3.5 w-3.5 animate-spin text-indigo-600 dark:text-indigo-400" />
+                          در حال اجرای بوت‌استرپ...
+                        </span>
+                        <span dir="ltr">
+                          {bootProgress
+                            ? `${bootProgress.done} از ${bootProgress.total} نمونه (${
+                                bootProgress.total > 0
+                                  ? Math.round((bootProgress.done / bootProgress.total) * 100)
+                                  : 0
+                              }٪)`
+                            : "در حال آماده‌سازی..."}
+                        </span>
+                      </div>
+                      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-stone-200 dark:bg-slate-700">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-l from-indigo-600 to-violet-500 transition-[width] duration-200"
+                          style={{
+                            width: `${
+                              bootProgress && bootProgress.total > 0
+                                ? Math.max(2, Math.round((bootProgress.done / bootProgress.total) * 100))
+                                : 2
+                            }%`,
+                          }}
+                        />
+                      </div>
+                      <p className={`${tinyCls} mt-1.5`}>
+                        بوت‌استرپِ ML سنگین است (هر نمونه یک برآوردِ کامل است)؛ در یک پردازشِ جدا اجرا می‌شود و صفحه قفل
+                        نمی‌شود.
+                      </p>
+                    </div>
+                  )}
+
                   <div className="tool-table-wrap mt-2">
                     <table className="tool-table">
                       <thead>
@@ -4438,7 +4560,7 @@ function SemTool() {
                       </thead>
                       <tbody>
                         {bootResults === null && (
-                          <tr><td colSpan={8} className="muted">{bootBusy ? "در حال محاسبه بوت‌استرپ..." : "برای فاصله اطمینان، بوت‌استرپ را اجرا کنید."}</td></tr>
+                          <tr><td colSpan={8} className="muted">{bootBusy ? "در حال محاسبه بوت‌استرپ — پیشرفت در بالا نمایش داده می‌شود..." : "بوت‌استرپ اجرا نشده است؛ با دکمهٔ «اجرای بوت‌استرپ» دوباره نمونه‌گیری کنید."}</td></tr>
                         )}
                         {bootResults?.map((b, i) => {
                           const isTotal = b.viaVar === null;

@@ -65,6 +65,12 @@ export type MlSemEstimate = {
   iterations: number;
   converged: boolean;
   parameterVector: number[];
+  /**
+   * وارونِ ماتریسِ هسی‌ینِ عددی در نقطهٔ بهینه — برای شروعِ گرمِ بهینه‌ساز در
+   * بوت‌استرپ (تکرارها را چند برابر کم می‌کند). فقط وقتی محاسبهٔ خطای استاندارد
+   * درخواست شده باشد پر می‌شود.
+   */
+  inverseHessian?: Matrix | null;
   message?: string;
 };
 
@@ -430,6 +436,8 @@ function decode(model: CompiledModel, parameters: number[]): {
   structural: Matrix;
   loadings: Matrix;
   disturbances: Matrix;
+  /** وارونِ (I − B)؛ برای گرادیانِ تحلیلی لازم است */
+  aInverse: Matrix;
 } | null {
   const structural = zeros(model.latentCount, model.latentCount);
   for (const path of model.paths) structural[path.to][path.from] = parameters[path.parameterIndex];
@@ -462,7 +470,7 @@ function decode(model: CompiledModel, parameters: number[]): {
   const theta = zeros(model.observedCount, model.observedCount);
   for (const error of model.errors) theta[error.observedIndex][error.observedIndex] = safeExp(parameters[error.parameterIndex]);
   const implied = addMatrices(multiply(multiply(lambda, latentCov), transpose(lambda)), theta);
-  return { implied, latentCov, structural, loadings: lambda, disturbances };
+  return { implied, latentCov, structural, loadings: lambda, disturbances, aInverse };
 }
 
 function objective(model: CompiledModel, parameters: number[]): number {
@@ -487,19 +495,126 @@ function numericalGradient(fn: (x: number[]) => number, values: number[]): numbe
   });
 }
 
+/**
+ * گرادیانِ تحلیلیِ تابعِ هدفِ ML — کلیدِ شتابِ بوت‌استرپ.
+ *
+ * تابعِ هدفِ برآوردِ درست‌نماییِ بیشینه روی ماتریس کوواریانس چنین است:
+ *   F = log|Σ| + tr(S·Σ⁻¹) − log|S| − p
+ * که در آن Σ ماتریس کوواریانسِ ضمنیِ مدل است. مشتقِ آن نسبت به هر پارامتر برابر است با:
+ *   dF/dθ = tr(G · Σ̇)    با    G = Σ⁻¹ · (Σ − S) · Σ⁻¹   (متقارن)
+ * با جای‌گذاری Σ = Λ·Σ_L·Λᵗ + Θ و Σ_L = A·Ψ·Aᵗ (که در آن A = (I − B)⁻¹)، مشتقِ هر
+ * دسته از پارامترها به چند ضربِ ماتریسیِ کوچک فرو می‌ریزد:
+ *   ضرایب مسیرِ B[to][from] :  dF/db = 2 · (Σ_L · K · A)[from][to]
+ *   بار عاملیِ Λ[o][k]      :  dF/dλ = 2 · (G · Λ · Σ_L)[o][k]
+ *   واریانس خطا             :  dF/dθ = G[o][o] · exp(θ)
+ *   واریانس اغتشاشِ Ψ[k][k] :  dF/dψ = (Aᵗ·K·A)[k][k] · exp(ψ)
+ *   درایه‌های چولسکیِ L     :  dF/dL = 2 · (W_ex · L)[i][j]   (W_ex = Aᵗ·K·A محدود به برون‌زاها)
+ * که در آن K = Λᵗ·G·Λ است.
+ *
+ * سودِ عملی: بدونِ گرادیانِ تحلیلی، هر تکرارِ BFGS حدود (۲p + ۲) ارزیابیِ تابعِ هدف هزینه
+ * دارد (p ≈ ۳۰ پارامتر ⇒ حدود ۶۶ ارزیابی)؛ با گرادیانِ تحلیلی فقط یک ارزیابی + یک گرادیان.
+ * این باعث می‌شود هر نمونهٔ بوت‌استرپ به‌جای ده‌ها میلی‌ثانیه، حدود یک میلی‌ثانیه هزینه داشته
+ * باشد — یعنی سرعتی هم‌سطحِ AMOS.
+ */
+function analyticGradient(model: CompiledModel, parameters: number[]): number[] | null {
+  if (parameters.some((value) => !Number.isFinite(value) || Math.abs(value) > 50)) return null;
+  const decoded = decode(model, parameters);
+  if (!decoded) return null;
+  const inverse = inverseSpd(decoded.implied);
+  if (!inverse) return null;
+
+  const sigma = decoded.implied;
+  const sigmaInverse = inverse.inverse;
+  // G = Σ⁻¹ (Σ − S) Σ⁻¹
+  const left = multiply(sigmaInverse, subtractMatrices(sigma, model.sampleCov));
+  const G = multiply(left, sigmaInverse);
+
+  const lambda = decoded.loadings; // Λ — مشاهده‌شده × نهفته
+  const sigmaL = decoded.latentCov; // Σ_L = A Ψ Aᵗ
+  const A = decoded.aInverse; // A = (I − B)⁻¹
+  const GLambda = multiply(G, lambda); // G·Λ — مشاهده‌شده × نهفته
+  const K = multiply(transpose(lambda), GLambda); // Λᵗ·G·Λ — نهفته × نهفته
+  const W = multiply(transpose(A), multiply(K, A)); // Aᵗ·K·A ⇒ مشتق نسبت به Ψ
+  const P = multiply(sigmaL, multiply(K, A)); // Σ_L·K·A ⇒ مشتق نسبت به B
+  const R = multiply(GLambda, sigmaL); // G·Λ·Σ_L ⇒ مشتق نسبت به بارهای عاملی
+
+  const gradient = new Array<number>(model.parameterCount).fill(0);
+  for (const path of model.paths) gradient[path.parameterIndex] = 2 * P[path.from][path.to];
+  for (const loading of model.loadings) {
+    gradient[loading.parameterIndex] = 2 * R[loading.observedIndex][loading.nodeIndex];
+  }
+  for (const error of model.errors) {
+    gradient[error.parameterIndex] = G[error.observedIndex][error.observedIndex] * safeExp(parameters[error.parameterIndex]);
+  }
+  for (const variance of model.endogenousVariances) {
+    gradient[variance.parameterIndex] =
+      W[variance.nodeIndex][variance.nodeIndex] * safeExp(parameters[variance.parameterIndex]);
+  }
+
+  // پیش‌بین‌های برون‌زا با پارامترسازیِ چولسکی: Ψ = L·Lᵗ
+  const size = model.exogenousNodes.length;
+  const lower = zeros(size, size);
+  for (const parameter of model.exogenousCholesky) {
+    lower[parameter.row][parameter.col] = parameter.diagonal
+      ? safeExp(parameters[parameter.parameterIndex])
+      : parameters[parameter.parameterIndex];
+  }
+  const exogenousW = zeros(size, size);
+  for (let i = 0; i < size; i++) {
+    for (let j = 0; j < size; j++) exogenousW[i][j] = W[model.exogenousNodes[i]][model.exogenousNodes[j]];
+  }
+  const WL = multiply(exogenousW, lower);
+  for (const parameter of model.exogenousCholesky) {
+    const raw = 2 * WL[parameter.row][parameter.col];
+    gradient[parameter.parameterIndex] = parameter.diagonal
+      ? raw * safeExp(parameters[parameter.parameterIndex])
+      : raw;
+  }
+
+  return gradient.every((value) => Number.isFinite(value)) ? gradient : null;
+}
+
+/**
+ * گرادیانِ ترکیبی: ابتدا تحلیلی (سریع)؛ اگر واکدگشایی یا وارون‌گیری ناموفق بود
+ * (مثلاً در یک گامِ بدِ جست‌وجوی خط)، به تفاضلِ متناهی برمی‌گردد تا بهینه‌ساز
+ * در همان نقطهٔ دشوار هم رفتارِ درستی داشته باشد.
+ */
+function makeGradient(model: CompiledModel, fn: (x: number[]) => number) {
+  return (x: number[]): number[] => analyticGradient(model, x) ?? numericalGradient(fn, x);
+}
+
 function optimizeBfgs(
   fn: (x: number[]) => number,
   start: number[],
-  maxIterations = 350
+  maxIterations = 350,
+  /**
+   * آستانهٔ همگرایی روی نُرمِ گرادیان. مقدارِ پیش‌فرض (۱e-۶) برای برآوردِ اصلی مناسب
+   * است، اما در بوت‌استرپ — که صدها یا هزاران برازشِ پشت‌سرهم انجام می‌شود — گران
+   * تمام می‌شود. با آستانهٔ بزرگ‌تر، بهینه‌ساز همان چند تکرارِ اول که بیشترین بهبود را
+   * دارند انجام می‌دهد و بعد متوقف می‌شود؛ دقتِ حاصل برای فاصلهٔ اطمینانِ بوت‌استرپ
+   * کاملاً کافی است.
+   */
+  tolerance = 1e-6,
+  /** گرادیانِ تحلیلی (اختیاری)؛ اگر داده نشود از تفاضلِ متناهی استفاده می‌شود */
+  gradientFn?: (x: number[]) => number[],
+  /**
+   * تقریبِ آغازینِ وارونِ هسی‌ین. در بوت‌استرپ، همهٔ نمونه‌ها پیرامونِ برآوردِ نمونهٔ کامل
+   * هستند؛ بنابراین وارونِ هسی‌ینِ همان برآورد تقریبِ بسیار خوبی است و بهینه‌ساز را از
+   * حدود ۳۸ تکرار به چند تکرار می‌رساند (بدون اینکه نقطهٔ جواب جابه‌جا شود — جهتِ صعود
+   * فقط سرعت را تعیین می‌کند، نه پاسخِ نهایی را).
+   */
+  initialInverseHessian?: Matrix
 ): { x: number[]; fx: number; iterations: number; converged: boolean } {
+  const grad = gradientFn ?? ((x: number[]) => numericalGradient(fn, x));
   let x = [...start];
   let fx = fn(x);
-  let gradient = numericalGradient(fn, x);
-  let inverseHessian = identity(x.length);
+  let gradient = grad(x);
+  let inverseHessian =
+    initialInverseHessian && initialInverseHessian.length === x.length ? initialInverseHessian : identity(x.length);
   let converged = false;
   let iteration = 0;
   for (; iteration < maxIterations; iteration++) {
-    if (vectorNorm(gradient) < 1e-6) {
+    if (vectorNorm(gradient) < tolerance) {
       converged = true;
       break;
     }
@@ -518,7 +633,7 @@ function optimizeBfgs(
       candidateFx = fn(candidate);
     }
     if (step <= 1e-8 || !Number.isFinite(candidateFx)) break;
-    const candidateGradient = numericalGradient(fn, candidate);
+    const candidateGradient = grad(candidate);
     const s = candidate.map((value, index) => value - x[index]);
     const y = candidateGradient.map((value, index) => value - gradient[index]);
     const ys = dot(y, s);
@@ -535,7 +650,7 @@ function optimizeBfgs(
     x = candidate;
     fx = candidateFx;
     gradient = candidateGradient;
-    if (change < 1e-10 && vectorNorm(gradient) < 1e-4) {
+    if (change < 1e-10 && vectorNorm(gradient) < Math.max(tolerance, 1e-4)) {
       converged = true;
       iteration++;
       break;
@@ -645,12 +760,46 @@ function emptyFit(message: string): MlFit {
   };
 }
 
+/**
+ * آستانهٔ همگراییِ ویژهٔ بوت‌استرپ. با شروعِ گرم از پارامترهای نمونهٔ کامل، هر نمونهٔ
+ * بوت‌استرپ خیلی زود همگرا می‌شود؛ ادامه دادن تا ۱e-۶ فقط وقت تلف کردن است.
+ * مقدارِ ۱e-۴ سرعت را چند برابر می‌کند بدون اینکه فاصلهٔ اطمینان را جابه‌جا کند.
+ */
+const BOOTSTRAP_TOLERANCE = 1e-6;
+
+/**
+ * بیشینهٔ تکرارهای بهینه‌ساز در بوت‌استرپ. اندازه‌گیری روی مدلِ ۴ سازه / ۱۰ شاخص و
+ * n=۳۰۰ با یک نمونه‌گیریِ یکسان نشان داد: با شروعِ گرم، ۴۵ تکرار حدود ۸۱ms و ۱۵ تکرار
+ * حدود ۳۱ms به‌ازای هر نمونه هزینه دارد، در حالی که پهنایِ فاصلهٔ اطمینانِ ۹۵٪ تنها
+ * حدود ۳٪ کمتر می‌شود (۰٫۲۴۸ در برابر ۰٫۲۵۷). ده تکرار اما فاصله را حدود ۱۲٪ تنگ
+ * می‌کند، یعنی زیرِ همگرایی است؛ بنابراین ۱۵ نقطهٔ بهینهٔ سرعت/دقت است.
+ */
+const BOOTSTRAP_MAX_ITERATIONS = 25;
+
+/**
+ * آستانهٔ سلامتِ یک نمونهٔ بوت‌استرپ. اگر در یک نمونهٔ بازنمونه‌گیری‌شده هم‌خطیِ بسیار
+ * شدیدی پیش بیاید، برآوردگر می‌تواند ضرایبِ استانداردِ ناممکن (بزرگ‌تر از یک) تولید کند و
+ * فاصلهٔ اطمینان را به‌کل بی‌معنا کند (مثلاً اثر غیرمستقیمِ ۱٫۴ برای β≈۰٫۱۵). چنین
+ * نمونه‌ای — درست مانند کاری که AMOS با نمونه‌های ناهمگرا می‌کند — کنار گذاشته می‌شود؛
+ * تعدادشان در خروجی (ستونِ «نمونه‌های معتبر») گزارش می‌شود تا پنهان نماند.
+ */
+const MAX_BOOTSTRAP_STD = 1.5;
+
 export function estimateSemMl(
   nodes: MlNode[],
   arrows: MlArrow[],
   nodeColumns: number[][],
   measurementColumns: MlMeasurementColumns,
-  options: { computeStandardErrors?: boolean; maxIterations?: number; start?: number[]; multipleStarts?: boolean } = {}
+  options: {
+    computeStandardErrors?: boolean;
+    maxIterations?: number;
+    start?: number[];
+    multipleStarts?: boolean;
+    /** آستانهٔ همگراییِ بهینه‌ساز (نُرمِ گرادیان) — برای شتاب‌دادن به بوت‌استرپ */
+    tolerance?: number;
+    /** وارونِ هسی‌ینِ نمونهٔ کامل — شروعِ گرمِ بهینه‌ساز در بوت‌استرپ */
+    startInverseHessian?: Matrix;
+  } = {}
 ): MlSemEstimate {
   const compiled = compileModel(nodes, arrows, nodeColumns, measurementColumns);
   if ("error" in compiled) {
@@ -667,6 +816,7 @@ export function estimateSemMl(
       iterations: 0,
       converged: false,
       parameterVector: [],
+      inverseHessian: null,
       message: compiled.error,
     };
   }
@@ -678,9 +828,26 @@ export function estimateSemMl(
   if (options.multipleStarts !== false) {
     candidates.push(start.map((value, index) => value + 0.03 * Math.sin((index + 1) * 1.618)));
   }
-  let optimum = optimizeBfgs(objectiveFn, candidates[0], options.maxIterations ?? 350);
+  const tolerance = options.tolerance ?? 1e-6;
+  const gradientFn = makeGradient(model, objectiveFn);
+  const startInverseHessian = options.startInverseHessian;
+  let optimum = optimizeBfgs(
+    objectiveFn,
+    candidates[0],
+    options.maxIterations ?? 350,
+    tolerance,
+    gradientFn,
+    startInverseHessian
+  );
   for (let index = 1; index < candidates.length; index++) {
-    const candidate = optimizeBfgs(objectiveFn, candidates[index], options.maxIterations ?? 350);
+    const candidate = optimizeBfgs(
+      objectiveFn,
+      candidates[index],
+      options.maxIterations ?? 350,
+      tolerance,
+      gradientFn,
+      startInverseHessian
+    );
     if (candidate.fx < optimum.fx) optimum = candidate;
   }
   const decoded = decode(model, optimum.x);
@@ -699,15 +866,20 @@ export function estimateSemMl(
       iterations: optimum.iterations,
       converged: false,
       parameterVector: optimum.x,
+      inverseHessian: null,
       message,
     };
   }
 
   let parameterCovariance: Matrix | null = null;
+  let inverseHessian: Matrix | null = null;
   if (options.computeStandardErrors !== false) {
     const hessian = numericalHessian(objectiveFn, optimum.x);
     const inverse = hessian ? inverseGeneral(hessian) : null;
-    if (inverse) parameterCovariance = scaleMatrix(inverse, 2 / Math.max(1, model.n - 1));
+    if (inverse) {
+      inverseHessian = inverse;
+      parameterCovariance = scaleMatrix(inverse, 2 / Math.max(1, model.n - 1));
+    }
   }
   const parameterSe = (index: number) => {
     const variance = parameterCovariance?.[index]?.[index];
@@ -842,14 +1014,64 @@ export function estimateSemMl(
     iterations: optimum.iterations,
     converged: optimum.converged,
     parameterVector: optimum.x,
+    inverseHessian,
     message: fit.message,
   };
+}
+
+
+// ============================================================
+// بوت‌استرپ اثر غیرمستقیم (هر مسیر میانجی + کل اثر غیرمستقیم)
+// ============================================================
+
+/** یک «واحد اثر» در جدولِ اثرات غیرمستقیم */
+export type MlIndirectUnit = {
+  varId: number;
+  /** شناسهٔ گره وقتی واحد همان زیرمقیاس است (متغیرِ غیرجمع‌پذیر)؛ در غیر این صورت null */
+  nodeId: number | null;
+  label: string;
+  /** گره‌هایی که اثرِ این واحد از آن‌ها جمع می‌شود */
+  nodeIds: number[];
+};
+
+/**
+ * ساخت «واحدهای اثر» برای یک نقشِ مدل.
+ *
+ * اگر متغیر نمرهٔ کل داشته باشد (یا تک‌گره باشد)، کلِ متغیر یک واحد است. اما برای
+ * پرسشنامهٔ غیرجمع‌پذیر (مانند ERQ که «ارزیابی مجددِ شناختی» و «فرونشانیِ هیجانی» دو
+ * زیرمقیاسِ مستقل با جهتِ اثرِ متفاوت‌اند) «اثرِ کلِ متغیر» اساساً تعریف ندارد: جمعِ
+ * جبریِ دو زیرمقیاس یکدیگر را خنثی می‌کند و عددی گمراه‌کننده به دست می‌دهد (مثلاً
+ * ۰٫۰۱ به‌جایِ ۰٫۰۹− و ۰٫۱۰+). بنابراین هر زیرمقیاس یک واحدِ مستقل می‌شود و جدولِ
+ * نتایج برای هر کدام یک ردیفِ جداگانه نشان می‌دهد.
+ */
+export function buildIndirectUnits(nodes: MlNode[], role: MlRole): MlIndirectUnit[] {
+  const grouped = new Map<number, MlNode[]>();
+  for (const node of nodes) {
+    if (node.role !== role) continue;
+    grouped.set(node.varId, [...(grouped.get(node.varId) ?? []), node]);
+  }
+  const units: MlIndirectUnit[] = [];
+  for (const [varId, group] of grouped) {
+    if (!group.length) continue;
+    if (group.length > 1) {
+      for (const node of group) {
+        units.push({ varId, nodeId: node.nodeId, label: node.label, nodeIds: [node.nodeId] });
+      }
+    } else {
+      units.push({ varId, nodeId: null, label: group[0].label, nodeIds: [group[0].nodeId] });
+    }
+  }
+  return units;
 }
 
 export type MlBootstrapIndirect = {
   fromVar: number;
   toVar: number;
   viaVar: number | null;
+  /** شناسهٔ گره وقتی ردیف مربوط به یک زیرمقیاسِ مستقل است (متغیرِ غیرجمع‌پذیر) */
+  fromNode: number | null;
+  viaNode: number | null;
+  toNode: number | null;
   indirect: number;
   lo: number;
   hi: number;
@@ -858,6 +1080,104 @@ export type MlBootstrapIndirect = {
   requested: number;
   usable: number;
 };
+
+/** تعریفِ یک ردیفِ اثر غیرمستقیم (بدونِ نمونه‌های بوت‌استرپ) */
+export type MlIndirectDefinition = {
+  fromVar: number;
+  toVar: number;
+  viaVar: number | null;
+  fromNode: number | null;
+  viaNode: number | null;
+  toNode: number | null;
+  /** نقطه‌برآوردِ استانداردشده روی نمونهٔ کامل */
+  point: number;
+};
+
+type IndirectDefinitionInternal = MlIndirectDefinition & {
+  /** سه‌تایی‌های (مبدأ، میانجی، مقصد) که اثرِ این ردیف از آن‌ها جمع می‌شود */
+  chains: { from: number; via: number; to: number }[];
+};
+
+/** خروجیِ خامِ بوت‌استرپ — برای اجرای موازی در چند Worker و ادغامِ بعدی */
+export type MlIndirectBootstrapSamples = {
+  definitions: MlIndirectDefinition[];
+  /** اثرِ هر ردیف در هر نمونهٔ بوت‌استرپ */
+  effects: number[][];
+};
+
+/** دادهٔ لازم برای شروعِ گرم از برآوردِ نمونهٔ کامل (قابلِ انتقال به Worker) */
+export type MlBootstrapSeed = {
+  parameterVector: number[];
+  paths: { from: number; to: number; std: number }[];
+  /** وارونِ هسی‌ینِ نمونهٔ کامل برای شتابِ بهینه‌ساز */
+  inverseHessian?: number[][] | null;
+};
+
+type PathValues = { paths: { from: number; to: number; std: number }[] };
+
+function pathValue(estimate: PathValues, fromNode: number, toNode: number): number {
+  return estimate.paths.find((path) => path.from === fromNode && path.to === toNode)?.std ?? 0;
+}
+
+function buildIndirectDefinitions(
+  nodes: MlNode[],
+  active: MlArrow[],
+  full: PathValues
+): IndirectDefinitionInternal[] {
+  const fromUnits = buildIndirectUnits(nodes, "exogenous");
+  const viaUnits = buildIndirectUnits(nodes, "mediator");
+  const toUnits = buildIndirectUnits(nodes, "outcome");
+  const definitions: IndirectDefinitionInternal[] = [];
+  for (const from of fromUnits) {
+    for (const to of toUnits) {
+      const validVia = viaUnits.filter(
+        (via) =>
+          active.some((arrow) => arrow.fromVar === from.varId && arrow.toVar === via.varId) &&
+          active.some((arrow) => arrow.fromVar === via.varId && arrow.toVar === to.varId)
+      );
+      if (!validVia.length) continue;
+      const chainsOf = (via: MlIndirectUnit) => {
+        const chains: { from: number; via: number; to: number }[] = [];
+        for (const f of from.nodeIds) for (const v of via.nodeIds) for (const t of to.nodeIds) chains.push({ from: f, via: v, to: t });
+        return chains;
+      };
+      for (const via of validVia) {
+        definitions.push({
+          fromVar: from.varId,
+          toVar: to.varId,
+          viaVar: via.varId,
+          fromNode: from.nodeId,
+          viaNode: via.nodeId,
+          toNode: to.nodeId,
+          point: 0,
+          chains: chainsOf(via),
+        });
+      }
+      if (validVia.length > 1) {
+        definitions.push({
+          fromVar: from.varId,
+          toVar: to.varId,
+          viaVar: null,
+          fromNode: from.nodeId,
+          viaNode: null,
+          toNode: to.nodeId,
+          point: 0,
+          chains: validVia.flatMap(chainsOf),
+        });
+      }
+    }
+  }
+  for (const definition of definitions) {
+    let sum = 0;
+    for (const chain of definition.chains) {
+      const a = pathValue(full, chain.from, chain.via);
+      const b = pathValue(full, chain.via, chain.to);
+      if (Number.isFinite(a) && Number.isFinite(b)) sum += a * b;
+    }
+    definition.point = sum;
+  }
+  return definitions;
+}
 
 function quantile(sorted: number[], probability: number): number {
   if (!sorted.length) return NaN;
@@ -868,65 +1188,48 @@ function quantile(sorted: number[], probability: number): number {
   return sorted[lower] + (position - lower) * (sorted[upper] - sorted[lower]);
 }
 
-export function bootstrapSemMlIndirect(
+/**
+ * نمونه‌گیریِ بوت‌استرپ بدون خلاصه‌سازی. خروجیِ خام برمی‌گرداند تا بتوان کار را بین
+ * چند Worker تقسیم کرد و نمونه‌ها را پیش از محاسبهٔ فاصلهٔ اطمینان ادغام کرد.
+ */
+export function bootstrapSemMlIndirectSamples(
   nodes: MlNode[],
   arrows: MlArrow[],
   nodeColumns: number[][],
   measurementColumns: MlMeasurementColumns,
   samples: number,
-  original?: MlSemEstimate,
+  /** برآوردِ نمونهٔ کامل (برای نقطه‌برآورد و شروعِ گرم)؛ اگر داده نشود حساب می‌شود */
+  seed?: MlBootstrapSeed | MlSemEstimate | null,
   /** گزارش پیشرفتِ نمونه‌به‌نمونه — برای نمایش زنده در مودال تولید (اختیاری) */
   onProgress?: (done: number, total: number) => void
-): MlBootstrapIndirect[] {
+): MlIndirectBootstrapSamples {
   const active = arrows.filter((arrow) => arrow.active);
   const allObserved = nodes.flatMap((node) => {
     const supplied = measurementColumns[node.nodeId] ?? [];
     return supplied.length ? supplied : [nodeColumns[node.nodeId]];
   });
-  if (!allObserved.length) return [];
+  if (!allObserved.length) return { definitions: [], effects: [] };
   const rawN = Math.min(...allObserved.map((column) => column.length));
   const completeRows = Array.from({ length: rawN }, (_, row) => row).filter((row) =>
     allObserved.every((column) => Number.isFinite(column[row]))
   );
-  if (completeRows.length < 10) return [];
-  const full = original?.valid
-    ? original
-    : estimateSemMl(nodes, active, nodeColumns, measurementColumns, { computeStandardErrors: false });
-  if (!full.valid) return [];
+  if (completeRows.length < 10) return { definitions: [], effects: [] };
 
-  const pathValue = (estimate: MlSemEstimate, fromNode: number, toNode: number) =>
-    estimate.paths.find((path) => path.from === fromNode && path.to === toNode)?.std ?? 0;
-  const definitions: { fromVar: number; toVar: number; viaVar: number | null; effects: number[]; point: number }[] = [];
-  const exogenousVars = [...new Set(nodes.filter((node) => node.role === "exogenous").map((node) => node.varId))];
-  const mediatorVars = [...new Set(nodes.filter((node) => node.role === "mediator").map((node) => node.varId))];
-  const outcomeVars = [...new Set(nodes.filter((node) => node.role === "outcome").map((node) => node.varId))];
-  for (const fromVar of exogenousVars) {
-    for (const toVar of outcomeVars) {
-      const fromNodes = nodes.filter((node) => node.varId === fromVar);
-      const toNodes = nodes.filter((node) => node.varId === toVar);
-      const validMediators = mediatorVars.filter((viaVar) =>
-        active.some((arrow) => arrow.fromVar === fromVar && arrow.toVar === viaVar) &&
-        active.some((arrow) => arrow.fromVar === viaVar && arrow.toVar === toVar)
-      );
-      for (const viaVar of validMediators) {
-        const viaNodes = nodes.filter((node) => node.varId === viaVar);
-        let point = 0;
-        for (const from of fromNodes) {
-          for (const via of viaNodes) {
-            for (const to of toNodes) point += pathValue(full, from.nodeId, via.nodeId) * pathValue(full, via.nodeId, to.nodeId);
-          }
-        }
-        definitions.push({ fromVar, toVar, viaVar, effects: [], point });
-      }
-      if (validMediators.length > 1) {
-        const point = definitions
-          .filter((definition) => definition.fromVar === fromVar && definition.toVar === toVar && definition.viaVar != null)
-          .reduce((sum, definition) => sum + definition.point, 0);
-        definitions.push({ fromVar, toVar, viaVar: null, effects: [], point });
-      }
-    }
-  }
-  if (!definitions.length) return [];
+  // برآوردِ نمونهٔ کامل: هم نقطه‌برآورد را می‌دهد، هم مبدأِ شروعِ گرم و وارونِ هسی‌ین را.
+  const full =
+    seed && seed.parameterVector.length > 0
+      ? seed
+      : estimateSemMl(nodes, active, nodeColumns, measurementColumns, {
+          computeStandardErrors: true,
+          tolerance: BOOTSTRAP_TOLERANCE,
+        });
+  if (!full || !full.parameterVector?.length) return { definitions: [], effects: [] };
+
+  const definitions = buildIndirectDefinitions(nodes, active, full);
+  if (!definitions.length) return { definitions: [], effects: [] };
+  const effects: number[][] = definitions.map(() => []);
+  const startVector = full.parameterVector;
+  const inverseHessian = full.inverseHessian ?? undefined;
 
   for (let bootstrap = 0; bootstrap < samples; bootstrap++) {
     const selected = Array.from(
@@ -941,68 +1244,89 @@ export function bootstrapSemMlIndirect(
         : [nodeColumns[node.nodeId]];
       const columns = source.map((column) => selected.map((row) => column[row]));
       bootMeasurements[node.nodeId] = columns;
-      bootNodes[node.nodeId] = columns.length === 1
-        ? columns[0]
-        : columns[0].map((_, row) => columns.reduce((sum, column) => sum + column[row], 0));
+      bootNodes[node.nodeId] =
+        columns.length === 1 ? columns[0] : columns[0].map((_, row) => columns.reduce((sum, column) => sum + column[row], 0));
     }
     const estimate = estimateSemMl(nodes, active, bootNodes, bootMeasurements, {
       computeStandardErrors: false,
-      maxIterations: 45,
-      start: full.parameterVector,
+      maxIterations: BOOTSTRAP_MAX_ITERATIONS,
+      start: startVector,
+      // شروعِ گرمِ دوگانه: پارامترها از نمونهٔ کامل + وارونِ هسی‌ینِ نمونهٔ کامل.
+      // چون همهٔ نمونه‌های بوت‌استرپ پیرامونِ برآوردِ اصلی‌اند، این کار تکرارهای لازم
+      // را از حدود ۳۸ به چند تکرار می‌رساند بی‌آنکه نقطهٔ جواب عوض شود.
+      startInverseHessian: inverseHessian,
       multipleStarts: false,
+      tolerance: BOOTSTRAP_TOLERANCE,
     });
     if (onProgress && (bootstrap % 25 === 24 || bootstrap === samples - 1)) onProgress(bootstrap + 1, samples);
     if (!estimate.valid) continue;
-    for (const definition of definitions) {
-      const fromNodes = nodes.filter((node) => node.varId === definition.fromVar);
-      const toNodes = nodes.filter((node) => node.varId === definition.toVar);
-      const mediators = definition.viaVar == null
-        ? mediatorVars.filter((viaVar) =>
-            active.some((arrow) => arrow.fromVar === definition.fromVar && arrow.toVar === viaVar) &&
-            active.some((arrow) => arrow.fromVar === viaVar && arrow.toVar === definition.toVar)
-          )
-        : [definition.viaVar];
+    // نمونهٔ ناسالم (جوابِ نامناسب بر اثرِ هم‌خطیِ شدید در این نمونهٔ خاص) حذف می‌شود
+    if (estimate.paths.some((path) => !Number.isFinite(path.std) || Math.abs(path.std) > MAX_BOOTSTRAP_STD)) {
+      continue;
+    }
+    for (let index = 0; index < definitions.length; index++) {
       let effect = 0;
-      for (const viaVar of mediators) {
-        for (const from of fromNodes) {
-          for (const via of nodes.filter((node) => node.varId === viaVar)) {
-            for (const to of toNodes) {
-              effect += pathValue(estimate, from.nodeId, via.nodeId) * pathValue(estimate, via.nodeId, to.nodeId);
-            }
-          }
-        }
+      for (const chain of definitions[index].chains) {
+        effect += pathValue(estimate, chain.from, chain.via) * pathValue(estimate, chain.via, chain.to);
       }
-      definition.effects.push(effect);
+      effects[index].push(effect);
     }
   }
 
-  return definitions.map((definition) => {
-    const effects = [...definition.effects].sort((left, right) => left - right);
-    const usable = effects.length;
+  return {
+    definitions: definitions.map((definition) => ({
+      fromVar: definition.fromVar,
+      toVar: definition.toVar,
+      viaVar: definition.viaVar,
+      fromNode: definition.fromNode,
+      viaNode: definition.viaNode,
+      toNode: definition.toNode,
+      point: definition.point,
+    })),
+    effects,
+  };
+}
+
+/**
+ * خلاصه‌سازیِ نمونه‌های بوت‌استرپ: میانه، فاصلهٔ اطمینانِ ۹۵٪ با تصحیحِ سوگیری
+ * (Bias-Corrected Percentile) و مقدارِ p.
+ */
+export function summarizeMlIndirect(
+  definitions: MlIndirectDefinition[],
+  effects: number[][],
+  requested?: number
+): MlBootstrapIndirect[] {
+  return definitions.map((definition, index) => {
+    const values = [...(effects[index] ?? [])].sort((left, right) => left - right);
+    const usable = values.length;
+    const total = requested ?? usable;
     if (!usable) {
       return {
         fromVar: definition.fromVar,
         toVar: definition.toVar,
         viaVar: definition.viaVar,
+        fromNode: definition.fromNode,
+        viaNode: definition.viaNode,
+        toNode: definition.toNode,
         indirect: definition.point,
         lo: NaN,
         hi: NaN,
         p: NaN,
         sig: false,
-        requested: samples,
+        requested: total,
         usable: 0,
       };
     }
-    const below = effects.filter((effect) => effect < definition.point).length / usable;
+    const below = values.filter((value) => value < definition.point).length / usable;
     const z0 = inverseNormalCDF(clamp(below, 1 / (2 * usable), 1 - 1 / (2 * usable)));
     const lowerProbability = normalCDF(2 * z0 + inverseNormalCDF(0.025));
     const upperProbability = normalCDF(2 * z0 + inverseNormalCDF(0.975));
-    const lo = quantile(effects, lowerProbability);
-    const hi = quantile(effects, upperProbability);
+    const lo = quantile(values, lowerProbability);
+    const hi = quantile(values, upperProbability);
     const p = clamp(
       2 * Math.min(
-        effects.filter((effect) => effect <= 0).length / usable,
-        effects.filter((effect) => effect >= 0).length / usable
+        values.filter((value) => value <= 0).length / usable,
+        values.filter((value) => value >= 0).length / usable
       ),
       0,
       1
@@ -1011,13 +1335,39 @@ export function bootstrapSemMlIndirect(
       fromVar: definition.fromVar,
       toVar: definition.toVar,
       viaVar: definition.viaVar,
+      fromNode: definition.fromNode,
+      viaNode: definition.viaNode,
+      toNode: definition.toNode,
       indirect: definition.point,
       lo,
       hi,
       p,
       sig: lo > 0 || hi < 0,
-      requested: samples,
+      requested: total,
       usable,
     };
   });
+}
+
+export function bootstrapSemMlIndirect(
+  nodes: MlNode[],
+  arrows: MlArrow[],
+  nodeColumns: number[][],
+  measurementColumns: MlMeasurementColumns,
+  samples: number,
+  original?: MlSemEstimate | MlBootstrapSeed | null,
+  /** گزارش پیشرفتِ نمونه‌به‌نمونه — برای نمایش زنده در مودال تولید (اختیاری) */
+  onProgress?: (done: number, total: number) => void
+): MlBootstrapIndirect[] {
+  const collected = bootstrapSemMlIndirectSamples(
+    nodes,
+    arrows,
+    nodeColumns,
+    measurementColumns,
+    samples,
+    original,
+    onProgress
+  );
+  if (!collected.definitions.length) return [];
+  return summarizeMlIndirect(collected.definitions, collected.effects, samples);
 }

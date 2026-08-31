@@ -64,12 +64,16 @@ import {
   type IndirectTarget,
   type SemFitConstraints,
   type PathTarget,
+  type PathDirection,
+  inferPathDirection,
+  nodePathKey,
   type SemAnswerKey,
   type SemConstraintReport,
   type SemGenProgress,
   type SemGenOutput,
   type VariableSpec,
 } from "@/lib/sem-generator";
+import { summarizeMlIndirect, type MlIndirectBootstrapSamples } from "@/lib/sem-ml";
 import type { SemGeneratorWorkerResponse } from "@/workers/sem-generator.worker";
 import SemGenerationModal, { type GenerationPhase } from "@/components/sem-generation-modal";
 import ErrorBoundary from "@/components/error-boundary";
@@ -489,6 +493,40 @@ function varNameOf(vars: VariableSpec[], id: number): string {
   return vars.find((v) => v.id === id)?.name ?? `متغیر ${id}`;
 }
 
+type BootLike = {
+  fromVar: number;
+  toVar: number;
+  viaVar: number | null;
+  fromNode?: number | null;
+  viaNode?: number | null;
+  toNode?: number | null;
+};
+
+/**
+ * برچسبِ یک «واحد اثر» در ردیف‌های بوت‌استرپ.
+ * برای پرسشنامهٔ غیرجمع‌پذیر (بدون نمرهٔ کل) هر زیرمقیاس یک واحدِ مستقل است؛
+ * بنابراین برچسبِ ردیف باید برچسبِ همان زیرمقیاس باشد، نه نامِ متغیر.
+ */
+function bootUnitLabelOf(
+  nodes: ModelNode[],
+  vars: VariableSpec[],
+  varId: number,
+  nodeId: number | null
+): string {
+  if (nodeId != null) {
+    const node = nodes.find((x) => x.nodeId === nodeId);
+    if (node) return node.label;
+  }
+  return varNameOf(vars, varId);
+}
+
+function bootPathLabelOf(nodes: ModelNode[], vars: VariableSpec[], b: BootLike): string {
+  const from = bootUnitLabelOf(nodes, vars, b.fromVar, b.fromNode ?? null);
+  const to = bootUnitLabelOf(nodes, vars, b.toVar, b.toNode ?? null);
+  if (b.viaVar === null) return `کل اثر غیرمستقیم: ${from} ← ${to}`;
+  return `${from} ← ${bootUnitLabelOf(nodes, vars, b.viaVar, b.viaNode ?? null)} ← ${to}`;
+}
+
 function faNum(v: string | number): string {
   return String(v).replace(/[0-9]/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]);
 }
@@ -501,12 +539,19 @@ type BootResult = {
   fromVar: number;
   toVar: number;
   viaVar: number | null;
+  /** شناسهٔ گره وقتی ردیف مربوط به یک زیرمقیاسِ مستقل است (متغیرِ غیرجمع‌پذیر) */
+  fromNode: number | null;
+  viaNode: number | null;
+  toNode: number | null;
   direct: number;
   indirect: number;
   lo: number;
   hi: number;
   p: number;
   total: number;
+  /** تعداد نمونه‌های معتبر (وقتی برخی نمونه‌ها به‌دلیلِ هم‌خطیِ شدید کنار گذاشته شده‌اند) */
+  usable: number | null;
+  requested: number | null;
 };
 
 type CorrelationTableData = { labels: string[]; r: number[][]; p: number[][] };
@@ -609,7 +654,7 @@ function defaultConstraints(): GenConstraints {
     enforceLinearity: true,
     enforceVif: true,
     enforceDw: true,
-    bootSamples: 5000,
+    bootSamples: 2000,
     maxAttempts: DEFAULT_MAX_ATTEMPTS,
   };
 }
@@ -1196,9 +1241,7 @@ function buildReportText(
   L.push("۸) اثرات غیرمستقیم (بوت‌استرپ):");
   if (bootResults && bootResults.length) {
     bootResults.forEach((b) => {
-      const pathLabel = b.viaVar
-        ? `${varNameOf(vars, b.fromVar)} ← ${varNameOf(vars, b.viaVar)} ← ${varNameOf(vars, b.toVar)}`
-        : `کل اثر غیرمستقیم: ${varNameOf(vars, b.fromVar)} ← ${varNameOf(vars, b.toVar)}`;
+      const pathLabel = bootPathLabelOf(nodes, vars, b);
       L.push(
         `  ${pathLabel}: اثر استانداردشده=${fmt(b.indirect)} | CI95: ${fmt(b.lo)} تا ${fmt(b.hi)} | p=${fmtP(b.p)}${starP(b.p)} | ${indirectEffectInterpretation(b.indirect, b.p)}` +
           (b.viaVar === null ? ` | مستقیم=${fmt(b.direct)} | کل=${fmt(b.total)}` : "")
@@ -1459,9 +1502,7 @@ function buildDocxReport(
   const effectRows: (string | number)[][] = [];
   if (bootResults && bootResults.length) {
     bootResults.forEach((b) => {
-      const label = b.viaVar
-        ? `${varNameOf(vars, b.fromVar)} ← ${varNameOf(vars, b.viaVar)} ← ${varNameOf(vars, b.toVar)}`
-        : `کل اثر غیرمستقیم: ${varNameOf(vars, b.fromVar)} ← ${varNameOf(vars, b.toVar)}`;
+      const label = bootPathLabelOf(nodes, vars, b);
       effectRows.push([
         label,
         b.viaVar === null ? fmt(b.direct) : "—",
@@ -1575,6 +1616,10 @@ function SemTool() {
   const [bootBusy, setBootBusy] = useState(false);
   /** پیشرفتِ زندهٔ بوت‌استرپ: تعداد نمونه‌های انجام‌شده از کل */
   const [bootProgress, setBootProgress] = useState<{ done: number; total: number } | null>(null);
+  /** زمانِ صرف‌شده برای آخرین بوت‌استرپ (میلی‌ثانیه) و تعداد رشته‌های موازی */
+  const [bootTiming, setBootTiming] = useState<{ ms: number; workers: number; samples: number } | null>(null);
+  /** زمانِ سپری‌شدهٔ بوت‌استرپِ جاری (میلی‌ثانیه) — برای نمایشِ زندهٔ تایمر */
+  const [bootElapsedMs, setBootElapsedMs] = useState<number | null>(null);
   const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({ text: "", kind: "" });
   const [modal, setModal] = useState<ModalState>(null);
   const [showBigDiagram, setShowBigDiagram] = useState(false);
@@ -1608,14 +1653,24 @@ function SemTool() {
   const genWorkerRef = useRef<Worker | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
-  const bootstrapWorkerRef = useRef<Worker | null>(null);
+  /** رشته‌های (Worker های) فعالِ بوت‌استرپ — برای اجرای موازی و امکانِ توقف */
+  const bootstrapWorkersRef = useRef<Worker[]>([]);
 
   useEffect(() => {
     return () => {
-      bootstrapWorkerRef.current?.terminate();
+      bootstrapWorkersRef.current.forEach((worker) => worker.terminate());
+      bootstrapWorkersRef.current = [];
       genWorkerRef.current?.terminate();
     };
   }, []);
+
+  // تایمرِ زندهٔ بوت‌استرپ: هر ۲۰۰ میلی‌ثانیه زمانِ سپری‌شده را به‌روز می‌کند
+  useEffect(() => {
+    if (!bootBusy) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => setBootElapsedMs(Date.now() - startedAt), 200);
+    return () => window.clearInterval(timer);
+  }, [bootBusy]);
 
   // ---------- گره‌ها و فلش‌ها ----------
   const nodes = useMemo(() => buildModelNodes(vars), [vars]);
@@ -1648,7 +1703,7 @@ function SemTool() {
 
   const hasLatent = vars.some((v) => v.subscales.length > 0 && v.hasTotal);
   const modeLabel = hasLatent ? "مدل معادلات ساختاری (SEM) — با متغیر پنهان (مکنون)" : "تحلیل مسیر — متغیرهای مشاهده‌شده";
-  const varName = (id: number) => varNameOf(vars, id);
+  const varName = useCallback((id: number) => varNameOf(vars, id), [vars]);
 
   // ---------- مراحل استپر ----------
   const steps = useMemo(() => {
@@ -1790,8 +1845,8 @@ function SemTool() {
 
   // ---------- اعمال/ذخیره پروژه ----------
   const applyProjectData = useCallback((data: ProjectData) => {
-    bootstrapWorkerRef.current?.terminate();
-    bootstrapWorkerRef.current = null;
+    bootstrapWorkersRef.current.forEach((worker) => worker.terminate());
+    bootstrapWorkersRef.current = [];
     setBootBusy(false);
     setSource(data.source);
     setVars(data.vars);
@@ -1914,8 +1969,8 @@ function SemTool() {
   const switchProject = (id: string) => {
     const p = projects.find((x) => x.id === id);
     if (!p) return;
-    bootstrapWorkerRef.current?.terminate();
-    bootstrapWorkerRef.current = null;
+    bootstrapWorkersRef.current.forEach((worker) => worker.terminate());
+    bootstrapWorkersRef.current = [];
     setBootBusy(false);
     setProjectId(id);
     applyProjectData(p.data);
@@ -2057,6 +2112,22 @@ function SemTool() {
     }));
   };
 
+  /**
+   * قیدِ اختصاصیِ یک زیرمقیاس (برای پرسشنامه‌های غیرجمع‌پذیر) — بر قیدِ سطحِ متغیر مقدم است.
+   * «base» همان مقادیری است که در جدول نمایش داده می‌شود (با احتسابِ وراثت از سطحِ متغیر)؛
+   * ذخیرهٔ آن باعث می‌شود نخستین تغییرِ کاربر روی یک زیرمقیاس، تنظیماتِ سطحِ متغیر را
+   * از جای دیگری عوض نکند.
+   */
+  const setNodePathTarget = (key: string, patch: Partial<PathTarget>, base: PathTarget) => {
+    setConstraints((prev) => {
+      const current: PathTarget = prev.nodePathTargets?.[key] ?? base;
+      return {
+        ...prev,
+        nodePathTargets: { ...(prev.nodePathTargets ?? {}), [key]: { ...current, ...patch } },
+      };
+    });
+  };
+
   const setIndirectTarget = (key: string, patch: Partial<IndirectConstraint>) => {
     setConstraints((prev) => ({
       ...prev,
@@ -2097,10 +2168,13 @@ function SemTool() {
       }
       const bootN = nBoot ?? constraints.bootSamples;
       const useMl = Object.keys(measurements).length > 0;
-      bootstrapWorkerRef.current?.terminate();
-      bootstrapWorkerRef.current = null;
+      bootstrapWorkersRef.current.forEach((worker) => worker.terminate());
+      bootstrapWorkersRef.current = [];
       setBootBusy(true);
       setBootProgress({ done: 0, total: bootN });
+      setBootTiming(null);
+      setBootElapsedMs(null);
+      const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
       if (!silent) setStatus({ text: `در حال اجرای بوت‌استرپ با ${bootN} نمونه...`, kind: "" });
 
       const sem = estimateSem(
@@ -2110,74 +2184,191 @@ function SemTool() {
         useMl ? measurements : undefined,
         useMl ? "ml" : "approx"
       );
+
+      /**
+       * اثر مستقیمِ یک «واحد» (متغیر یا زیرمقیاس). برای متغیرِ غیرجمع‌پذیر، اثرِ مستقیمِ
+       * هر زیرمقیاس باید جداگانه جمع شود — درست همان‌طور که در جدولِ نتایج نمایش می‌یابد.
+       */
+      const directOf = (fromVar: number, toVar: number, fromNode: number | null, toNode: number | null) =>
+        sem.paths
+          .filter((path) => {
+            const from = modelNodes.find((node) => node.nodeId === path.from);
+            const to = modelNodes.find((node) => node.nodeId === path.to);
+            if (!from || !to || from.varId !== fromVar || to.varId !== toVar) return false;
+            if (fromNode != null && from.nodeId !== fromNode) return false;
+            if (toNode != null && to.nodeId !== toNode) return false;
+            return true;
+          })
+          .reduce((sum, path) => sum + (Number.isFinite(path.std) ? path.std : 0), 0);
+
       const finish = (
-        raw: { fromVar: number; toVar: number; viaVar: number | null; indirect: number; lo: number; hi: number; p: number }[]
+        raw: {
+          fromVar: number;
+          toVar: number;
+          viaVar: number | null;
+          fromNode?: number | null;
+          viaNode?: number | null;
+          toNode?: number | null;
+          indirect: number;
+          lo: number;
+          hi: number;
+          p: number;
+          usable?: number;
+          requested?: number;
+        }[],
+        workersUsed = 1
       ) => {
-        const directOf = (fromVar: number, toVar: number) =>
-          sem.paths
-            .filter((path) => {
-              const fromNode = modelNodes.find((node) => node.nodeId === path.from);
-              const toNode = modelNodes.find((node) => node.nodeId === path.to);
-              return fromNode?.varId === fromVar && toNode?.varId === toVar;
-            })
-            .reduce((sum, path) => sum + (Number.isFinite(path.std) ? path.std : 0), 0);
         const results: BootResult[] = raw.map((result) => ({
           fromVar: result.fromVar,
           toVar: result.toVar,
           viaVar: result.viaVar,
-          direct: result.viaVar === null ? directOf(result.fromVar, result.toVar) : 0,
+          fromNode: result.fromNode ?? null,
+          viaNode: result.viaNode ?? null,
+          toNode: result.toNode ?? null,
+          direct:
+            result.viaVar === null
+              ? directOf(result.fromVar, result.toVar, result.fromNode ?? null, result.toNode ?? null)
+              : 0,
           indirect: result.indirect,
           lo: result.lo,
           hi: result.hi,
           p: result.p,
-          total: result.viaVar === null ? directOf(result.fromVar, result.toVar) + result.indirect : NaN,
+          total:
+            result.viaVar === null
+              ? directOf(result.fromVar, result.toVar, result.fromNode ?? null, result.toNode ?? null) + result.indirect
+              : NaN,
+          usable: result.usable ?? null,
+          requested: result.requested ?? null,
         }));
         setBootResults(results);
         setBootBusy(false);
         setBootProgress(null);
-        if (!silent) setStatus({ text: `بوت‌استرپ با ${bootN} نمونه تکمیل شد.`, kind: "ok" });
+        const elapsed = (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt;
+        setBootTiming({ ms: elapsed, workers: workersUsed, samples: bootN });
+        if (!silent) {
+          setStatus({
+            text: `بوت‌استرپ با ${bootN} نمونه در ${(elapsed / 1000).toFixed(1)} ثانیه تکمیل شد.`,
+            kind: "ok",
+          });
+        }
       };
       const fail = (message: string) => {
+        bootstrapWorkersRef.current.forEach((worker) => worker.terminate());
+        bootstrapWorkersRef.current = [];
         setBootBusy(false);
         setBootProgress(null);
         setStatus({ text: message, kind: "err" });
         if (!silent) setModal({ ok: false, lines: [message] });
       };
 
+      /** شروعِ گرم: پارامترها و وارونِ هسی‌ینِ برآوردِ نمونهٔ کامل */
+      const seed =
+        useMl && sem.parameterVector?.length
+          ? {
+              parameterVector: sem.parameterVector,
+              paths: sem.paths.map((path) => ({ from: path.from, to: path.to, std: path.std })),
+              inverseHessian: sem.inverseHessian ?? null,
+            }
+          : undefined;
+
+      /**
+       * اجرای موازی: نمونه‌ها بین چند Worker تقسیم می‌شود (به تعدادِ هسته‌های در دسترس،
+       * حداکثر ۸). این کار زمانِ بوت‌استرپ را تقریباً به اندازهٔ تعدادِ رشته‌ها کم می‌کند؛
+       * ادغامِ نمونه‌ها پیش از محاسبهٔ فاصلهٔ اطمینان انجام می‌شود، بنابراین نتیجه با
+       * اجرای تک‌رشته‌ای یکسان است.
+       */
       if (useMl && typeof Worker !== "undefined") {
         try {
-          const worker = new Worker(new URL("../../../workers/sem-bootstrap.worker.ts", import.meta.url), { type: "module" });
-          bootstrapWorkerRef.current = worker;
-          worker.onmessage = (
-            event: MessageEvent<
-              | { type: "progress"; done: number; total: number }
-              | { type: "done"; ok: boolean; results?: Parameters<typeof finish>[0]; error?: string }
-            >
-          ) => {
-            if (bootstrapWorkerRef.current !== worker) return;
-            if (event.data.type === "progress") {
-              setBootProgress({ done: event.data.done, total: event.data.total });
-              onProgress?.(event.data.done, event.data.total);
-              return;
-            }
-            worker.terminate();
-            bootstrapWorkerRef.current = null;
-            if (event.data.ok && event.data.results) finish(event.data.results);
-            else fail(event.data.error ?? "بوت‌استرپ ML ناموفق بود.");
-          };
-          worker.onerror = (event) => {
-            if (bootstrapWorkerRef.current !== worker) return;
-            worker.terminate();
-            bootstrapWorkerRef.current = null;
-            fail(event.message || "خطا در Worker بوت‌استرپ ML.");
-          };
-          worker.postMessage({
-            nodes: modelNodes,
-            arrows: modelArrows,
-            nodeColumns: comps,
-            measurementColumns: measurements,
-            samples: bootN,
+          const hardware = typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4;
+          const workerCount = Math.max(1, Math.min(8, hardware, bootN));
+          const base = Math.floor(bootN / workerCount);
+          const remainder = bootN - base * workerCount;
+          const chunks = Array.from({ length: workerCount }, (_, index) => base + (index < remainder ? 1 : 0)).filter(
+            (count) => count > 0
+          );
+          const collected: MlIndirectBootstrapSamples[] = [];
+          const doneCounts = new Array(chunks.length).fill(0);
+          let settled = 0;
+          let failed = false;
+          const workers: Worker[] = [];
+          chunks.forEach((count, index) => {
+            const worker = new Worker(new URL("../../../workers/sem-bootstrap.worker.ts", import.meta.url), {
+              type: "module",
+            });
+            workers.push(worker);
+            worker.onmessage = (
+              event: MessageEvent<
+                | { type: "progress"; done: number; total: number }
+                | { type: "done"; ok: boolean; samples?: MlIndirectBootstrapSamples; error?: string }
+              >
+            ) => {
+              if (failed) return;
+              if (event.data.type === "progress") {
+                doneCounts[index] = event.data.done;
+                const totalDone = doneCounts.reduce((sum, value) => sum + value, 0);
+                setBootProgress({ done: totalDone, total: bootN });
+                onProgress?.(totalDone, bootN);
+                return;
+              }
+              settled += 1;
+              if (event.data.ok && event.data.samples) collected.push(event.data.samples);
+              else if (!failed) {
+                failed = true;
+                bootstrapWorkersRef.current.forEach((item) => item.terminate());
+                bootstrapWorkersRef.current = [];
+                fail(event.data.error ?? "بوت‌استرپ ML ناموفق بود.");
+                return;
+              }
+              if (settled === chunks.length && !failed) {
+                workers.forEach((item) => item.terminate());
+                const first = collected[0];
+                if (!first || !first.definitions.length) {
+                  setBootResults([]);
+                  setBootBusy(false);
+                  setBootProgress(null);
+                  const elapsed = (typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt;
+                  setBootTiming({ ms: elapsed, workers: chunks.length, samples: bootN });
+                  return;
+                }
+                // ادغامِ نمونه‌های همهٔ رشته‌ها، سپس محاسبهٔ یک‌جای فاصلهٔ اطمینان
+                const merged: number[][] = first.effects.map((_, rowIndex) =>
+                  collected.flatMap((item) => item.effects[rowIndex] ?? [])
+                );
+                const rows = summarizeMlIndirect(first.definitions, merged, bootN).map((result) => ({
+                  fromVar: result.fromVar,
+                  toVar: result.toVar,
+                  viaVar: result.viaVar,
+                  fromNode: result.fromNode,
+                  viaNode: result.viaNode,
+                  toNode: result.toNode,
+                  indirect: result.indirect,
+                  lo: result.lo,
+                  hi: result.hi,
+                  p: result.p,
+                  usable: result.usable,
+                  requested: result.requested,
+                }));
+                bootstrapWorkersRef.current = [];
+                finish(rows, chunks.length);
+              }
+            };
+            worker.onerror = (event) => {
+              if (failed) return;
+              failed = true;
+              workers.forEach((item) => item.terminate());
+              bootstrapWorkersRef.current = [];
+              fail(event.message || "خطا در Worker بوت‌استرپ ML.");
+            };
+            worker.postMessage({
+              nodes: modelNodes,
+              arrows: modelArrows,
+              nodeColumns: comps,
+              measurementColumns: measurements,
+              samples: count,
+              seed,
+            });
           });
+          bootstrapWorkersRef.current = workers;
           return;
         } catch {
           // اگر Worker در مرورگر پشتیبانی نشود، مسیر همگام فقط با درخواست صریح کاربر اجرا می‌شود.
@@ -2207,6 +2398,22 @@ function SemTool() {
     [analysis, constraints.bootSamples, modelNodes, modelArrows]
   );
 
+
+  /**
+   * یادداشتِ شفاف دربارهٔ نمونه‌های کنارگذاشته‌شده: اگر در برخی نمونه‌های بازنمونه‌گیری
+   * هم‌خطیِ شدید باعثِ جوابِ نامناسب شود، آن نمونه‌ها کنار گذاشته می‌شوند و باید گزارش شوند.
+   */
+  const bootUsableNote = useMemo(() => {
+    if (!bootResults) return null;
+    const withCounts = bootResults.filter((b) => b.usable != null && b.requested != null);
+    if (!withCounts.length) return null;
+    const usable = Math.min(...withCounts.map((b) => b.usable ?? 0));
+    const requested = Math.max(...withCounts.map((b) => b.requested ?? 0));
+    if (!(requested > 0) || usable >= requested) return null;
+    return `از ${faNum(requested)} نمونهٔ بوت‌استرپ، ${faNum(usable)} نمونه معتبر بود؛ ${faNum(
+      requested - usable
+    )} نمونه به‌دلیلِ هم‌خطیِ بسیار شدید (ضریب استانداردِ ناممکن) کنار گذاشته شد — رفتاری مشابه AMOS با نمونه‌های ناهمگرا.`;
+  }, [bootResults]);
 
   // ---------- تحلیل ----------
   const analyze = useCallback(
@@ -2899,6 +3106,76 @@ function SemTool() {
     return rowsList;
   }, [vars, modelArrows]);
 
+  // ---------- ردیف‌های جدولِ قیودِ مسیرهای مستقیم ----------
+  // برای متغیرهای غیرجمع‌پذیر (مانند ERQ) یک ردیفِ «همهٔ زیرمقیاس‌ها» و به‌ازای هر
+  // زیرمقیاس یک ردیفِ مستقل ساخته می‌شود، چون جهت و معناداریِ اثر در زیرمقیاس‌های
+  // مختلف می‌تواند کاملاً متفاوت باشد (ارزیابی مجدد: منفی؛ فرونشانی: مثبت).
+  const pathRows = useMemo(() => {
+    type Row = {
+      id: string;
+      kind: "pair" | "group" | "node";
+      varKey: string;
+      nodeKey: string | null;
+      label: string;
+      hint: string | null;
+      autoDir: PathDirection;
+      mixed: boolean;
+    };
+    const rows: Row[] = [];
+    const seen = new Set<string>();
+    for (const arrow of allArrows) {
+      const varKey = `${arrow.fromVar}:${arrow.toVar}`;
+      if (seen.has(varKey)) continue;
+      seen.add(varKey);
+      const pairArrows = allArrows.filter((a) => `${a.fromVar}:${a.toVar}` === varKey);
+      const dirSet = new Set(
+        pairArrows.map((a) => inferPathDirection(nodeLabel(a.fromNode), nodeLabel(a.toNode)))
+      );
+      const mixed = dirSet.size > 1;
+      const autoDir = (dirSet.size === 1 ? [...dirSet][0] : "any") as PathDirection;
+      if (pairArrows.length > 1) {
+        rows.push({
+          id: varKey,
+          kind: "group",
+          varKey,
+          nodeKey: null,
+          label: `${varName(arrow.fromVar)} ← ${varName(arrow.toVar)}`,
+          hint: mixed
+            ? "زیرمقیاس‌های این متغیر جهتِ متفاوتی دارند؛ با «خودکار» هر زیرمقیاس جداگانه استنتاج می‌شود."
+            : "تنظیمِ این ردیف روی همهٔ زیرمقیاس‌ها اعمال می‌شود (مگر آن‌که خودشان تنظیم شده باشند).",
+          autoDir,
+          mixed,
+        });
+        for (const a of pairArrows) {
+          const dir = inferPathDirection(nodeLabel(a.fromNode), nodeLabel(a.toNode));
+          const key = nodePathKey(nodeLabel(a.fromNode), nodeLabel(a.toNode));
+          rows.push({
+            id: key,
+            kind: "node",
+            varKey,
+            nodeKey: key,
+            label: `${nodeLabel(a.fromNode)} ← ${nodeLabel(a.toNode)}`,
+            hint: `خودکار: ${dir === "pos" ? "مثبت" : dir === "neg" ? "منفی" : "نامشخص"}`,
+            autoDir: dir,
+            mixed: false,
+          });
+        }
+      } else {
+        rows.push({
+          id: varKey,
+          kind: "pair",
+          varKey,
+          nodeKey: null,
+          label: `${varName(arrow.fromVar)} ← ${varName(arrow.toVar)}`,
+          hint: null,
+          autoDir,
+          mixed: false,
+        });
+      }
+    }
+    return rows;
+  }, [allArrows, nodeLabel, varName]);
+
   // ---------- گزینه‌های مدل (بر اساس میانجی‌ها) ----------
   const medVars = useMemo(
     () => vars.filter((v) => v.role === "mediator" && connectedVarIds.has(v.id)),
@@ -3484,7 +3761,7 @@ function SemTool() {
               <div>
                 <label className={labelCls}>تعداد نمونه‌های بوت‌استرپ</label>
                 <input type="number" className={inputCls} value={constraints.bootSamples} onChange={(e) => setConstraints({ ...constraints, bootSamples: Number(e.target.value) })} />
-                <p className={tinyCls}>پیش‌فرض: 5000</p>
+                <p className={tinyCls}>پیش‌فرض: 2000 (مانند AMOS)؛ اجرا به‌صورت موازی است</p>
                 <p className={`${tinyCls} !text-emerald-700 dark:!text-emerald-300`}>
                   دامنه علمی متداول: ۱۰۰۰ تا ۵۰۰۰ نمونه
                 </p>
@@ -3530,37 +3807,129 @@ function SemTool() {
             </div>
 
             <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">قیود مسیرهای مستقیم</h3>
-            <p className={tinyCls}>برای هر جفت متغیر مشخص کنید معنی‌دار باشد، نباشد یا مهم نباشد؛ بازه β اختیاری است.</p>
+            <p className={tinyCls}>
+              برای هر جفت متغیر مشخص کنید معنی‏دار باشد، نباشد یا مهم نباشد؛ بازه β اختیاری است (خالی یعنی بدون قید).
+              <strong className="text-stone-600 dark:text-stone-300">«جهت رابطه»</strong> به‌طور خودکار از جنسِ
+              سازه‌ها استنتاج می‌شود: دو سازهٔ هم‌جنس (مانند «اعتیاد به بازی» و «پرخاشگری») رابطه‌ای مثبت و دو
+              سازهٔ ناهم‌جنس (مانند «ارزیابی مجددِ شناختی» که سازگار است و «اعتیاد») رابطه‌ای منفی دارند.
+            </p>
+            <p className={`${tinyCls} mt-1`}>
+              برای پرسشنامه‌های غیرجمع‌پذیر (بدون نمرهٔ کل، مانند ERQ) زیرمقیاس‌ها جهتِ اثرِ متفاوتی دارند؛
+              بنابراین جدول یک ردیفِ <strong className="text-indigo-600 dark:text-indigo-300">«همهٔ زیرمقیاس‌ها»</strong>
+              و به‌ازای هر زیرمقیاس یک ردیفِ مستقل نشان می‌دهد. تنظیمِ هر زیرمقیاس بر تنظیمِ کلی مقدم است؛ مثلاً
+              می‌توانید برای «ارزیابی مجدد شناختی» اثرِ <b>منفی و معنادار</b> و برای «فرونشانی هیجانی» اثرِ
+              <b>مثبت و معنادار</b> بخواهید. ردیفِ زیرمقیاس مقادیر را از ردیفِ کلی به ارث می‌برد تا وقتی که خودش
+              تنظیم شود.
+            </p>
             <div className="tool-table-wrap mt-3">
-              <table className="tool-table" style={{ minWidth: 640 }}>
+              <table className="tool-table" style={{ minWidth: 780 }}>
                 <thead>
                   <tr>
                     <th>مسیر</th>
                     <th>وضعیت</th>
+                    <th>جهت رابطه</th>
                     <th>β حداقل</th>
                     <th>β حداکثر</th>
                     <th>دامنه علمی متداول</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {[...new Set(allArrows.map((a) => `${a.fromVar}:${a.toVar}`))].map((key) => {
-                    const [fv, tv] = key.split(":").map(Number);
-                    const t = constraints.pathTargets[key] ?? { sig: "sig", betaMin: 0.2, betaMax: 0.5 };
+                  {pathRows.map((row) => {
+                    // پیش‌فرضِ نمایشی باید با پیش‌فرضِ موتور یکی باشد: «معنادار باشد» و بدون قیدِ بازه
+                    const varTarget: PathTarget =
+                      constraints.pathTargets[row.varKey] ?? { sig: "sig", betaMin: null, betaMax: null };
+                    const nodeTarget = row.nodeKey ? constraints.nodePathTargets?.[row.nodeKey] : undefined;
+                    const isGroup = row.kind === "group";
+                    const dirValue = isGroup
+                      ? varTarget.dir ?? (row.mixed ? "auto" : row.autoDir)
+                      : nodeTarget?.dir ?? varTarget.dir ?? row.autoDir;
+                    // «خودکار» مقدارِ نمایشی است؛ مقدارِ واقعی همان استنتاجِ هر زیرمقیاس است
+                    const dirForBase = (dirValue === "auto" ? row.autoDir : dirValue) as PathDirection;
+                    const sigValue = nodeTarget?.sig ?? varTarget.sig;
+                    const betaMinValue = nodeTarget?.betaMin ?? varTarget.betaMin;
+                    const betaMaxValue = nodeTarget?.betaMax ?? varTarget.betaMax;
+                    const write = (patch: Partial<PathTarget>) =>
+                      row.nodeKey && !isGroup
+                        ? setNodePathTarget(row.nodeKey, patch, {
+                            sig: sigValue,
+                            betaMin: betaMinValue,
+                            betaMax: betaMaxValue,
+                            dir: dirForBase,
+                          })
+                        : setPathTarget(row.varKey, patch);
                     return (
-                      <tr key={key}>
-                        <td style={{ fontWeight: 900 }}>{varName(fv)} ← {varName(tv)}</td>
+                      <tr
+                        key={row.id}
+                        className={
+                          row.kind === "group"
+                            ? "bg-indigo-50/70 dark:bg-indigo-950/30"
+                            : row.kind === "node"
+                              ? "bg-white dark:bg-slate-900"
+                              : ""
+                        }
+                      >
+                        <td style={{ fontWeight: 900 }}>
+                          {row.kind === "group" && (
+                            <span className="me-2 rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-black text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">
+                              همهٔ زیرمقیاس‌ها
+                            </span>
+                          )}
+                          {row.kind === "node" && (
+                            <span className="me-2 rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-black text-stone-500 dark:bg-slate-800 dark:text-stone-400">
+                              زیرمقیاس
+                            </span>
+                          )}
+                          {row.label}
+                          {row.hint && (
+                            <span className="mt-0.5 block text-[10px] font-bold leading-4 text-stone-400 dark:text-stone-500">
+                              {row.hint}
+                            </span>
+                          )}
+                        </td>
                         <td>
-                          <select className={`${inputCls} !py-1.5`} value={t.sig} onChange={(e) => setPathTarget(key, { sig: e.target.value as PathTarget["sig"] })}>
+                          <select
+                            className={`${inputCls} !py-1.5`}
+                            value={sigValue}
+                            onChange={(e) => write({ sig: e.target.value as PathTarget["sig"] })}
+                          >
                             <option value="sig">معنی‌دار باشد</option>
                             <option value="ns">معنی‌دار نباشد</option>
                             <option value="any">مهم نیست</option>
                           </select>
                         </td>
                         <td>
-                          <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1.5`} placeholder="—" value={t.betaMin ?? ""} onChange={(e) => setPathTarget(key, { betaMin: e.target.value === "" ? null : Number(e.target.value) })} />
+                          <select
+                            className={`${inputCls} !py-1.5`}
+                            value={dirValue}
+                            onChange={(e) => write({ dir: e.target.value === "auto" ? undefined : (e.target.value as PathDirection) })}
+                          >
+                            {isGroup && row.mixed && <option value="auto">خودکار (بر اساس زیرمقیاس)</option>}
+                            <option value="pos">مثبت</option>
+                            <option value="neg">منفی</option>
+                            <option value="any">مهم نیست</option>
+                          </select>
                         </td>
                         <td>
-                          <input type="number" step={0.05} dir="ltr" className={`${inputCls} !py-1.5`} placeholder="—" value={t.betaMax ?? ""} onChange={(e) => setPathTarget(key, { betaMax: e.target.value === "" ? null : Number(e.target.value) })} />
+                          <input
+                            type="number"
+                            step={0.05}
+                            dir="ltr"
+                            className={`${inputCls} !py-1.5`}
+                            placeholder="—"
+                            value={betaMinValue ?? ""}
+                            onChange={(e) => write({ betaMin: e.target.value === "" ? null : Number(e.target.value) })}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            type="number"
+                            step={0.05}
+                            dir="ltr"
+                            className={`${inputCls} !py-1.5`}
+                            placeholder="—"
+                            value={betaMaxValue ?? ""}
+                            onChange={(e) => write({ betaMax: e.target.value === "" ? null : Number(e.target.value) })}
+                          />
                         </td>
                         <td className="text-[11px] font-extrabold leading-5 text-emerald-700 dark:text-emerald-300">
                           ۰٫۱۰ (کوچک) تا ۰٫۵۰ (بزرگ)
@@ -3577,7 +3946,7 @@ function SemTool() {
                 <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">قیود اثرات غیرمستقیم (میانجی‌گری — با بوت‌استرپ)</h3>
                 <p className={tinyCls}>
                   معناداری و دامنه اثر غیرمستقیم استانداردشده برای هر مسیر قابل تنظیم است. دامنه پیش‌فرض 0.10 تا 0.30،
-                  اثری کوچک تا متوسط و رایج در پژوهش‌های علوم رفتاری است.
+                  اثری کوچک تا متوسط و رایج در پژوهش‌های علوم رفتاری است. چون اثر غیرمستقیم حاصل‌ضربِ دو ضریب است، در مدل‌هایی که نتیجه چند پیش‌بین دارد کفِ ۰٫۰۶ واقع‌بینانه‌تر از ۰٫۱۰ است.
                 </p>
                 <div className="tool-table-wrap mt-3">
                   <table className="tool-table" style={{ minWidth: 760 }}>
@@ -4514,8 +4883,23 @@ function SemTool() {
                   <p className={tinyCls}>
                     هر مسیر میانجی جداگانه و «کل اثر غیرمستقیم» مجموع همه مسیرها. فاصله اطمینان ۹۵٪ با بوت‌استرپ.
                     این محاسبه پس از تولید داده یا اجرای تحلیل، <b>به‌صورت خودکار</b> انجام می‌شود؛ دکمهٔ بالا برای
-                    نمونه‌گیریِ دوباره است.
+                    نمونه‌گیریِ دوباره است. برای پرسشنامهٔ بدون نمرهٔ کل (مانند ERQ) هر زیرمقیاس یک ردیفِ مستقل دارد،
+                    چون اثرِ کلِ چنین متغیری — با زیرمقیاس‌های ناهمسو — اساساً تعریف ندارد.
                   </p>
+
+                  {bootBusy && bootElapsedMs != null && (
+                    <p className={`${tinyCls} font-extrabold text-indigo-600 dark:text-indigo-300`} dir="rtl">
+                      زمانِ سپری‌شده: {faNum((bootElapsedMs / 1000).toFixed(1))} ثانیه
+                    </p>
+                  )}
+
+                  {!bootBusy && bootTiming && (
+                    <p className={`${tinyCls} font-extrabold text-emerald-700 dark:text-emerald-300`} dir="rtl">
+                      زمانِ بوت‌استرپ: {faNum((bootTiming.ms / 1000).toFixed(1))} ثانیه برای {faNum(bootTiming.samples)} نمونه
+                      {bootTiming.workers > 1 ? ` با ${faNum(bootTiming.workers)} رشتهٔ موازی` : ""} — یعنی{" "}
+                      {faNum((bootTiming.ms / Math.max(1, bootTiming.samples)).toFixed(1))} میلی‌ثانیه برای هر نمونه
+                    </p>
+                  )}
 
                   {bootBusy && (
                     <div className="mt-2 rounded-xl border border-stone-200 bg-stone-50 p-3 dark:border-stone-700 dark:bg-slate-900">
@@ -4547,8 +4931,8 @@ function SemTool() {
                         />
                       </div>
                       <p className={`${tinyCls} mt-1.5`}>
-                        بوت‌استرپِ ML سنگین است (هر نمونه یک برآوردِ کامل است)؛ در یک پردازشِ جدا اجرا می‌شود و صفحه قفل
-                        نمی‌شود.
+                        هر نمونه یک برآوردِ کاملِ ML است؛ با گرادیانِ تحلیلی و اجرای موازی در چند رشته (Worker) انجام
+                        می‌شود تا صفحه قفل نشود و زمان به چند ثانیه برسد.
                       </p>
                     </div>
                   )}
@@ -4564,9 +4948,7 @@ function SemTool() {
                         )}
                         {bootResults?.map((b, i) => {
                           const isTotal = b.viaVar === null;
-                          const label = isTotal
-                            ? `کل اثر غیرمستقیم: ${varName(b.fromVar)} ← ${varName(b.toVar)}`
-                            : `${varName(b.fromVar)} ← ${varName(b.viaVar!)} ← ${varName(b.toVar)}`;
+                          const label = bootPathLabelOf(modelNodes, vars, b);
                           return (
                             <tr key={i} className={isTotal ? "bg-stone-50 font-bold dark:bg-slate-900" : ""}>
                               <td>{label}</td>
@@ -4590,6 +4972,7 @@ function SemTool() {
                       </tbody>
                     </table>
                   </div>
+                  {bootUsableNote && <p className={`${tinyCls} mt-1`}>{bootUsableNote}</p>}
                 </div>
 
                 <div>

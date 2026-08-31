@@ -2,7 +2,12 @@
 // آماره‌ها و تحلیل‌های مدل معادلات ساختاری (SEM) و تحلیل مسیر — آماریست
 // ============================================================
 
-import { bootstrapSemMlIndirect, estimateSemMl, type MlLoadingEstimate } from "./sem-ml";
+import {
+  bootstrapSemMlIndirect,
+  buildIndirectUnits,
+  estimateSemMl,
+  type MlLoadingEstimate,
+} from "./sem-ml";
 import {
   mean,
   sampleVariance,
@@ -413,6 +418,10 @@ export type SemResults = {
   warnings: string[];
   estimator?: "composite" | "ml";
   measurementLoadings?: MlLoadingEstimate[];
+  /** بردارِ پارامترهای برآوردِ ML — برای شروعِ گرم در بوت‌استرپ (اختیاری) */
+  parameterVector?: number[];
+  /** وارونِ هسی‌ینِ برآوردِ ML — برای شروعِ گرم در بوت‌استرپ (اختیاری) */
+  inverseHessian?: number[][] | null;
 };
 
 const ROLE_ORDER_NODE: Record<Role, number> = { exogenous: 0, mediator: 1, outcome: 2 };
@@ -685,7 +694,7 @@ export function estimateSem(
   measurementCols?: SemMeasurementColumns,
   estimator: "approx" | "ml" = "approx",
   /** غیرفعال‌سازی محاسبهٔ خطای معیار (هسین عددی) برای حلقه‌های غربالِ پُرتکرار */
-  options?: { standardErrors?: boolean }
+  options?: { standardErrors?: boolean; tolerance?: number }
 ): SemResults {
   const p = nodes.length;
   const ordered = [...nodes]
@@ -874,14 +883,19 @@ export function estimateSem(
 
   let usedEstimator: "composite" | "ml" = "composite";
   let mlLoadings: MlLoadingEstimate[] | undefined;
+  let mlParameterVector: number[] | undefined;
+  let mlInverseHessian: number[][] | null | undefined;
   if (measurementCols && estimator === "ml") {
     const ml = estimateSemMl(nodes, active, nodeCols, measurementCols, {
       computeStandardErrors: options?.standardErrors !== false,
+      tolerance: options?.tolerance,
     });
     if (ml.valid) {
       usedEstimator = "ml";
       fit = ml.fit;
       mlLoadings = ml.loadings;
+      mlParameterVector = ml.parameterVector;
+      mlInverseHessian = ml.inverseHessian ?? null;
       pathResults.splice(
         0,
         pathResults.length,
@@ -951,16 +965,33 @@ export function estimateSem(
     warnings,
     estimator: usedEstimator,
     measurementLoadings: mlLoadings,
+    parameterVector: mlParameterVector,
+    inverseHessian: mlInverseHessian,
   };
 }
 
 // ---------- بوت‌استرپ اثر غیرمستقیم (مسیرهای جداگانه + کل) ----------
+
+/**
+ * آستانهٔ سلامتِ یک نمونهٔ بوت‌استرپ: ضریبِ استانداردِ بزرگ‌تر از این مقدار نشانهٔ
+ * یک جوابِ نامناسب (هم‌خطیِ شدید در آن نمونهٔ خاص) است و کنار گذاشته می‌شود تا
+ * فاصلهٔ اطمینان بی‌معنا نشود.
+ */
+const MAX_BOOTSTRAP_STD = 1.5;
 
 export type IndirectBootRow = {
   fromVar: number;
   toVar: number;
   /** متغیر میانجی این مسیر خاص؛ null یعنی «کل اثر غیرمستقیم» */
   viaVar: number | null;
+  /**
+   * شناسهٔ گره وقتی ردیف مربوط به یک زیرمقیاسِ مستقل است. برای پرسشنامهٔ غیرجمع‌پذیر
+   * (مانند ERQ) «اثرِ متغیر» تعریف ندارد — زیرمقیاس‌هایش جهتِ متفاوت دارند و جمعِ
+   * جبریِ آن‌ها یکدیگر را خنثی می‌کند — بنابراین هر زیرمقیاس یک ردیف مستقل می‌گیرد.
+   */
+  fromNode: number | null;
+  viaNode: number | null;
+  toNode: number | null;
   indirect: number;
   lo: number;
   hi: number;
@@ -983,6 +1014,9 @@ export function bootstrapIndirectEffects(
       fromVar: result.fromVar,
       toVar: result.toVar,
       viaVar: result.viaVar,
+      fromNode: result.fromNode,
+      viaNode: result.viaNode,
+      toNode: result.toNode,
       indirect: result.indirect,
       lo: result.lo,
       hi: result.hi,
@@ -999,9 +1033,11 @@ export function bootstrapIndirectEffects(
   const nn = fullRows.length;
   if (nn < 10) return [];
   const active = arrows.filter((a) => a.active);
-  const medVars = [...new Set(nodes.filter((x) => x.role === "mediator").map((x) => x.varId))];
-  const exogVars = [...new Set(nodes.filter((x) => x.role === "exogenous").map((x) => x.varId))];
-  const outVars = [...new Set(nodes.filter((x) => x.role === "outcome").map((x) => x.varId))];
+  // «واحد اثر»: متغیرِ جمع‌پذیر یک واحد است و متغیرِ غیرجمع‌پذیر به تعدادِ زیرمقیاس‌هایش
+  // واحدِ مستقل دارد (اثرِ کلِ چنین متغیری بی‌معنا است — زیرمقیاس‌های ناهمسو همدیگر را خنثی می‌کنند).
+  const fromUnits = buildIndirectUnits(nodes, "exogenous");
+  const viaUnits = buildIndirectUnits(nodes, "mediator");
+  const toUnits = buildIndirectUnits(nodes, "outcome");
   const results: IndirectBootRow[] = [];
 
   const summarize = (effects: number[]): { lo: number; hi: number; p: number } => {
@@ -1021,80 +1057,103 @@ export function bootstrapIndirectEffects(
     return { lo, hi, p };
   };
 
-  for (const e of exogVars) {
-    for (const c of outVars) {
-      const meds = medVars.filter(
-        (m) =>
-          active.some((a) => a.fromVar === e && a.toVar === m) &&
-          active.some((a) => a.fromVar === m && a.toVar === c)
+  for (const from of fromUnits) {
+    const fromVarNodes = nodes.filter((x) => x.varId === from.varId);
+    for (const to of toUnits) {
+      const validVia = viaUnits.filter(
+        (via) =>
+          active.some((a) => a.fromVar === from.varId && a.toVar === via.varId) &&
+          active.some((a) => a.fromVar === via.varId && a.toVar === to.varId)
       );
-      if (!meds.length) continue;
+      if (!validVia.length) continue;
 
-      const xNodes = nodes.filter((x) => x.varId === e);
-      const yNodes = nodes.filter((x) => x.varId === c);
+      const chainsOf = (viaUnit: { nodeIds: number[] }) => {
+        const list: { from: number; via: number; to: number }[] = [];
+        for (const f of from.nodeIds) for (const v of viaUnit.nodeIds) for (const t of to.nodeIds) list.push({ from: f, via: v, to: t });
+        return list;
+      };
 
-      for (const m of meds) {
-        const mNodes = nodes.filter((x) => x.varId === m);
+      const compute = (chains: { from: number; via: number; to: number }[]) => {
         const effects: number[] = [];
         for (let b = 0; b < nBoot; b++) {
           const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
           const boot = (v: number) => idx.map((k) => fullRows[k][v]);
+          const xBoot = fromVarNodes.map((x) => boot(x.nodeId));
+          const xSd = xBoot.map((column) => sampleStd(column));
+          // کشِ رگرسیون‌ها: برای هر جفتِ (میانجی، مقصد) فقط یک‌بار برازش می‌شود
+          const cache = new Map<string, { aCoefs: number[]; bStd: number }>();
           let sum = 0;
-          for (const mNode of mNodes) {
-            const xBoot = xNodes.map((x) => boot(x.nodeId));
-            const mBoot = boot(mNode.nodeId);
-            const aCoefs = ols(xBoot, mBoot).coefs;
-            const mSd = sampleStd(mBoot);
-            for (const yNode of yNodes) {
-              const yBoot = boot(yNode.nodeId);
+          let healthy = true;
+          for (const chain of chains) {
+            const key = `${chain.via}:${chain.to}`;
+            let entry = cache.get(key);
+            if (!entry) {
+              const mBoot = boot(chain.via);
+              const yBoot = boot(chain.to);
+              const mSd = sampleStd(mBoot);
+              const ySd = sampleStd(yBoot);
+              const aCoefs = ols(xBoot, mBoot).coefs;
               const bCoefs = ols([...xBoot, mBoot], yBoot).coefs;
               const bCoef = bCoefs[bCoefs.length - 1] ?? 0;
-              const ySd = sampleStd(yBoot);
               const bStd = mSd > 0 && ySd > 0 ? (bCoef * mSd) / ySd : 0;
-              for (let i = 1; i < aCoefs.length; i++) {
-                const xSd = sampleStd(xBoot[i - 1]);
-                const aStd = xSd > 0 && mSd > 0 ? (aCoefs[i] * xSd) / mSd : 0;
-                sum += aStd * bStd;
-              }
+              entry = { aCoefs, bStd };
+              cache.set(key, entry);
             }
+            const xIndex = fromVarNodes.findIndex((x) => x.nodeId === chain.from);
+            if (xIndex < 0) continue;
+            const mSd = sampleStd(boot(chain.via));
+            const aStd = xSd[xIndex] > 0 && mSd > 0 ? (entry.aCoefs[xIndex + 1] * xSd[xIndex]) / mSd : 0;
+            // نمونهٔ ناسالم (ضریبِ استانداردِ ناممکن بر اثرِ هم‌خطیِ شدید) کنار گذاشته می‌شود
+            if (
+              !Number.isFinite(aStd) ||
+              !Number.isFinite(entry.bStd) ||
+              Math.abs(aStd) > MAX_BOOTSTRAP_STD ||
+              Math.abs(entry.bStd) > MAX_BOOTSTRAP_STD
+            ) {
+              healthy = false;
+              break;
+            }
+            sum += aStd * entry.bStd;
           }
-          effects.push(sum);
+          if (healthy) effects.push(sum);
         }
+        return effects;
+      };
+
+      for (const via of validVia) {
+        const effects = compute(chainsOf(via));
         const { lo, hi, p } = summarize(effects);
-        results.push({ fromVar: e, toVar: c, viaVar: m, indirect: mean(effects), lo, hi, p, sig: lo > 0 || hi < 0 });
+        results.push({
+          fromVar: from.varId,
+          toVar: to.varId,
+          viaVar: via.varId,
+          fromNode: from.nodeId,
+          viaNode: via.nodeId,
+          toNode: to.nodeId,
+          indirect: mean(effects),
+          lo,
+          hi,
+          p,
+          sig: lo > 0 || hi < 0,
+        });
       }
 
-      if (meds.length > 1) {
-        const effects: number[] = [];
-        for (let b = 0; b < nBoot; b++) {
-          const idx = Array.from({ length: nn }, () => Math.floor(Math.random() * nn));
-          const boot = (v: number) => idx.map((k) => fullRows[k][v]);
-          let sum = 0;
-          for (const m of meds) {
-            const mNodes = nodes.filter((x) => x.varId === m);
-            for (const mNode of mNodes) {
-              const xBoot = xNodes.map((x) => boot(x.nodeId));
-              const mBoot = boot(mNode.nodeId);
-              const aCoefs = ols(xBoot, mBoot).coefs;
-              const mSd = sampleStd(mBoot);
-              for (const yNode of yNodes) {
-                const yBoot = boot(yNode.nodeId);
-                const bCoefs = ols([...xBoot, mBoot], yBoot).coefs;
-                const bCoef = bCoefs[bCoefs.length - 1] ?? 0;
-                const ySd = sampleStd(yBoot);
-                const bStd = mSd > 0 && ySd > 0 ? (bCoef * mSd) / ySd : 0;
-                for (let i = 1; i < aCoefs.length; i++) {
-                  const xSd = sampleStd(xBoot[i - 1]);
-                  const aStd = xSd > 0 && mSd > 0 ? (aCoefs[i] * xSd) / mSd : 0;
-                  sum += aStd * bStd;
-                }
-              }
-            }
-          }
-          effects.push(sum);
-        }
+      if (validVia.length > 1) {
+        const effects = compute(validVia.flatMap(chainsOf));
         const { lo, hi, p } = summarize(effects);
-        results.push({ fromVar: e, toVar: c, viaVar: null, indirect: mean(effects), lo, hi, p, sig: lo > 0 || hi < 0 });
+        results.push({
+          fromVar: from.varId,
+          toVar: to.varId,
+          viaVar: null,
+          fromNode: from.nodeId,
+          viaNode: null,
+          toNode: to.nodeId,
+          indirect: mean(effects),
+          lo,
+          hi,
+          p,
+          sig: lo > 0 || hi < 0,
+        });
       }
     }
   }

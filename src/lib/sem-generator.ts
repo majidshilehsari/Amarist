@@ -62,6 +62,8 @@ export type IndirectConstraint = {
   significance: IndirectTarget;
   min: number | null;
   max: number | null;
+  /** جهتِ اثر غیرمستقیم؛ undefined یعنی استنتاج خودکار از واحدهای مسیر */
+  dir?: PathDirection;
 };
 
 export function defaultIndirectConstraint(): IndirectConstraint {
@@ -124,6 +126,21 @@ export function inferPathDirection(fromLabel: string, toLabel: string): PathDire
 }
 
 /**
+ * جهت خودکار اثر غیرمستقیم. حاصل‌ضرب جهت دو پارهٔ مسیر با جهت نظریِ مبدأ تا مقصد
+ * یکسان است؛ اگر قطبیت روشن نباشد «مهم نیست» برمی‌گردد.
+ */
+export function inferIndirectDirection(fromLabel: string, toLabel: string): PathDirection {
+  return inferPathDirection(fromLabel, toLabel);
+}
+
+/** حاشیهٔ قبولی قید جهت؛ مقدار منفی یعنی این تلاش باید رد شود. */
+export function indirectDirectionMargin(effect: number, direction: PathDirection): number {
+  if (direction === "pos") return effect - 1e-6;
+  if (direction === "neg") return -effect - 1e-6;
+  return Number.POSITIVE_INFINITY;
+}
+
+/**
  * کلیدِ قیدِ اختصاصیِ یک فلش. برخلافِ قیدِ سطحِ متغیر که با شناسهٔ عددیِ متغیر ساخته
  * می‌شود، این کلید از «برچسبِ دو گره» ساخته می‌شود (مثلاً
  * «تنظیم هیجان — ارزیابی مجدد شناختی → احساس ناکامی (کل)»). دلیلش این است که شمارهٔ
@@ -164,6 +181,31 @@ export function resolvePathTargetForArrow(
 }
 
 /** قیدِ مؤثرِ مسیر بر اساسِ کلیدِ جفت‌متغیر (وقتی فلشِ خاصی در دسترس نیست) */
+export function resolveAutomaticIndirectDirection(
+  constraints: GenConstraints,
+  nodes: ModelNode[],
+  arrows: ModelArrow[],
+  fromNode: number,
+  viaNodes: number[],
+  toNode: number
+): PathDirection {
+  const fromLabel = nodes.find((node) => node.nodeId === fromNode)?.label ?? "";
+  const toLabel = nodes.find((node) => node.nodeId === toNode)?.label ?? "";
+  const fallback = inferIndirectDirection(fromLabel, toLabel);
+  const directions = viaNodes.map((viaNode) => {
+    const first = arrows.find((arrow) => arrow.fromNode === fromNode && arrow.toNode === viaNode);
+    const second = arrows.find((arrow) => arrow.fromNode === viaNode && arrow.toNode === toNode);
+    if (!first || !second) return fallback;
+    const left = resolvePathTargetForArrow(constraints, nodes, first).dir;
+    const right = resolvePathTargetForArrow(constraints, nodes, second).dir;
+    if (left === "any" || right === "any") return fallback;
+    return left === right ? "pos" : "neg";
+  });
+  const concrete = directions.filter((direction) => direction !== "any");
+  if (!concrete.length) return fallback;
+  return concrete.every((direction) => direction === concrete[0]) ? concrete[0] : "any";
+}
+
 export function resolvePathTarget(
   constraints: GenConstraints,
   nodes: ModelNode[],
@@ -673,6 +715,7 @@ type IndirectConstraintUnit = {
   fromNode: number | null;
   viaNode: number | null;
   toNode: number | null;
+  autoDir: PathDirection;
   label: string;
 };
 type EvalContext = {
@@ -878,6 +921,12 @@ function evaluateAttempt(
     if (target.max != null) {
       push("اثر غیرمستقیم", unit.label, `|اثر| ≤ ${fmtNum(target.max)}`, `= ${fmtNum(point)}`, target.max - Math.abs(point));
     }
+    const direction = target.dir ?? unit.autoDir;
+    if (direction === "pos") {
+      push("اثر غیرمستقیم", unit.label, "جهت اثر: مثبت", `اثر = ${fmtNum(point)}`, indirectDirectionMargin(point, direction));
+    } else if (direction === "neg") {
+      push("اثر غیرمستقیم", unit.label, "جهت اثر: منفی", `اثر = ${fmtNum(point)}`, indirectDirectionMargin(point, direction));
+    }
     if (boot && target.significance !== "any") {
       const bootRow = boot.find(
         (item) =>
@@ -1000,6 +1049,7 @@ export async function generateSemData(input: SemGenInput, options: SemGenOptions
               fromNode: from.nodeId,
               viaNode: via.nodeId,
               toNode: to.nodeId,
+              autoDir: resolveAutomaticIndirectDirection(constraints, nodes, activeArrows, from.nodeIds[0], [via.nodeIds[0]], to.nodeIds[0]),
               label: `${from.label} ← ${via.label} ← ${to.label}`,
             });
           }
@@ -1013,6 +1063,7 @@ export async function generateSemData(input: SemGenInput, options: SemGenOptions
               fromNode: from.nodeId,
               viaNode: null,
               toNode: to.nodeId,
+              autoDir: resolveAutomaticIndirectDirection(constraints, nodes, activeArrows, from.nodeIds[0], viaUnits.map((via) => via.nodeIds[0]), to.nodeIds[0]),
               label: `کل: ${from.label} ← ${to.label} (${viaUnits.map((via) => via.label).join(" + ")})`,
             });
           }

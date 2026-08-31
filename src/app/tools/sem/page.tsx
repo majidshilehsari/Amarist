@@ -68,6 +68,7 @@ import {
   type PathTarget,
   type PathDirection,
   inferPathDirection,
+  resolveAutomaticIndirectDirection,
   nodePathKey,
   indirectUnitsOfVar,
   indirectUnitKey,
@@ -78,6 +79,17 @@ import {
   type VariableSpec,
 } from "@/lib/sem-generator";
 import { summarizeMlIndirect, type MlIndirectBootstrapSamples } from "@/lib/sem-ml";
+import {
+  alphaColumnName,
+  alphaScaleForVariable,
+  alphaTargetKey,
+  calculateAlphaGroups,
+  generateAlphaTrainingData,
+  materializeAlphaScales,
+  type AlphaResultGroup,
+  type AlphaScale,
+  type AlphaSemTargets,
+} from "@/lib/sem-alpha";
 import type { SemGeneratorWorkerResponse } from "@/workers/sem-generator.worker";
 import SemGenerationModal, { type GenerationPhase } from "@/components/sem-generation-modal";
 import ErrorBoundary from "@/components/error-boundary";
@@ -452,30 +464,6 @@ function buildCorrelationTables(
   };
 }
 
-function pearsonCorr(x: number[], y: number[]): number {
-  const n = Math.min(x.length, y.length);
-  let sx = 0;
-  let sy = 0;
-  let sxy = 0;
-  let sxx = 0;
-  let syy = 0;
-  for (let i = 0; i < n; i++) {
-    sx += x[i];
-    sy += y[i];
-  }
-  const mx = sx / n;
-  const my = sy / n;
-  for (let i = 0; i < n; i++) {
-    const dx = x[i] - mx;
-    const dy = y[i] - my;
-    sxy += dx * dy;
-    sxx += dx * dx;
-    syy += dy * dy;
-  }
-  if (sxx <= 0 || syy <= 0) return NaN;
-  return sxy / Math.sqrt(sxx * syy);
-}
-
 function varNameOf(vars: VariableSpec[], id: number): string {
   return vars.find((v) => v.id === id)?.name ?? `متغیر ${id}`;
 }
@@ -560,26 +548,11 @@ type Analysis = {
 
 type ModalState = { ok: boolean; lines: string[] } | null;
 
-type AlphaItem = { min: number; max: number; sub: string };
-type AlphaScale = {
-  varId: number;
-  name: string;
-  hasTotal: boolean;
-  subscales: string[];
-  items: AlphaItem[];
-};
-type AlphaResultGroup = {
-  name: string;
-  k: number;
-  alpha: number;
-  stdAlpha: number;
-  items: { name: string; mean: number; sd: number; itemTotal: number; alphaIfDeleted: number }[];
-};
 type AlphaProjectData = {
   wantAlpha: boolean;
   tab?: "training" | "real";
   scales: AlphaScale[];
-  /** مقدار اختیاری؛ خالی یعنی تشخیص خودکار از دادهٔ آلفا، مرحلهٔ داده یا n پروژه */
+  /** فیلد قدیمی برای سازگاری پروژه‌های ذخیره‌شده؛ حجم نمونه اکنون الزاماً از دادهٔ SEM می‌آید. */
   n: string;
   min: string;
   max: string;
@@ -590,151 +563,6 @@ type AlphaProjectData = {
   realRows?: (number | null)[][];
   realResult?: AlphaResultGroup[] | null;
 };
-
-function alphaScaleForVariable(variable: VariableSpec, existing?: Partial<AlphaScale>): AlphaScale {
-  const subscales = variable.subscales.map((subscale) => subscale.name);
-  const defaultCount = subscales.length ? Math.max(2, subscales.length * 3) : 6;
-  const sourceItems = existing?.items?.length ? existing.items : Array.from({ length: defaultCount }, () => ({ min: 1, max: 5, sub: "" }));
-  return {
-    varId: variable.id,
-    name: variable.name,
-    hasTotal: variable.hasTotal,
-    subscales,
-    items: sourceItems.map((item, index) => ({
-      min: Number.isFinite(item.min) ? item.min : 1,
-      max: Number.isFinite(item.max) ? item.max : 5,
-      sub: subscales.length && subscales.includes(item.sub ?? "") ? item.sub! : (subscales[index % subscales.length] ?? ""),
-    })),
-  };
-}
-
-function alphaColumnName(scale: AlphaScale, item: AlphaItem, index: number): string {
-  return item.sub
-    ? `${scale.name} — ${item.sub} — گویهٔ ${index + 1}`
-    : `${scale.name} — گویهٔ ${index + 1}`;
-}
-
-function alphaStandardized(cols: number[][]): number {
-  const k = cols.length;
-  if (k < 2) return NaN;
-  const corr = correlationMatrixWithP(cols).r;
-  let sum = 0;
-  let count = 0;
-  for (let i = 0; i < k; i++) for (let j = i + 1; j < k; j++) {
-    sum += corr[i][j];
-    count++;
-  }
-  if (!count) return NaN;
-  const average = sum / count;
-  return (k * average) / (1 + (k - 1) * average);
-}
-
-function alphaUnits(scales: AlphaScale[]): { name: string; indexes: number[] }[] {
-  const units: { name: string; indexes: number[] }[] = [];
-  let offset = 0;
-  for (const scale of scales) {
-    if (scale.subscales.length) {
-      for (const subscale of scale.subscales) {
-        const indexes = scale.items.flatMap((item, index) => item.sub === subscale ? [offset + index] : []);
-        units.push({ name: `${scale.name} — ${subscale}`, indexes });
-      }
-      if (scale.hasTotal) units.push({ name: `${scale.name} (کل)`, indexes: scale.items.map((_, index) => offset + index) });
-    } else {
-      units.push({ name: scale.name, indexes: scale.items.map((_, index) => offset + index) });
-    }
-    offset += scale.items.length;
-  }
-  return units;
-}
-
-function calculateAlphaGroups(
-  rows: (number | null)[][],
-  columns: string[],
-  scales: AlphaScale[]
-): AlphaResultGroup[] {
-  return alphaUnits(scales).flatMap((unit) => {
-    if (unit.indexes.length < 2) return [];
-    const completeRows = rows.filter((row) => unit.indexes.every((index) => Number.isFinite(row[index])));
-    if (completeRows.length < 2) return [];
-    const cols = unit.indexes.map((index) => completeRows.map((row) => Number(row[index])));
-    const items = cols.map((col, localIndex) => {
-      const rest = cols.filter((_, index) => index !== localIndex);
-      const restTotal = rest[0]?.map((_, rowIndex) => rest.reduce((sum, column) => sum + column[rowIndex], 0)) ?? [];
-      return {
-        name: columns[unit.indexes[localIndex]] ?? `گویه ${localIndex + 1}`,
-        mean: mean(col),
-        sd: sampleStd(col),
-        itemTotal: restTotal.length ? pearsonCorr(col, restTotal) : NaN,
-        alphaIfDeleted: rest.length >= 2 ? cronbachAlpha(rest) : NaN,
-      };
-    });
-    return [{
-      name: unit.name,
-      k: cols.length,
-      alpha: cronbachAlpha(cols),
-      stdAlpha: alphaStandardized(cols),
-      items,
-    }];
-  });
-}
-
-function alphaNormal(): number {
-  let u = 0;
-  let v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
-
-/** تولید بیرون از بدنهٔ کامپوننت نگه داشته شده تا render در React خالص بماند. */
-function generateAlphaTrainingData(
-  scales: AlphaScale[],
-  n: number,
-  alphaMin: number,
-  alphaMax: number
-): { columns: string[]; rows: (number | null)[][]; result: AlphaResultGroup[] } {
-  const columns = scales.flatMap((scale) => scale.items.map((item, index) => alphaColumnName(scale, item, index)));
-  const units = alphaUnits(scales);
-  for (const unit of units) {
-    if (unit.indexes.length < 2) throw new Error(`«${unit.name}» باید حداقل دو گویه داشته باشد.`);
-  }
-  for (let attempt = 0; attempt < 300; attempt++) {
-    const generated: number[][] = Array.from({ length: columns.length }, () => Array(n).fill(0));
-    let offset = 0;
-    for (const scale of scales) {
-      const common = Array.from({ length: n }, alphaNormal);
-      const subLatents = new Map<string, number[]>();
-      const labels = scale.subscales.length ? scale.subscales : [""];
-      for (const label of labels) {
-        const specific = Array.from({ length: n }, alphaNormal);
-        const rho = 0.25 + Math.random() * 0.5;
-        subLatents.set(label, common.map((value, row) => Math.sqrt(rho) * value + Math.sqrt(1 - rho) * specific[row]));
-      }
-      const targetAlpha = alphaMin + Math.random() * Math.max(0.01, alphaMax - alphaMin);
-      for (let index = 0; index < scale.items.length; index++) {
-        const item = scale.items[index];
-        const groupSize = Math.max(2, scale.items.filter((candidate) => candidate.sub === item.sub).length);
-        const loading = Math.max(0.42, Math.min(0.92, Math.sqrt(targetAlpha / (groupSize - (groupSize - 1) * targetAlpha))));
-        const latent = subLatents.get(item.sub) ?? common;
-        const midpoint = (item.min + item.max) / 2;
-        const spread = Math.max(0.6, (item.max - item.min) / 5);
-        generated[offset + index] = latent.map((value) => {
-          const score = midpoint + spread * (loading * value + Math.sqrt(Math.max(0.02, 1 - loading * loading)) * alphaNormal());
-          return Math.round(Math.min(item.max, Math.max(item.min, score)));
-        });
-      }
-      offset += scale.items.length;
-    }
-    const rows: (number | null)[][] = Array.from({ length: n }, (_, row) => generated.map((column) => column[row]));
-    const result = calculateAlphaGroups(rows, columns, scales);
-    const acceptable = result.length === units.length && result.every((group) => {
-      const isTotal = group.name.endsWith("(کل)");
-      return group.alpha >= alphaMin && group.alpha <= alphaMax + (isTotal ? 0.05 : 0);
-    });
-    if (acceptable) return { columns, rows, result };
-  }
-  throw new Error("تولید داده‌ای که آلفای همهٔ زیرمقیاس‌ها را رعایت کند ممکن نشد؛ بازه را کمی بازتر یا تعداد گویه‌ها را بیشتر کنید.");
-}
 
 // ------------------------------------------------------------
 // پروژه‌ها (ذخیره در مرورگر)
@@ -1799,7 +1627,6 @@ function SemTool() {
   const initialAlpha = defaultAlphaProjectData(initialVars);
   const [wantAlpha, setWantAlpha] = useState(initialAlpha.wantAlpha);
   const [alphaScales, setAlphaScales] = useState<AlphaScale[]>(initialAlpha.scales);
-  const [alphaN, setAlphaN] = useState(initialAlpha.n);
   const [alphaMin, setAlphaMin] = useState(initialAlpha.min);
   const [alphaMax, setAlphaMax] = useState(initialAlpha.max);
   const [alphaCols, setAlphaCols] = useState<string[]>(initialAlpha.columns);
@@ -1829,6 +1656,8 @@ function SemTool() {
   const fileRef = useRef<HTMLInputElement>(null);
   const alphaFileRef = useRef<HTMLInputElement>(null);
   const restoreRef = useRef<HTMLInputElement>(null);
+  /** تغییر داده/نگاشت SEM، دادهٔ آلفای تولیدی قبلی را نامعتبر می‌کند (دادهٔ واقعی آلفا مستقل می‌ماند). */
+  const lastAlphaSemSourceRef = useRef(JSON.stringify({ source, vars, columns, rows, colMap }));
   /** رشته‌های (Worker های) فعالِ بوت‌استرپ — برای اجرای موازی و امکانِ توقف */
   const bootstrapWorkersRef = useRef<Worker[]>([]);
 
@@ -1953,6 +1782,16 @@ function SemTool() {
         return;
       }
     }
+    if (stepId === "alpha" && wantAlpha) {
+      try {
+        materializeAlphaScales(alphaScales);
+      } catch (error) {
+        const message = (error as Error).message;
+        setAlphaStatus({ text: message, kind: "err" });
+        setModal({ ok: false, lines: [message] });
+        return;
+      }
+    }
     markDone(stepId);
     setActiveStep(Math.min(cur + 1, steps.length - 1));
   };
@@ -2032,10 +1871,16 @@ function SemTool() {
     setColumns(data.columns ?? []);
     setRows(data.rows ?? []);
     setColMap(data.colMap ?? {});
+    lastAlphaSemSourceRef.current = JSON.stringify({
+      source: data.source,
+      vars: data.vars,
+      columns: data.columns ?? [],
+      rows: data.rows ?? [],
+      colMap: data.colMap ?? {},
+    });
     const alpha = cloneAlphaProjectData(data.alpha ?? defaultAlphaProjectData(data.vars), data.vars);
     setWantAlpha(alpha.wantAlpha);
     setAlphaScales(alpha.scales);
-    setAlphaN(alpha.n);
     setAlphaMin(alpha.min);
     setAlphaMax(alpha.max);
     setAlphaCols(alpha.columns);
@@ -2087,7 +1932,7 @@ function SemTool() {
                     wantAlpha,
                     tab: alphaTab,
                     scales: alphaScales,
-                    n: alphaN,
+                    n: "",
                     min: alphaMin,
                     max: alphaMax,
                     columns: alphaCols,
@@ -2118,7 +1963,6 @@ function SemTool() {
     colMap,
     wantAlpha,
     alphaScales,
-    alphaN,
     alphaMin,
     alphaMax,
     alphaCols,
@@ -2147,6 +1991,22 @@ function SemTool() {
     }, 0);
     return () => clearTimeout(timer);
   }, [vars]);
+
+  useEffect(() => {
+    const snapshot = JSON.stringify({ source, vars, columns, rows, colMap });
+    if (lastAlphaSemSourceRef.current !== snapshot) {
+      lastAlphaSemSourceRef.current = snapshot;
+      const timer = window.setTimeout(() => {
+        setAlphaCols([]);
+        setAlphaRows([]);
+        setAlphaResult(null);
+        setAlphaStatus((previous) => previous.kind
+          ? { text: "داده یا نگاشت SEM تغییر کرد؛ گویه‌های آموزشی آلفا باید دوباره تولید شوند.", kind: "" }
+          : previous);
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+  }, [source, vars, columns, rows, colMap]);
 
   const switchProject = (id: string) => {
     const p = projects.find((x) => x.id === id);
@@ -3042,70 +2902,72 @@ function SemTool() {
   };
 
   // ---------- توابع آلفای کرونباخ ----------
-  const alphaDetectedN = alphaTab === "real"
-    ? alphaRealRows.length
-    : alphaRows.length || rows.length || Math.round(Number(n));
-  const alphaNEffective = alphaN.trim() === "" ? alphaDetectedN : Math.round(Number(alphaN));
   const alphaCurrentCols = alphaTab === "training" ? alphaCols : alphaRealCols;
   const alphaCurrentRows = alphaTab === "training" ? alphaRows : alphaRealRows;
   const alphaCurrentResult = alphaTab === "training" ? alphaResult : alphaRealResult;
 
-  const addAlphaItem = (varId: number) => {
-    setAlphaScales((prev) =>
-      prev.map((q) =>
-        q.varId === varId
-          ? {
-              ...q,
-              items: [...q.items, {
-                min: q.items[0]?.min ?? 1,
-                max: q.items[0]?.max ?? 5,
-                sub: q.subscales[q.items.length % Math.max(1, q.subscales.length)] ?? "",
-              }],
-            }
-          : q
-      )
-    );
+  const invalidateGeneratedAlpha = () => {
+    if (alphaRows.length) {
+      setAlphaCols([]);
+      setAlphaRows([]);
+      setAlphaResult(null);
+      setAlphaStatus({ text: "پیکربندی گویه‌ها تغییر کرد؛ دادهٔ آموزشی را دوباره تولید کنید.", kind: "" });
+    }
   };
-  const removeAlphaItem = (varId: number, idx: number) => {
-    setAlphaScales((prev) =>
-      prev.map((q) => q.varId === varId ? { ...q, items: q.items.filter((_, i) => i !== idx) } : q)
-    );
+
+  const updateAlphaScale = (varId: number, patch: Partial<AlphaScale>) => {
+    invalidateGeneratedAlpha();
+    setAlphaRealResult(null);
+    setAlphaScales((previous) => previous.map((scale) => scale.varId === varId ? { ...scale, ...patch } : scale));
   };
-  const setAlphaItemRange = (varId: number, idx: number, field: "min" | "max", value: number) => {
-    setAlphaScales((prev) =>
-      prev.map((q) =>
-        q.varId === varId
-          ? { ...q, items: q.items.map((item, i) => i === idx ? { ...item, [field]: value } : item) }
-          : q
-      )
-    );
+
+  const updateAlphaAssignment = (varId: number, subscale: string, expression: string) => {
+    invalidateGeneratedAlpha();
+    setAlphaRealResult(null);
+    setAlphaScales((previous) => previous.map((scale) => scale.varId === varId
+      ? { ...scale, assignments: { ...scale.assignments, [subscale]: expression } }
+      : scale));
   };
-  const setAlphaItemSubscale = (varId: number, idx: number, sub: string) => {
-    setAlphaScales((prev) =>
-      prev.map((q) =>
-        q.varId === varId
-          ? { ...q, items: q.items.map((item, i) => i === idx ? { ...item, sub } : item) }
-          : q
-      )
-    );
+
+  const buildAlphaSemTargets = (scales: AlphaScale[]): AlphaSemTargets => {
+    if (!rows.length || !columns.length) {
+      throw new Error("ابتدا داده‌های SEM را در مرحلهٔ داده‌ها تولید یا ایمپورت کنید؛ تولید مستقلِ گویهٔ آلفا مجاز نیست.");
+    }
+    const targets: AlphaSemTargets = {};
+    for (const scale of scales) {
+      const variable = vars.find((candidate) => candidate.id === scale.varId);
+      if (!variable) throw new Error(`متغیر «${scale.name}» در پروژه پیدا نشد.`);
+      const labels = scale.subscales.length ? scale.subscales : [""];
+      labels.forEach((subscale, subscaleIndex) => {
+        const label = subscale ? `${scale.name} — ${subscale}` : scale.name;
+        const mappedIndex = source === "real" ? colMap[scale.varId]?.[subscaleIndex] : null;
+        const columnIndex = mappedIndex ?? columns.indexOf(label);
+        if (columnIndex == null || columnIndex < 0 || !columns[columnIndex]) {
+          throw new Error(`ستون SEM مربوط به «${label}» پیدا/نگاشت نشده است؛ نگاشت داده‌های واقعی را کامل کنید.`);
+        }
+        targets[alphaTargetKey(scale.varId, subscale)] = rows.map((row) => row[columnIndex] ?? null);
+      });
+    }
+    return targets;
   };
 
   const generateAlpha = () => {
     try {
-      const nn = alphaNEffective;
       const aMin = Number(alphaMin);
       const aMax = Number(alphaMax);
-      if (!Number.isFinite(nn) || nn < 10) throw new Error("حجم نمونهٔ تشخیص‌داده‌شده باید حداقل ۱۰ باشد.");
       if (!Number.isFinite(aMin) || !Number.isFinite(aMax) || aMin >= aMax || aMin < 0 || aMax > 1) {
         throw new Error("بازه آلفای هدف معتبر نیست.");
       }
-      const generated = generateAlphaTrainingData(alphaScales, nn, aMin, aMax);
+      const configuredScales = materializeAlphaScales(alphaScales);
+      const semTargets = buildAlphaSemTargets(configuredScales);
+      const generated = generateAlphaTrainingData(configuredScales, semTargets, aMin, aMax);
+      setAlphaScales(generated.scales);
       setAlphaCols(generated.columns);
       setAlphaRows(generated.rows);
       setAlphaResult(generated.result);
       setAlphaTab("training");
       setAlphaStatus({
-        text: `دادهٔ تمرینی آلفا تولید شد: ${nn} نفر × ${generated.columns.length} گویه؛ آلفای زیرمقیاس‌ها جداگانه محاسبه شد.`,
+        text: `گویه‌های منطبق با SEM تولید شد: ${generated.rows.length} نفر × ${generated.columns.length} گویه؛ جمع هر ردیف دقیقاً کنترل شد.`,
         kind: "ok",
       });
     } catch (err) {
@@ -3121,12 +2983,20 @@ function SemTool() {
       setAlphaStatus({ text: "داده‌ای برای محاسبه آلفا وجود ندارد.", kind: "err" });
       return;
     }
-    const expected = alphaScales.reduce((sum, scale) => sum + scale.items.length, 0);
+    let configuredScales: AlphaScale[];
+    try {
+      configuredScales = materializeAlphaScales(alphaScales);
+    } catch (error) {
+      setAlphaStatus({ text: (error as Error).message, kind: "err" });
+      setModal({ ok: false, lines: [(error as Error).message] });
+      return;
+    }
+    const expected = configuredScales.reduce((sum, scale) => sum + scale.items.length, 0);
     if (dataColumns.length < expected) {
       setAlphaStatus({ text: `فایل ${dataColumns.length} ستون دارد، اما برای نگاشت فعلی ${expected} گویه لازم است.`, kind: "err" });
       return;
     }
-    const result = calculateAlphaGroups(dataRows, dataColumns, alphaScales);
+    const result = calculateAlphaGroups(dataRows, dataColumns, configuredScales);
     if (tab === "training") setAlphaResult(result);
     else setAlphaRealResult(result);
     setAlphaStatus({ text: `آلفای کرونباخ برای ${result.length} واحدِ معتبر محاسبه شد (n=${dataRows.length}).`, kind: "ok" });
@@ -3155,9 +3025,10 @@ function SemTool() {
         }))
         .filter((row) => row.some((value) => value != null));
       if (!parsed.length) throw new Error("فایل هیچ ردیف داده‌ای ندارد.");
-      const expected = alphaScales.reduce((sum, scale) => sum + scale.items.length, 0);
+      const configuredScales = materializeAlphaScales(alphaScales);
+      const expected = configuredScales.reduce((sum, scale) => sum + scale.items.length, 0);
       if (headers.length < expected) throw new Error(`حداقل ${expected} ستون گویه لازم است؛ فایل ${headers.length} ستون دارد.`);
-      const result = calculateAlphaGroups(parsed, headers, alphaScales);
+      const result = calculateAlphaGroups(parsed, headers, configuredScales);
       setAlphaRealCols(headers);
       setAlphaRealRows(parsed);
       setAlphaRealResult(result);
@@ -3170,21 +3041,27 @@ function SemTool() {
   };
 
   const downloadAlphaTemplate = () => {
-    const headers = alphaScales.flatMap((scale) => scale.items.map((item, index) => alphaColumnName(scale, item, index)));
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([headers]), "قالب داده آلفا");
-    const guide: (string | number)[][] = [["متغیر", "زیرمقیاس", "گویه", "حداقل", "حداکثر", "نمره کل مجاز؟"]];
-    alphaScales.forEach((scale) => scale.items.forEach((item, index) => guide.push([
-      scale.name,
-      item.sub || "—",
-      index + 1,
-      item.min,
-      item.max,
-      scale.hasTotal ? "بله" : "خیر؛ فقط زیرمقیاس",
-    ])));
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(guide), "راهنما");
-    XLSX.writeFile(workbook, "amarist-alpha-template.xlsx");
-    setAlphaStatus({ text: "قالب اکسل آلفا دانلود شد.", kind: "ok" });
+    try {
+      const configuredScales = materializeAlphaScales(alphaScales);
+      const headers = configuredScales.flatMap((scale) => scale.items.map((item, index) => alphaColumnName(scale, item, index)));
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([headers]), "قالب داده آلفا");
+      const guide: (string | number)[][] = [["متغیر", "زیرمقیاس", "گویه", "حداقل", "حداکثر", "نمره کل مجاز؟"]];
+      configuredScales.forEach((scale) => scale.items.forEach((item, index) => guide.push([
+        scale.name,
+        item.sub || "—",
+        index + 1,
+        item.min,
+        item.max,
+        scale.hasTotal ? "بله" : "خیر؛ فقط زیرمقیاس",
+      ])));
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(guide), "راهنما");
+      XLSX.writeFile(workbook, "amarist-alpha-template.xlsx");
+      setAlphaStatus({ text: "قالب اکسل آلفا دانلود شد.", kind: "ok" });
+    } catch (error) {
+      setAlphaStatus({ text: (error as Error).message, kind: "err" });
+      setModal({ ok: false, lines: [(error as Error).message] });
+    }
   };
 
   const exportAlphaExcel = (tab: "training" | "real" = alphaTab) => {
@@ -3315,7 +3192,7 @@ function SemTool() {
 
   // ---------- واحدهای اثر غیرمستقیم ----------
   const indirectRows = useMemo(() => {
-    const rowsList: { key: string; legacyKey: string; label: string; isTotal: boolean }[] = [];
+    const rowsList: { key: string; legacyKey: string; label: string; isTotal: boolean; autoDir: PathDirection }[] = [];
     const exogenous = vars.filter((variable) => variable.role === "exogenous");
     const outcomes = vars.filter((variable) => variable.role === "outcome");
     const mediators = vars.filter((variable) => variable.role === "mediator");
@@ -3338,6 +3215,7 @@ function SemTool() {
                 legacyKey: `${from.varId}:${via.varId}:${to.varId}`,
                 label: `${from.label} ← ${via.label} ← ${to.label}`,
                 isTotal: false,
+                autoDir: resolveAutomaticIndirectDirection(constraints, nodes, modelArrows, from.nodeIds[0], [via.nodeIds[0]], to.nodeIds[0]),
               });
             }
             if (viaUnits.length > 1) {
@@ -3346,6 +3224,7 @@ function SemTool() {
                 legacyKey: `${from.varId}:${to.varId}`,
                 label: `کل: ${from.label} ← ${to.label} (${viaUnits.map((via) => via.label).join(" + ")})`,
                 isTotal: true,
+                autoDir: resolveAutomaticIndirectDirection(constraints, nodes, modelArrows, from.nodeIds[0], viaUnits.map((via) => via.nodeIds[0]), to.nodeIds[0]),
               });
             }
           }
@@ -3353,7 +3232,7 @@ function SemTool() {
       }
     }
     return rowsList;
-  }, [vars, modelArrows, nodes]);
+  }, [vars, modelArrows, nodes, constraints]);
 
   // ---------- ردیف‌های جدولِ قیودِ مسیرهای مستقیم ----------
   // برای متغیرهای غیرجمع‌پذیر (مانند ERQ) فقط به‌ازای هر زیرمقیاس یک ردیفِ مستقل
@@ -4178,9 +4057,9 @@ function SemTool() {
               <>
                 <h3 className="mt-5 font-extrabold text-stone-800 dark:text-stone-200">قیود اثرات غیرمستقیم (میانجی‌گری — با بوت‌استرپ)</h3>
                 <p className={tinyCls}>
-                  معناداری و دامنهٔ اثر غیرمستقیم استانداردشده برای هر واحدِ اثر قابل تنظیم است. متغیرِ بدون نمرهٔ کل
-                  هیچ ردیفِ کلی ندارد و هر زیرمقیاس در جایگاهِ مبدأ، میانجی یا مقصد جداگانه نمایش داده می‌شود. چون اثر
-                  غیرمستقیم حاصل‌ضربِ دو ضریب است، کفِ پیش‌فرضِ ۰٫۰۶ و سقفِ ۰٫۳۰ واقع‌بینانه و داورپسند است.
+                  معناداری، جهت و دامنهٔ اثر غیرمستقیم استانداردشده برای هر واحد قابل تنظیم و در تولید الزام‌آور است. جهت پیش‌فرض
+                  خودکار است و می‌توان آن را به مثبت، منفی یا «مهم نیست» تغییر داد. متغیرِ بدون نمرهٔ کل هیچ ردیفِ کلی ندارد و هر
+                  زیرمقیاس جداگانه نمایش داده می‌شود. کفِ پیش‌فرضِ ۰٫۰۶ و سقفِ ۰٫۳۰ برای حاصل‌ضرب دو ضریب واقع‌بینانه است.
                 </p>
                 <div className="tool-table-wrap mt-3">
                   <table className="tool-table" style={{ minWidth: 760 }}>
@@ -4188,6 +4067,7 @@ function SemTool() {
                       <tr>
                         <th>مسیر غیرمستقیم</th>
                         <th>وضعیت</th>
+                        <th>جهت اثر</th>
                         <th>حداقل اثر</th>
                         <th>حداکثر اثر</th>
                         <th>دامنه علمی متداول</th>
@@ -4195,10 +4075,9 @@ function SemTool() {
                     </thead>
                     <tbody>
                       {indirectRows.map((row) => {
-                        const target = {
-                          ...defaultIndirectConstraint(),
-                          ...(constraints.indirectTargets[row.key] ?? constraints.indirectTargets[row.legacyKey]),
-                        };
+                        const storedTarget = constraints.indirectTargets[row.key] ?? constraints.indirectTargets[row.legacyKey];
+                        const target = { ...defaultIndirectConstraint(), ...storedTarget };
+                        const directionValue = storedTarget?.dir ?? "auto";
                         return (
                           <tr key={row.key} className={row.isTotal ? "bg-stone-50 font-bold dark:bg-slate-900" : ""}>
                             <td>
@@ -4222,6 +4101,20 @@ function SemTool() {
                               >
                                 <option value="sig">معنی‌دار باشد</option>
                                 <option value="ns">معنی‌دار نباشد</option>
+                                <option value="any">مهم نیست</option>
+                              </select>
+                            </td>
+                            <td>
+                              <select
+                                className={`${inputCls} !py-1.5`}
+                                value={directionValue}
+                                onChange={(e) => setIndirectTarget(row.key, {
+                                  dir: e.target.value === "auto" ? undefined : e.target.value as PathDirection,
+                                })}
+                              >
+                                <option value="auto">خودکار ({row.autoDir === "pos" ? "مثبت" : row.autoDir === "neg" ? "منفی" : "نامشخص"})</option>
+                                <option value="pos">مثبت</option>
+                                <option value="neg">منفی</option>
                                 <option value="any">مهم نیست</option>
                               </select>
                             </td>
@@ -5360,8 +5253,8 @@ function SemTool() {
               </div>
             </div>
             <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-              این بخش اختیاری است؛ با «خیر» غیرفعال می‌شود ولی در استپر باقی می‌ماند. متغیرها از همین پروژه می‌آیند؛ برای
-              هر گویه دامنه نمره جداگانه تعیین کنید.
+              این بخش اختیاری است؛ متغیرها و زیرمقیاس‌ها از همین پروژه می‌آیند. تولید گویه فقط بر پایهٔ نمره‌های موجود SEM انجام می‌شود
+              تا جمع گویه‌های هر پاسخ‌دهنده دقیقاً با نمرهٔ زیرمقیاس و، در مقیاس جمع‌پذیر، با نمرهٔ کل سازگار بماند.
             </p>
 
             {!wantAlpha ? (
@@ -5373,9 +5266,9 @@ function SemTool() {
                 <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">نگاشت گویه‌ها به زیرمقیاس‌ها</p>
+                      <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">تعریف فشردهٔ گویه‌ها و زیرمقیاس‌ها</p>
                       <p className={tinyCls}>
-                        نام و وضعیتِ نمرهٔ کل از بخش «مشخصات متغیرها» می‌آید. برای متغیرِ بدون نمرهٔ کل، فقط آلفای هر زیرمقیاس محاسبه می‌شود.
+                        نام مقیاس، همهٔ زیرمقیاس‌ها و مجازبودن نمرهٔ کل از «مشخصات متغیرها» خوانده می‌شود. هر شماره باید دقیقاً یک‌بار پوشش داده شود.
                       </p>
                     </div>
                     <button type="button" className={btnSecondary} onClick={downloadAlphaTemplate}>
@@ -5388,62 +5281,85 @@ function SemTool() {
                         <div className="flex flex-wrap items-center gap-3">
                           <input className={`${inputCls} max-w-xs opacity-70`} value={q.name} disabled title="نام از متغیرهای پروژه می‌آید" />
                           <span className={`rounded-full px-3 py-1 text-[11px] font-extrabold ${q.hasTotal ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300" : "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"}`}>
-                            {q.hasTotal ? "آلفای زیرمقیاس‌ها + نمرهٔ کل" : "فقط آلفای زیرمقیاس‌ها؛ بدون نمرهٔ کل"}
+                            {q.hasTotal ? "آلفای زیرمقیاس‌ها + کل" : "فقط آلفای زیرمقیاس‌ها؛ بدون کل"}
                           </span>
-                          <button type="button" className={btnLight} onClick={() => addAlphaItem(q.varId)}>
-                            <Plus className="h-4 w-4" /> افزودن گویه
-                          </button>
                         </div>
-                        <div className="mt-2 space-y-2">
-                          <div className="grid grid-cols-[minmax(120px,1fr)_minmax(150px,1fr)_90px_90px_40px] items-center gap-2 px-1 text-[11px] font-bold text-stone-500 dark:text-stone-400">
-                            <span>گویه</span><span>زیرمقیاس</span><span className="text-center">حداقل</span><span className="text-center">حداکثر</span><span />
+
+                        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                          <div>
+                            <label className={labelCls}>تعداد کل گویه‌های مقیاس</label>
+                            <input type="number" min={2} step={1} dir="ltr" className={inputCls} value={q.itemCount} onChange={(event) => updateAlphaScale(q.varId, { itemCount: Number(event.target.value) })} />
                           </div>
-                          {q.items.map((item, index) => (
-                            <div key={index} className="grid grid-cols-[minmax(120px,1fr)_minmax(150px,1fr)_90px_90px_40px] items-center gap-2">
-                              <input className={`${inputCls} opacity-60`} value={`گویه ${index + 1}`} disabled />
-                              {q.subscales.length ? (
-                                <select className={inputCls} value={item.sub} onChange={(event) => setAlphaItemSubscale(q.varId, index, event.target.value)}>
-                                  {q.subscales.map((subscale) => <option key={subscale} value={subscale}>{subscale}</option>)}
-                                </select>
-                              ) : (
-                                <input className={`${inputCls} opacity-60`} value="بدون زیرمقیاس" disabled />
-                              )}
-                              <input type="number" dir="ltr" className={inputCls} value={item.min} onChange={(event) => setAlphaItemRange(q.varId, index, "min", Number(event.target.value))} />
-                              <input type="number" dir="ltr" className={inputCls} value={item.max} onChange={(event) => setAlphaItemRange(q.varId, index, "max", Number(event.target.value))} />
-                              <button type="button" onClick={() => removeAlphaItem(q.varId, index)} disabled={q.items.length <= 2} className="flex h-9 w-9 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-400 transition hover:border-red-200 hover:text-red-500 disabled:opacity-30 dark:border-stone-600 dark:bg-slate-800" title="حذف گویه">
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          ))}
+                          <div>
+                            <label className={labelCls}>حداقل مشترک گویه‌ها</label>
+                            <input type="number" step={1} dir="ltr" className={inputCls} value={q.defaultMin} onChange={(event) => updateAlphaScale(q.varId, { defaultMin: Number(event.target.value) })} />
+                          </div>
+                          <div>
+                            <label className={labelCls}>حداکثر مشترک گویه‌ها</label>
+                            <input type="number" step={1} dir="ltr" className={inputCls} value={q.defaultMax} onChange={(event) => updateAlphaScale(q.varId, { defaultMax: Number(event.target.value) })} />
+                          </div>
                         </div>
-                        <p className={`${tinyCls} mt-2`}>
-                          {q.items.length} گویه{q.subscales.length ? ` · ${q.subscales.map((subscale) => `${subscale}: ${q.items.filter((item) => item.sub === subscale).length}`).join(" · ")}` : ""}
-                        </p>
+
+                        <div className="mt-3 rounded-xl border border-stone-200 bg-white p-3 dark:border-stone-700 dark:bg-slate-800">
+                          <p className="mb-2 text-[11px] font-extrabold text-stone-600 dark:text-stone-300">عضویت گویه‌ها در زیرمقیاس‌ها</p>
+                          {q.subscales.length ? (
+                            <div className="space-y-2">
+                              {q.subscales.map((subscale) => (
+                                <div key={subscale} className="grid items-center gap-2 sm:grid-cols-[minmax(180px,1fr)_minmax(220px,2fr)]">
+                                  <label className="text-[12px] font-bold text-stone-600 dark:text-stone-300">{subscale}</label>
+                                  <input
+                                    dir="ltr"
+                                    className={inputCls}
+                                    value={q.assignments[subscale] ?? ""}
+                                    placeholder="مثال: 1-5,7,9-12"
+                                    onChange={(event) => updateAlphaAssignment(q.varId, subscale, event.target.value)}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="grid items-center gap-2 sm:grid-cols-[minmax(180px,1fr)_minmax(220px,2fr)]">
+                              <span className="text-[12px] font-bold text-stone-600 dark:text-stone-300">بدون زیرمقیاس</span>
+                              <input dir="ltr" className={`${inputCls} opacity-70`} value={`1-${q.itemCount}`} disabled />
+                            </div>
+                          )}
+                          <p className={`${tinyCls} mt-2`}>بازه و فهرست را می‌توان ترکیب کرد؛ مثال: <span dir="ltr">1-5,7,8-10</span>. گویهٔ جاافتاده، تکراری، نامعتبر یا خارج از بازه ادامه را مسدود می‌کند.</p>
+                        </div>
+
+                        <div className="mt-3">
+                          <label className={labelCls}>استثناهای دامنهٔ گویه (اختیاری)</label>
+                          <input
+                            dir="ltr"
+                            className={inputCls}
+                            value={q.rangeExceptions}
+                            placeholder="مثال: 3=0-4; 7-9=1-7"
+                            onChange={(event) => updateAlphaScale(q.varId, { rangeExceptions: event.target.value })}
+                          />
+                          <p className={tinyCls}>ساختار هر بخش: شماره/بازهٔ گویه = حداقل-حداکثر؛ بخش‌ها را با «;» جدا کنید.</p>
+                        </div>
                       </div>
                     ))}
                   </div>
                 </div>
 
                 <div className="grid gap-3 sm:grid-cols-3">
-                  <div>
-                    <label className={labelCls}>حجم نمونهٔ تولید (اختیاری)</label>
-                    <input type="number" className={inputCls} value={alphaN} placeholder={`خودکار: ${Number.isFinite(alphaDetectedN) ? alphaDetectedN : "—"}`} onChange={(event) => setAlphaN(event.target.value)} />
-                    <p className={tinyCls}>خالی = خودکار از دادهٔ آلفا، جدول مرحلهٔ داده، سپس n پروژه. مقدار مؤثر: {Number.isFinite(alphaNEffective) ? alphaNEffective : "—"}</p>
+                  <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-3 text-[12px] font-bold leading-6 text-indigo-700 dark:border-indigo-900 dark:bg-indigo-950/30 dark:text-indigo-300">
+                    حجم نمونه ثابت و برابر دادهٔ SEM موجود است: {rows.length || "—"} پاسخ‌دهنده. تولید مستقل بدون دادهٔ مرحلهٔ SEM انجام نمی‌شود.
                   </div>
                   <div>
                     <label className={labelCls}>حداقل آلفای هدف</label>
-                    <input type="number" step={0.05} dir="ltr" className={inputCls} value={alphaMin} onChange={(event) => setAlphaMin(event.target.value)} />
+                    <input type="number" step={0.05} dir="ltr" className={inputCls} value={alphaMin} onChange={(event) => { invalidateGeneratedAlpha(); setAlphaMin(event.target.value); }} />
                   </div>
                   <div>
                     <label className={labelCls}>حداکثر آلفای هدف</label>
-                    <input type="number" step={0.05} dir="ltr" className={inputCls} value={alphaMax} onChange={(event) => setAlphaMax(event.target.value)} />
+                    <input type="number" step={0.05} dir="ltr" className={inputCls} value={alphaMax} onChange={(event) => { invalidateGeneratedAlpha(); setAlphaMax(event.target.value); }} />
                   </div>
                 </div>
 
                 <div className="rounded-2xl border border-indigo-200 bg-indigo-50/40 p-2 dark:border-indigo-900 dark:bg-indigo-950/20">
                   <div className="grid gap-2 md:grid-cols-2">
                     <button type="button" onClick={() => setAlphaTab("training")} className={`rounded-xl px-4 py-3 text-sm font-extrabold transition ${alphaTab === "training" ? "bg-indigo-600 text-white shadow" : "bg-white text-stone-600 dark:bg-slate-800 dark:text-stone-300"}`}>
-                      محاسبهٔ آلفای کرونباخ بر اساس تولید دادهٔ تمرینی
+                      تولید گویه از دادهٔ SEM و محاسبهٔ آلفا
                     </button>
                     <button type="button" onClick={() => setAlphaTab("real")} className={`rounded-xl px-4 py-3 text-sm font-extrabold transition ${alphaTab === "real" ? "bg-indigo-600 text-white shadow" : "bg-white text-stone-600 dark:bg-slate-800 dark:text-stone-300"}`}>
                       محاسبهٔ آلفای کرونباخ بر اساس داده‌های واقعی خودم
@@ -5458,7 +5374,7 @@ function SemTool() {
                 }} />
                 <div className="flex flex-wrap items-center gap-3">
                   {alphaTab === "training" ? (
-                    <button type="button" className={btnPrimary} onClick={generateAlpha}><Play className="h-4 w-4" /> تولید دادهٔ تمرینی و محاسبه</button>
+                    <button type="button" className={btnPrimary} onClick={generateAlpha}><Play className="h-4 w-4" /> تولید گویه‌های منطبق با SEM</button>
                   ) : (
                     <button type="button" className={btnPrimary} onClick={() => alphaFileRef.current?.click()}><Upload className="h-4 w-4" /> ایمپورت اکسلِ داده‌های واقعی</button>
                   )}
@@ -5466,7 +5382,7 @@ function SemTool() {
                   <button type="button" className={btnSecondary} onClick={() => exportAlphaExcel(alphaTab)} disabled={!alphaCurrentRows.length}><Download className="h-4 w-4" /> اکسپورت اکسل</button>
                   <button type="button" className={btnLight} onClick={downloadAlphaTemplate}><FileSpreadsheet className="h-4 w-4" /> دانلود قالب</button>
                   <span className={`inline-flex min-h-6 items-center gap-2 text-[13px] ${alphaStatus.kind === "ok" ? "font-bold text-emerald-700 dark:text-emerald-400" : alphaStatus.kind === "err" ? "font-bold text-red-700 dark:text-red-400" : "text-stone-400"}`}>
-                    {alphaStatus.kind === "ok" ? "✓" : alphaStatus.kind === "err" ? "✗" : "•"} {alphaStatus.text || (alphaTab === "training" ? "آمادهٔ تولید دادهٔ تمرینی" : "قالب را دانلود و فایل واقعی را ایمپورت کنید")}
+                    {alphaStatus.kind === "ok" ? "✓" : alphaStatus.kind === "err" ? "✗" : "•"} {alphaStatus.text || (alphaTab === "training" ? "آمادهٔ تولید گویه از نمره‌های SEM" : "قالب را دانلود و فایل واقعی را ایمپورت کنید")}
                   </span>
                 </div>
 

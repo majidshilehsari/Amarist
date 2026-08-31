@@ -43,6 +43,20 @@ export type PathTarget = {
   dir?: PathDirection;
 };
 
+/** بازهٔ پیش‌فرضِ داورپسند برای قدرمطلق ضریب مسیر استانداردشده */
+export const DEFAULT_BETA_MIN = 0.1;
+export const DEFAULT_BETA_MAX = 0.5;
+
+/**
+ * نخستین مقدارِ واقعاً تنظیم‌شده را برمی‌گرداند. `null` یعنی کاربر عمداً فیلد را
+ * خالی کرده و قید را برداشته است؛ `undefined` یعنی هنوز تنظیمی انجام نشده و باید
+ * به مقدارِ بعدی (در نهایت پیش‌فرض) برسیم. عملگر `??` این تفاوت را از بین می‌برد.
+ */
+function pickBeta(...values: (number | null | undefined)[]): number | null {
+  for (const value of values) if (value !== undefined) return value;
+  return null;
+}
+
 export type IndirectTarget = "sig" | "ns" | "any";
 export type IndirectConstraint = {
   significance: IndirectTarget;
@@ -143,8 +157,8 @@ export function resolvePathTargetForArrow(
   const toLabel = nodes.find((n) => n.nodeId === arrow.toNode)?.label ?? "";
   return {
     sig: nodeLevel?.sig ?? explicit?.sig ?? "sig",
-    betaMin: nodeLevel?.betaMin ?? explicit?.betaMin ?? null,
-    betaMax: nodeLevel?.betaMax ?? explicit?.betaMax ?? null,
+    betaMin: pickBeta(nodeLevel?.betaMin, explicit?.betaMin, DEFAULT_BETA_MIN),
+    betaMax: pickBeta(nodeLevel?.betaMax, explicit?.betaMax, DEFAULT_BETA_MAX),
     dir: nodeLevel?.dir ?? explicit?.dir ?? inferPathDirection(fromLabel, toLabel),
   };
 }
@@ -162,8 +176,8 @@ export function resolvePathTarget(
   const toLabel = arrow ? nodes.find((n) => n.nodeId === arrow.toNode)?.label ?? "" : "";
   return {
     sig: explicit?.sig ?? "sig",
-    betaMin: explicit?.betaMin ?? null,
-    betaMax: explicit?.betaMax ?? null,
+    betaMin: pickBeta(explicit?.betaMin, DEFAULT_BETA_MIN),
+    betaMax: pickBeta(explicit?.betaMax, DEFAULT_BETA_MAX),
     dir: explicit?.dir ?? inferPathDirection(fromLabel, toLabel),
   };
 }
@@ -173,7 +187,7 @@ export function resolvePathTarget(
 // ============================================================
 
 /** بازهٔ همبستگیِ دو پیش‌بینِ برون‌زا از دو پرسشنامهٔ متفاوت */
-const EXOG_CORR_MIN = 0.15;
+const EXOG_CORR_MIN = 0.28;
 const EXOG_CORR_MAX = 0.45;
 /**
  * اندازهٔ «بارِ متقاطعِ فرعی»: در دادهٔ واقعی برخی گویه‌ها علاوه بر سازهٔ اصلی، روی
@@ -184,8 +198,10 @@ const EXOG_CORR_MAX = 0.45;
 const CROSS_LOADING = 0.15;
 
 /** بازهٔ همبستگیِ دو زیرمقیاس از یک پرسشنامهٔ واحد (واریانسِ روشِ مشترک) */
-const SAME_VAR_CORR_MIN = 0.2;
+const SAME_VAR_CORR_MIN = 0.25;
 const SAME_VAR_CORR_MAX = 0.45;
+/** سقفِ محافظه‌کارانهٔ هم‌خطی در ماتریسِ پیش‌بین‌های برون‌زا */
+const EXOG_MAX_VIF = 4;
 
 /** تجزیهٔ چولسکیِ پایین‌مثلثی؛ اگر ماتریس مثبت‌معین نباشد null برمی‌گرداند */
 export function choleskyLower(matrix: number[][]): number[][] | null {
@@ -204,6 +220,40 @@ export function choleskyLower(matrix: number[][]): number[][] | null {
     }
   }
   return lower;
+}
+
+/** وارون‌سازی گاوس–ژردن؛ برای ماتریس تکین null برمی‌گرداند. */
+export function invertMatrix(matrix: number[][]): number[][] | null {
+  const size = matrix.length;
+  if (!size || matrix.some((row) => row.length !== size)) return null;
+  const augmented = matrix.map((row, i) => [
+    ...row,
+    ...Array.from({ length: size }, (_, j) => (i === j ? 1 : 0)),
+  ]);
+  for (let col = 0; col < size; col++) {
+    let pivot = col;
+    for (let row = col + 1; row < size; row++) {
+      if (Math.abs(augmented[row][col]) > Math.abs(augmented[pivot][col])) pivot = row;
+    }
+    if (Math.abs(augmented[pivot][col]) < 1e-10) return null;
+    [augmented[col], augmented[pivot]] = [augmented[pivot], augmented[col]];
+    const divisor = augmented[col][col];
+    for (let j = 0; j < size * 2; j++) augmented[col][j] /= divisor;
+    for (let row = 0; row < size; row++) {
+      if (row === col) continue;
+      const factor = augmented[row][col];
+      for (let j = 0; j < size * 2; j++) augmented[row][j] -= factor * augmented[col][j];
+    }
+  }
+  return augmented.map((row) => row.slice(size));
+}
+
+/** در ماتریس همبستگی، VIF هر پیش‌بین درایهٔ قطریِ ماتریس وارون است. */
+export function maxVifOfCorrelation(matrix: number[][]): number {
+  if (matrix.length <= 1) return 1;
+  const inverse = invertMatrix(matrix);
+  if (!inverse) return Number.POSITIVE_INFINITY;
+  return Math.max(...inverse.map((row, index) => row[index]));
 }
 
 /**
@@ -234,7 +284,7 @@ export function buildExogenousCorrelation(labels: string[], varIds: number[]): n
       }
     }
     if (size <= 1) return matrix;
-    if (choleskyLower(matrix)) return matrix;
+    if (choleskyLower(matrix) && maxVifOfCorrelation(matrix) <= EXOG_MAX_VIF) return matrix;
   }
   return Array.from({ length: size }, (_, i) => Array.from({ length: size }, (_, j) => (i === j ? 1 : 0)));
 }
@@ -315,6 +365,8 @@ export type GenConstraints = {
   outlierPct: number;
   enforceNormality: boolean;
   enforceLinearity: boolean;
+  /** همبستگیِ همهٔ جفت‌های پیش‌بینِ برون‌زا باید معنادار باشد */
+  enforceExogCorr: boolean;
   enforceVif: boolean;
   enforceDw: boolean;
   bootSamples: number;
@@ -517,7 +569,7 @@ export type SemGenOptions = {
  * احتمالِ پذیرشِ هر تلاش حدود ۲ تا ۳ درصد است؛ ۲۰۰ تلاش شانسِ موفقیت را به حدود ۹۹٪ می‌رساند
  * و در بدترین حالت حدود نیم تا یک دقیقه زمان می‌گیرد (با مودالِ پیشرفت و دکمهٔ توقف).
  */
-export const DEFAULT_MAX_ATTEMPTS = 200;
+export const DEFAULT_MAX_ATTEMPTS = 300;
 export const MIN_MAX_ATTEMPTS = 1;
 export const MAX_MAX_ATTEMPTS = 2000;
 
@@ -543,6 +595,34 @@ function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** واحدِ اثرِ یک متغیر: کلِ متغیر جمع‌پذیر، یا هر زیرمقیاسِ مستقل. */
+export type IndirectUnit = {
+  varId: number;
+  nodeId: number | null;
+  label: string;
+  nodeIds: number[];
+};
+
+/**
+ * قانونِ جهانیِ «واحد اثر». متغیرِ چندگرهی نمرهٔ کل ندارد و فقط زیرمقیاس‌هایش
+ * واحدهای معتبرند؛ بنابراین در هیچ جایگاهِ مبدأ/میانجی/مقصد ردیفِ کلی نمی‌سازیم.
+ */
+export function indirectUnitsOfVar(nodes: ModelNode[], varId: number): IndirectUnit[] {
+  const group = nodes.filter((node) => node.varId === varId);
+  if (!group.length) return [];
+  if (group.length > 1) {
+    return group.map((node) => ({ varId, nodeId: node.nodeId, label: node.label, nodeIds: [node.nodeId] }));
+  }
+  return [{ varId, nodeId: null, label: group[0].label, nodeIds: [group[0].nodeId] }];
+}
+
+/** کلیدِ پایدارِ قیدِ غیرمستقیم؛ برچسب‌محور تا با جابه‌جاییِ متغیرها از بین نرود. */
+export function indirectUnitKey(fromLabel: string, viaLabel: string | null, toLabel: string): string {
+  return viaLabel == null
+    ? `t∷${fromLabel}∷${toLabel}`
+    : `p∷${fromLabel}∷${viaLabel}∷${toLabel}`;
+}
+
 function stdPathOf(sem: SemResults, from: number, to: number): number {
   return sem.paths.find((path) => path.from === from && path.to === to)?.std ?? NaN;
 }
@@ -555,17 +635,23 @@ function mlIndirectPoint(
   toVar: number,
   viaVar: number | null,
   mediatorVarIds: number[],
-  /** اگر داده شود، فقط اثرِ همین گرهٔ مبدأ حساب می‌شود (برای متغیرهای غیرجمع‌پذیر) */
-  fromNodeId: number | null = null
+  /** محدودسازیِ اختیاریِ هر سه جایگاه به یک زیرمقیاسِ مستقل */
+  fromNodeId: number | null = null,
+  viaNodeId: number | null = null,
+  toNodeId: number | null = null
 ): number {
   const fromNodes = nodes.filter(
     (node) => node.varId === fromVar && (fromNodeId == null || node.nodeId === fromNodeId)
   );
-  const toNodes = nodes.filter((node) => node.varId === toVar);
+  const toNodes = nodes.filter(
+    (node) => node.varId === toVar && (toNodeId == null || node.nodeId === toNodeId)
+  );
   const viaVars = viaVar == null ? mediatorVarIds : [viaVar];
   let sum = 0;
   for (const via of viaVars) {
-    for (const viaNode of nodes.filter((node) => node.varId === via)) {
+    for (const viaNode of nodes.filter(
+      (node) => node.varId === via && (viaNodeId == null || node.nodeId === viaNodeId)
+    )) {
       for (const from of fromNodes) {
         for (const to of toNodes) {
           const a = stdPathOf(sem, from.nodeId, viaNode.nodeId);
@@ -578,29 +664,27 @@ function mlIndirectPoint(
   return sum;
 }
 
+type IndirectConstraintUnit = {
+  key: string;
+  legacyKey: string;
+  fromVar: number;
+  viaVar: number | null;
+  toVar: number;
+  fromNode: number | null;
+  viaNode: number | null;
+  toNode: number | null;
+  label: string;
+};
 type EvalContext = {
   nodes: ModelNode[];
   arrows: ModelArrow[];
   activeArrows: ModelArrow[];
   medVars: VariableSpec[];
   outVars: VariableSpec[];
-  variables: VariableSpec[];
   constraints: GenConstraints;
   fitTargets: SemFitConstraints;
-  indirectConstraintKeys: string[];
+  indirectConstraintUnits: IndirectConstraintUnit[];
 };
-
-function varLabel(ctx: EvalContext, varId: number): string {
-  return ctx.variables.find((v) => v.id === varId)?.name ?? `متغیر ${varId}`;
-}
-
-function indirectLabel(ctx: EvalContext, key: string): string {
-  const parts = key.split(":").map(Number);
-  if (parts.length === 3) {
-    return `${varLabel(ctx, parts[0])} ← ${varLabel(ctx, parts[1])} ← ${varLabel(ctx, parts[2])}`;
-  }
-  return `${varLabel(ctx, parts[0])} ← ${varLabel(ctx, parts[1])} (کل غیرمستقیم)`;
-}
 
 /**
  * ارزیابیِ یک دادهٔ تولیدشده در برابر همهٔ قیود.
@@ -615,7 +699,7 @@ function evaluateAttempt(
   bootEstimator: "ml" | "approx",
   opts?: { skipPaths?: boolean }
 ): { checks: ConstraintCheck[]; score: number; allPassed: boolean } {
-  const { nodes, arrows, activeArrows, medVars, outVars, constraints, fitTargets, indirectConstraintKeys } = ctx;
+  const { nodes, arrows, activeArrows, medVars, outVars, constraints, fitTargets, indirectConstraintUnits } = ctx;
   const checks: ConstraintCheck[] = [];
   const push = (group: ConstraintGroup, label: string, requirement: string, actual: string, margin: number) => {
     checks.push({
@@ -734,6 +818,25 @@ function evaluateAttempt(
     }
   }
 
+  if (constraints.enforceExogCorr) {
+    const corr = correlationMatrixWithP(nodeCols);
+    const exogenousNodes = nodes.filter((node) => node.role === "exogenous");
+    for (let i = 0; i < exogenousNodes.length; i++) {
+      for (let j = i + 1; j < exogenousNodes.length; j++) {
+        const left = exogenousNodes[i];
+        const right = exogenousNodes[j];
+        const p = corr.p[left.nodeId]?.[right.nodeId] ?? NaN;
+        push(
+          "پیش‌فرض‌های آماری",
+          `همبستگیِ پیش‌بین‌های برون‌زا: ${left.label} ↔ ${right.label}`,
+          "همبستگی معنادار (p < ۰٫۰۵)",
+          `p = ${fmtNum(p, 4)}`,
+          0.05 - p
+        );
+      }
+    }
+  }
+
   if (constraints.enforceVif) {
     for (const node of nodes) {
       if (node.role === "exogenous") continue;
@@ -754,74 +857,54 @@ function evaluateAttempt(
   // ---- قید اثرات غیرمستقیم ----
   const mediatorVarIds = medVars.map((v) => v.id);
   const bootNote = bootEstimator === "ml" ? "بوت‌استرپ ML" : "بوت‌استرپ غربال";
-  for (const key of indirectConstraintKeys) {
-    const target = resolveIndirectConstraint(constraints.indirectTargets[key]);
-    const parts = key.split(":").map(Number);
-    const viaVar = parts.length === 3 ? parts[1] : null;
-    const fromVar = parts[0];
-    const toVar = parts[parts.length - 1];
-    const point = mlIndirectPoint(nodes, sem, fromVar, toVar, viaVar, mediatorVarIds);
-    const labelOf = (node: ModelNode | null) =>
-      node == null
-        ? indirectLabel(ctx, key)
-        : viaVar == null
-          ? `${node.label} ← ${varLabel(ctx, toVar)} (کل غیرمستقیم)`
-          : `${node.label} ← ${varLabel(ctx, viaVar)} ← ${varLabel(ctx, toVar)}`;
-    /**
-     * ردیفِ بوت‌استرپِ متناظر. برای متغیرِ غیرجمع‌پذیر، بوت‌استرپ هم — درست مانند جدولِ
-     * نتایج — برای هر زیرمقیاس یک ردیفِ جدا دارد؛ بنابراین معناداری برای هر زیرمقیاس
-     * جداگانه خوانده می‌شود و دیگر نیازی به چشم‌پوشی از معناداریِ «اثر خالص» نیست.
-     */
-    const bootRowOf = (fromNodeId: number | null) =>
-      boot?.find(
+  for (const unit of indirectConstraintUnits) {
+    // کلیدِ برچسبی مقدم است؛ کلیدِ عددیِ نسخه‌های قدیمی فقط برای سازگاری خوانده می‌شود.
+    const stored = constraints.indirectTargets[unit.key] ?? constraints.indirectTargets[unit.legacyKey];
+    const target = resolveIndirectConstraint(stored);
+    const point = mlIndirectPoint(
+      nodes,
+      sem,
+      unit.fromVar,
+      unit.toVar,
+      unit.viaVar,
+      mediatorVarIds,
+      unit.fromNode,
+      unit.viaNode,
+      unit.toNode
+    );
+    if (target.min != null) {
+      push("اثر غیرمستقیم", unit.label, `|اثر| ≥ ${fmtNum(target.min)}`, `= ${fmtNum(point)}`, Math.abs(point) - target.min);
+    }
+    if (target.max != null) {
+      push("اثر غیرمستقیم", unit.label, `|اثر| ≤ ${fmtNum(target.max)}`, `= ${fmtNum(point)}`, target.max - Math.abs(point));
+    }
+    if (boot && target.significance !== "any") {
+      const bootRow = boot.find(
         (item) =>
-          item.fromVar === fromVar &&
-          item.toVar === toVar &&
-          (viaVar == null ? item.viaVar === null : item.viaVar === viaVar) &&
-          (fromNodeId == null ? item.fromNode == null : item.fromNode === fromNodeId)
+          item.fromVar === unit.fromVar &&
+          item.toVar === unit.toVar &&
+          item.viaVar === unit.viaVar &&
+          item.fromNode === unit.fromNode &&
+          item.viaNode === unit.viaNode &&
+          item.toNode === unit.toNode
       );
-
-    // اگر متغیرِ مبدأ غیرجمع‌پذیر است (چند زیرمقیاسِ مستقل)، «اثرِ کلِ متغیر» کمیتِ
-    // معناداری نیست: زیرمقیاس‌ها می‌توانند جهتِ مخالف داشته باشند و جمعِ جبریِ آن‌ها
-    // یکدیگر را خنثی کند (مثلاً ارزیابی مجدد ۰٫۱۰− و فرونشانی ۰٫۱۸+ ⇒ خالص ۰٫۰۸).
-    // بنابراین بازه و معناداری برای هر زیرمقیاس جداگانه سنجیده می‌شود (قدرِ مطلق برای بازه).
-    const fromNodesOfVar = nodes.filter((node) => node.varId === fromVar);
-    const rangeTargets: (ModelNode | null)[] = fromNodesOfVar.length > 1 ? fromNodesOfVar : [null];
-    for (const fromNode of rangeTargets) {
-      const nodePoint =
-        fromNode == null
-          ? point
-          : mlIndirectPoint(nodes, sem, fromVar, toVar, viaVar, mediatorVarIds, fromNode.nodeId);
-      const nodeLabel = labelOf(fromNode);
-      if (target.min != null) {
-        const absPoint = Math.abs(nodePoint);
-        push("اثر غیرمستقیم", nodeLabel, `|اثر| ≥ ${fmtNum(target.min)}`, `= ${fmtNum(nodePoint)}`, absPoint - target.min);
-      }
-      if (target.max != null) {
-        const absPoint = Math.abs(nodePoint);
-        push("اثر غیرمستقیم", nodeLabel, `|اثر| ≤ ${fmtNum(target.max)}`, `= ${fmtNum(nodePoint)}`, target.max - absPoint);
-      }
-      // قیدِ معناداری فقط وقتی ارزیابی می‌شود که بوت‌استرپ انجام شده باشد؛
-      // در غیر این صورت این ردیف اصلاً تولید نمی‌شود تا امتیازِ غربال خراب نشود.
-      if (boot && target.significance !== "any") {
-        const p = bootRowOf(fromNode?.nodeId ?? null)?.p ?? NaN;
-        if (target.significance === "sig") {
-          push(
-            "اثر غیرمستقیم",
-            nodeLabel,
-            `معنادار (${bootNote})`,
-            Number.isFinite(p) ? `p = ${fmtNum(p, 4)}` : "بررسی نشد",
-            Number.isFinite(p) ? 0.05 - p : Number.NEGATIVE_INFINITY
-          );
-        } else {
-          push(
-            "اثر غیرمستقیم",
-            nodeLabel,
-            `غیرمعنادار (${bootNote})`,
-            Number.isFinite(p) ? `p = ${fmtNum(p, 4)}` : "بررسی نشد",
-            Number.isFinite(p) ? p - 0.05 : Number.NEGATIVE_INFINITY
-          );
-        }
+      const p = bootRow?.p ?? NaN;
+      if (target.significance === "sig") {
+        push(
+          "اثر غیرمستقیم",
+          unit.label,
+          `معنادار (${bootNote})`,
+          Number.isFinite(p) ? `p = ${fmtNum(p, 4)}` : "بررسی نشد",
+          Number.isFinite(p) ? 0.05 - p : Number.NEGATIVE_INFINITY
+        );
+      } else {
+        push(
+          "اثر غیرمستقیم",
+          unit.label,
+          `غیرمعنادار (${bootNote})`,
+          Number.isFinite(p) ? `p = ${fmtNum(p, 4)}` : "بررسی نشد",
+          Number.isFinite(p) ? p - 0.05 : Number.NEGATIVE_INFINITY
+        );
       }
     }
   }
@@ -893,22 +976,55 @@ export async function generateSemData(input: SemGenInput, options: SemGenOptions
       throw new Error(`در قید برازش «${key}»، حداقل نباید از حداکثر بزرگ‌تر باشد.`);
     }
   }
-  const indirectConstraintKeys: string[] = [];
+  const indirectConstraintUnits: IndirectConstraintUnit[] = [];
   for (const exogenous of exogVars) {
     for (const outcome of outVars) {
-      const mediators = medVars.filter(
+      const mediatorVariables = medVars.filter(
         (mediator) =>
           activeArrows.some((arrow) => arrow.fromVar === exogenous.id && arrow.toVar === mediator.id) &&
           activeArrows.some((arrow) => arrow.fromVar === mediator.id && arrow.toVar === outcome.id)
       );
-      mediators.forEach((mediator) => indirectConstraintKeys.push(`${exogenous.id}:${mediator.id}:${outcome.id}`));
-      if (mediators.length > 1) indirectConstraintKeys.push(`${exogenous.id}:${outcome.id}`);
+      if (!mediatorVariables.length) continue;
+      const fromUnits = indirectUnitsOfVar(nodes, exogenous.id);
+      const toUnits = indirectUnitsOfVar(nodes, outcome.id);
+      const viaUnits = mediatorVariables.flatMap((mediator) => indirectUnitsOfVar(nodes, mediator.id));
+      for (const from of fromUnits) {
+        for (const to of toUnits) {
+          for (const via of viaUnits) {
+            indirectConstraintUnits.push({
+              key: indirectUnitKey(from.label, via.label, to.label),
+              legacyKey: `${from.varId}:${via.varId}:${to.varId}`,
+              fromVar: from.varId,
+              viaVar: via.varId,
+              toVar: to.varId,
+              fromNode: from.nodeId,
+              viaNode: via.nodeId,
+              toNode: to.nodeId,
+              label: `${from.label} ← ${via.label} ← ${to.label}`,
+            });
+          }
+          if (viaUnits.length > 1) {
+            indirectConstraintUnits.push({
+              key: indirectUnitKey(from.label, null, to.label),
+              legacyKey: `${from.varId}:${to.varId}`,
+              fromVar: from.varId,
+              viaVar: null,
+              toVar: to.varId,
+              fromNode: from.nodeId,
+              viaNode: null,
+              toNode: to.nodeId,
+              label: `کل: ${from.label} ← ${to.label} (${viaUnits.map((via) => via.label).join(" + ")})`,
+            });
+          }
+        }
+      }
     }
   }
-  for (const key of indirectConstraintKeys) {
-    const target = resolveIndirectConstraint(constraints.indirectTargets[key]);
+  for (const unit of indirectConstraintUnits) {
+    const stored = constraints.indirectTargets[unit.key] ?? constraints.indirectTargets[unit.legacyKey];
+    const target = resolveIndirectConstraint(stored);
     if (target.min != null && target.max != null && target.min > target.max) {
-      throw new Error(`در قید اثر غیرمستقیم «${key}»، حداقل نباید از حداکثر بزرگ‌تر باشد.`);
+      throw new Error(`در قید اثر غیرمستقیم «${unit.label}»، حداقل نباید از حداکثر بزرگ‌تر باشد.`);
     }
   }
 
@@ -917,7 +1033,7 @@ export async function generateSemData(input: SemGenInput, options: SemGenOptions
   const maxVerifications = Math.max(0, options.maxVerifications ?? 2);
   const screenBoot = Math.max(50, Math.min(constraints.bootSamples || 300, SCREEN_BOOT_CAP));
   const verifyBoot = Math.max(50, Math.min(options.verifyBootSamples ?? constraints.bootSamples ?? 500, VERIFY_BOOT_CAP));
-  const needsIndirect = indirectConstraintKeys.length > 0;
+  const needsIndirect = indirectConstraintUnits.length > 0;
   /**
    * آیا برای سنجشِ قیدِ مسیرها به خطای معیار (هسین عددی) نیاز داریم؟
    * چون پیش‌فرضِ هر مسیر «معنادار باشد» است، با داشتنِ حداقل یک فلش فعال پاسخ
@@ -935,10 +1051,9 @@ export async function generateSemData(input: SemGenInput, options: SemGenOptions
     activeArrows,
     medVars,
     outVars,
-    variables,
     constraints,
     fitTargets,
-    indirectConstraintKeys,
+    indirectConstraintUnits,
   };
 
   type Candidate = {
@@ -965,6 +1080,11 @@ export async function generateSemData(input: SemGenInput, options: SemGenOptions
    */
   let bestFull: Candidate | null = null;
   let best: Candidate | null = null;
+  /** حلقه‌های بازخوردِ مستقل؛ جدا بودنشان مانعِ خنثی‌کردنِ یکدیگر می‌شود. */
+  const arrowScale = new Map<string, number>();
+  const arrowBoost = new Map<string, number>();
+  const arrowTrim = new Map<string, number>();
+  const arrowMediation = new Map<string, number>();
   let verificationsDone = 0;
   let cancelled = false;
   let attemptsUsed = 0;
@@ -1040,6 +1160,19 @@ export async function generateSemData(input: SemGenInput, options: SemGenOptions
         if (t.dir === "neg") val = -Math.abs(val);
         else if (t.dir === "pos") val = Math.abs(val);
       }
+      const sign = val < 0 ? -1 : 1;
+      const observedScale = Math.max(0.35, Math.min(2.5, arrowScale.get(a.id) ?? 1));
+      const significanceBoost = arrowBoost.get(a.id) ?? 1;
+      const mediationBoost = arrowMediation.get(a.id) ?? 1;
+      // ابتدا تقویت‌های معناداری/میانجی در سقفِ بالشتک‌دار مهار می‌شوند؛ سپس
+      // اصلاح‌گرِ بازه اعمال می‌شود. این ترتیب نمی‌گذارد یک تقویت، سقف β را بشکند.
+      const cushionedMax = t.betaMax == null ? Number.POSITIVE_INFINITY : (Math.abs(t.betaMax) * 1.08) / observedScale;
+      const boostedMagnitude = Math.min(
+        (Math.abs(val) * significanceBoost * mediationBoost) / observedScale,
+        cushionedMax
+      );
+      const rangeTrim = arrowTrim.get(a.id) ?? 1;
+      val = sign * boostedMagnitude * rangeTrim;
       arrowTarget.set(a.id, val);
     }
 
@@ -1326,12 +1459,76 @@ export async function generateSemData(input: SemGenInput, options: SemGenOptions
     );
     const cheapOk = preChecks.filter((check) => check.group !== "اثر غیرمستقیم").every((check) => check.status === "pass");
 
+    // نسبتِ β برآوردشده به ضریبِ خام برای هر فلش جداست؛ یک مقیاسِ مشترک، فلش‌های
+    // دارای خطای اندازه‌گیری متفاوت را بیش‌/کم‌تصحیح می‌کند.
+    for (const path of sem.paths) {
+      const arrow = activeArrows.find((item) => item.fromNode === path.from && item.toNode === path.to);
+      if (!arrow) continue;
+      const raw = Math.abs(arrowTarget.get(arrow.id) ?? 0);
+      if (raw > 1e-6 && Number.isFinite(path.std)) {
+        const ratio = Math.max(0.35, Math.min(2.5, Math.abs(path.std) / raw));
+        const oldScale = arrowScale.get(arrow.id) ?? ratio;
+        arrowScale.set(arrow.id, 0.7 * oldScale + 0.3 * ratio);
+      }
+      const target = resolvePathTargetForArrow(constraints, nodes, arrow);
+      let trim = arrowTrim.get(arrow.id) ?? 1;
+      if (target.betaMax != null && Math.abs(path.std) > target.betaMax + MARGIN_EPS) trim *= 0.9;
+      else if (target.betaMin != null && Math.abs(path.std) < target.betaMin - MARGIN_EPS) trim *= 1.08;
+      arrowTrim.set(arrow.id, Math.max(0.35, Math.min(1.8, trim)));
+    }
+
+    // تقویتِ آرامِ مسیرهای تشکیل‌دهندهٔ اثری که زیرِ کفِ غیرمستقیم مانده است.
+    // این کنترل‌کننده هرگز کاهش نمی‌یابد؛ کاهشِ آن در نسخهٔ قبل پیشرفت را خنثی می‌کرد.
+    const mediationArrows = new Set<string>();
+    for (const unit of indirectConstraintUnits) {
+      const target = resolveIndirectConstraint(
+        constraints.indirectTargets[unit.key] ?? constraints.indirectTargets[unit.legacyKey]
+      );
+      if (target.min == null) continue;
+      const point = mlIndirectPoint(
+        nodes,
+        sem,
+        unit.fromVar,
+        unit.toVar,
+        unit.viaVar,
+        medVars.map((variable) => variable.id),
+        unit.fromNode,
+        unit.viaNode,
+        unit.toNode
+      );
+      if (Math.abs(point) + MARGIN_EPS >= target.min) continue;
+      for (const arrow of activeArrows) {
+        const isFirst =
+          arrow.fromVar === unit.fromVar &&
+          (unit.viaVar == null ? medVars.some((variable) => variable.id === arrow.toVar) : arrow.toVar === unit.viaVar) &&
+          (unit.fromNode == null || arrow.fromNode === unit.fromNode) &&
+          (unit.viaNode == null || arrow.toNode === unit.viaNode);
+        const isSecond =
+          (unit.viaVar == null ? medVars.some((variable) => variable.id === arrow.fromVar) : arrow.fromVar === unit.viaVar) &&
+          arrow.toVar === unit.toVar &&
+          (unit.viaNode == null || arrow.fromNode === unit.viaNode) &&
+          (unit.toNode == null || arrow.toNode === unit.toNode);
+        if (isFirst || isSecond) mediationArrows.add(arrow.id);
+      }
+    }
+    for (const id of mediationArrows) {
+      arrowMediation.set(id, Math.min(1.5, (arrowMediation.get(id) ?? 1) * 1.05));
+    }
+
     if (cheapOk) {
       // مرحلهٔ دوم: برازشِ کامل با خطای معیار (حدود ۳۳۷ms) تا قیدِ معناداریِ مسیرها هم سنجیده شود.
       // فقط نامزدهایی که از غربالِ ارزان رد شده‌اند این هزینه را می‌پردازند.
       const semFull = needsPathChecks
         ? estimateSem(nodes, arrows, nodeCols, measurementCols, "ml", { standardErrors: true })
         : sem;
+      for (const path of semFull.paths) {
+        const arrow = activeArrows.find((item) => item.fromNode === path.from && item.toNode === path.to);
+        if (!arrow) continue;
+        let boost = arrowBoost.get(arrow.id) ?? 1;
+        if (path.p > 0.04) boost = Math.min(2.5, boost * 1.12);
+        else if (path.p < 0.008) boost = 1 + (boost - 1) * 0.92;
+        arrowBoost.set(arrow.id, Math.max(1, boost));
+      }
       // برخی تلاش‌ها فقط به‌خاطر قید اثر غیرمستقیم مردودند؛ آن‌ها را با بوت‌استرپ سریع غربال می‌کنیم
       emit(attemptsUsed, "bootstrap", null, "اثر غیرمستقیم با بوت‌استرپ سریع غربال می‌شود.");
       await yieldToEventLoop();

@@ -79,6 +79,7 @@ import {
   type VariableSpec,
 } from "@/lib/sem-generator";
 import { summarizeMlIndirect, type MlIndirectBootstrapSamples } from "@/lib/sem-ml";
+import { buildSemRegressionDiagnostics } from "@/lib/sem-diagnostics";
 import {
   alphaColumnName,
   alphaScaleForVariable,
@@ -1145,6 +1146,7 @@ function buildReportText(
   }
   const { sem, corr, corrAll, corrSubscales, maha, mardia, missing, normals, meas } = analysis;
   const nodeLabel = (id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`;
+  const regressionDiagnostics = buildSemRegressionDiagnostics(nodes, sem);
   L.push(`تعداد موارد: ${n} | تعداد متغیرها/زیرمقیاس‌ها: ${nodes.length}`);
   L.push("");
   L.push("دامنه نمره متغیرها:");
@@ -1205,15 +1207,21 @@ function buildReportText(
   L.push("  پیش‌فرض تولید: همهٔ جفت‌های پیش‌بینِ برون‌زا در سطح ۰٫۰۵ معنادار و VIF ماتریس حداکثر ۴ باشد.");
   L.push("  ** p < 0.01 ، * p < 0.05 (دوطرفه؛ حذف زوجی داده‌های گمشده)");
   L.push("");
-  L.push("۶) هم‌خطی و استقلال خطاها:");
-  nodes.forEach((nd) => {
-    if (nd.role === "exogenous") return;
-    const vifs = sem.vifs[nd.nodeId] ?? [];
-    const dw = sem.dw[nd.nodeId];
-    if (vifs.length) {
-      L.push(`  ${nd.label}: VIF=${vifs.map((x) => fmt(x)).join("، ")} | دوربین-واتسون=${Number.isFinite(dw as number) ? fmt(dw as number) : "-"}`);
-    }
+  L.push("۶) عدم هم‌خطی چندگانه و استقلال خطاها:");
+  L.push("۶-۱) عدم هم‌خطی چندگانه (هر پیش‌بین در یک ردیف):");
+  regressionDiagnostics.collinearity.forEach((row) => {
+    L.push(
+      `  وابسته: ${row.dependentLabel} | پیش‌بین: ${row.predictorLabel} | تلورانس=${fmt(row.tolerance)} | VIF=${fmt(row.vif)} | ${row.pass ? "برقرار" : "برقرار نیست"}`
+    );
   });
+  L.push("  معیار: VIF < ۵ و تلورانس > ۰٫۲۰.");
+  L.push("۶-۲) استقلال خطاها:");
+  regressionDiagnostics.independence.forEach((row) => {
+    L.push(
+      `  ${row.dependentLabel}: دوربین-واتسون=${Number.isFinite(row.durbinWatson) ? fmt(row.durbinWatson) : "تعریف‌نشده"} | ${row.pass ? "برقرار" : "برقرار نیست"}`
+    );
+  });
+  L.push("  معیار: دوربین-واتسون بین ۱٫۵ تا ۲٫۵.");
   L.push("");
   L.push("۷) ضرایب مسیر:");
   sem.paths.forEach((pr) => {
@@ -1382,6 +1390,7 @@ function buildDocxReport(
 
   const { sem, corr, corrAll, corrSubscales, maha, mardia, missing, normals, meas } = analysis;
   const nodeLabel = (id: number) => nodes.find((x) => x.nodeId === id)?.label ?? `گره ${id}`;
+  const regressionDiagnostics = buildSemRegressionDiagnostics(nodes, sem);
 
   // ۱) داده‌های گمشده
   children.push(docH("۱) داده‌های گمشده"));
@@ -1466,18 +1475,30 @@ function buildDocxReport(
   children.push(docP("پیش‌فرض تولید: همهٔ جفت‌های پیش‌بینِ برون‌زا در سطح ۰٫۰۵ معنادار و VIF ماتریس حداکثر ۴ باشد.", { size: 20, color: "666666" }));
   children.push(docP("** p < 0.01 ، * p < 0.05 (دوطرفه؛ حذف زوجی داده‌های گمشده)", { size: 20, color: "666666" }));
 
-  // ۶) VIF / DW
+  // ۶) VIF / Tolerance و DW — دو جدول مستقل برای جلوگیری از ادغام چند مقدار در یک سلول
   children.push(docH("۶) عدم هم‌خطی چندگانه و استقلال خطاها"));
-  const vifRows: (string | number)[][] = [];
-  nodes.forEach((nd) => {
-    if (nd.role === "exogenous") return;
-    const vifs = sem.vifs[nd.nodeId] ?? [];
-    const dw = sem.dw[nd.nodeId];
-    if (vifs.length) {
-      vifRows.push([nd.label, vifs.map((x) => fmt(x)).join("، "), vifs.map((x) => fmt(1 / x)).join("، "), Number.isFinite(dw as number) ? fmt(dw as number) : "-"]);
-    }
-  });
-  children.push(docTable(["گره وابسته", "VIF", "تلورانس", "دوربین-واتسون"], vifRows));
+  children.push(docH("۶-۱) عدم هم‌خطی چندگانه"));
+  children.push(docTable(
+    ["متغیر وابسته", "پیش‌بین", "تلورانس", "VIF", "نتیجه"],
+    regressionDiagnostics.collinearity.map((row) => [
+      row.dependentLabel,
+      row.predictorLabel,
+      fmt(row.tolerance),
+      fmt(row.vif),
+      row.pass ? "برقرار" : "برقرار نیست",
+    ])
+  ));
+  children.push(docP("معیار: VIF کمتر از ۵ و تلورانس بیشتر از ۰٫۲۰ باشد (تلورانس = ۱/VIF).", { size: 20, color: "666666" }));
+  children.push(docH("۶-۲) استقلال خطاها"));
+  children.push(docTable(
+    ["متغیر وابسته", "دوربین-واتسون", "دامنهٔ قابل قبول", "نتیجه"],
+    regressionDiagnostics.independence.map((row) => [
+      row.dependentLabel,
+      Number.isFinite(row.durbinWatson) ? fmt(row.durbinWatson) : "تعریف‌نشده",
+      "۱٫۵ تا ۲٫۵",
+      row.pass ? "برقرار" : "برقرار نیست",
+    ])
+  ));
 
   // ۷) ضرایب مسیر
   children.push(docH("۷) ضرایب مسیر"));
@@ -1699,6 +1720,9 @@ function SemTool() {
     !!analysis &&
     analysis.nodeIds.length === modelNodes.length &&
     analysis.nodeIds.every((id, i) => id === modelNodes[i].nodeId);
+  const regressionDiagnostics = analysisValid && analysis
+    ? buildSemRegressionDiagnostics(modelNodes, analysis.sem)
+    : null;
 
   const inputsChangedSinceAnalysis = useMemo(() => {
     if (!analysisValid) return false;
@@ -4826,44 +4850,85 @@ function SemTool() {
 
                 <div>
                   <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۶) عدم هم‌خطی چندگانه و استقلال خطاها</h3>
-                  <p className={tinyCls}>معیار: VIF کمتر از ۵ و دوربین-واتسون بین ۱/۵ تا ۲/۵ (تلورانس = 1/VIF).</p>
-                  <div className="tool-table-wrap mt-2">
-                    <table className="tool-table">
-                      <thead>
-                        <tr><th>متغیر وابسته</th><th>پیش‌بین‌ها</th><th>VIF</th><th>تلورانس</th><th>دوربین-واتسون</th><th>نتیجه</th></tr>
-                      </thead>
-                      <tbody>
-                        {modelNodes.map((nd) => {
-                          if (nd.role === "exogenous") return null;
-                          const vifs = analysis.sem.vifs[nd.nodeId] ?? [];
-                          const dw = analysis.sem.dw[nd.nodeId] ?? NaN;
-                          const preds = modelArrows.filter((a) => a.active && a.toNode === nd.nodeId).map((a) => nodeLabel(a.fromNode));
-                          const vifOk = vifs.every((x) => x < 5);
-                          const dwOk = !Number.isFinite(dw) || (dw >= 1.5 && dw <= 2.5);
-                          return (
-                            <tr key={nd.nodeId}>
-                              <td style={{ fontWeight: 900 }}>{nd.label}</td>
-                              <td>{preds.length ? preds.join("، ") : "—"}</td>
-                              <td className="number-cell">{vifs.length ? vifs.map((x) => fmt(x)).join("، ") : "—"}</td>
-                              <td className="number-cell">{vifs.length ? vifs.map((x) => fmt(1 / x)).join("، ") : "—"}</td>
-                              <td className="number-cell">{Number.isFinite(dw) ? fmt(dw) : "—"}</td>
-                              <td dangerouslySetInnerHTML={{ __html: vifOk && dwOk ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
+                  <p className={tinyCls}>
+                    برای خوانایی و انطباق با خروجی Coefficients در SPSS، شاخص‌های هم‌خطی برای هر پیش‌بین در یک ردیف و
+                    آمارهٔ دوربین–واتسون در جدول مستقلِ هر معادلهٔ وابسته نمایش داده می‌شود.
+                  </p>
+
+                  <div className="mt-4 space-y-5">
+                    <div>
+                      <h4 className="text-[13px] font-extrabold text-stone-700 dark:text-stone-300">۶-۱) عدم هم‌خطی چندگانه</h4>
+                      <p className={tinyCls}>معیار: تلورانس بیشتر از ۰/۲۰ و VIF کمتر از ۵ باشد (تلورانس = ۱/VIF).</p>
+                      <div className="tool-table-wrap mt-2">
+                        <table className="tool-table" style={{ minWidth: 760 }}>
+                          <thead>
+                            <tr>
+                              <th rowSpan={2}>متغیر وابسته</th>
+                              <th rowSpan={2}>پیش‌بین</th>
+                              <th colSpan={2}>عدم هم‌خطی چندگانه</th>
+                              <th rowSpan={2}>نتیجه</th>
                             </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                            <tr><th>تلورانس</th><th>VIF</th></tr>
+                          </thead>
+                          <tbody>
+                            {regressionDiagnostics?.collinearity.map((row, index, list) => {
+                              const firstOfModel = index === 0 || list[index - 1].dependentNodeId !== row.dependentNodeId;
+                              const rowSpan = firstOfModel
+                                ? list.filter((candidate) => candidate.dependentNodeId === row.dependentNodeId).length
+                                : 0;
+                              return (
+                                <tr key={`${row.dependentNodeId}-${row.predictorNodeId}`}>
+                                  {firstOfModel && (
+                                    <td rowSpan={rowSpan} className="align-middle" style={{ fontWeight: 900 }}>
+                                      {row.dependentLabel}
+                                    </td>
+                                  )}
+                                  <td>{row.predictorLabel}</td>
+                                  <td className="number-cell">{Number.isFinite(row.tolerance) ? fmt(row.tolerance) : "—"}</td>
+                                  <td className="number-cell">{Number.isFinite(row.vif) ? fmt(row.vif) : "—"}</td>
+                                  <td dangerouslySetInnerHTML={{ __html: row.pass ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
+                                </tr>
+                              );
+                            })}
+                            {!regressionDiagnostics?.collinearity.length && (
+                              <tr><td colSpan={5} className="text-center text-stone-400">معادله‌ای با پیش‌بین فعال وجود ندارد.</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                      <AssumptionNote
+                        condition="تلورانس همهٔ پیش‌بین‌ها بیشتر از ۰/۲۰ و VIF آن‌ها کمتر از ۵ باشد"
+                        pass={regressionDiagnostics?.collinearityPass ?? false}
+                      />
+                    </div>
+
+                    <div>
+                      <h4 className="text-[13px] font-extrabold text-stone-700 dark:text-stone-300">۶-۲) استقلال خطاها</h4>
+                      <p className={tinyCls}>معیار: آمارهٔ دوربین–واتسون برای هر متغیر وابسته بین ۱/۵ تا ۲/۵ باشد.</p>
+                      <div className="tool-table-wrap mt-2">
+                        <table className="tool-table" style={{ minWidth: 620 }}>
+                          <thead><tr><th>متغیر وابسته</th><th>دوربین–واتسون</th><th>دامنهٔ قابل قبول</th><th>نتیجه</th></tr></thead>
+                          <tbody>
+                            {regressionDiagnostics?.independence.map((row) => (
+                              <tr key={row.dependentNodeId}>
+                                <td style={{ fontWeight: 900 }}>{row.dependentLabel}</td>
+                                <td className="number-cell">{Number.isFinite(row.durbinWatson) ? fmt(row.durbinWatson) : "—"}</td>
+                                <td className="number-cell">۱/۵ تا ۲/۵</td>
+                                <td dangerouslySetInnerHTML={{ __html: row.pass ? badge(true, "برقرار") : badge(false, "برقرار نیست") }} />
+                              </tr>
+                            ))}
+                            {!regressionDiagnostics?.independence.length && (
+                              <tr><td colSpan={4} className="text-center text-stone-400">معادله‌ای با پیش‌بین فعال وجود ندارد.</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                      <AssumptionNote
+                        condition="دوربین–واتسون همهٔ معادله‌های وابسته بین ۱/۵ تا ۲/۵ باشد"
+                        pass={regressionDiagnostics?.independencePass ?? false}
+                      />
+                    </div>
                   </div>
-                  <AssumptionNote
-                    condition="VIF همه پیش‌بین‌ها کمتر از ۵ و دوربین-واتسون بین ۱/۵ تا ۲/۵ باشد"
-                    pass={modelNodes
-                      .filter((nd) => nd.role !== "exogenous")
-                      .every((nd) => {
-                        const vifs = analysis.sem.vifs[nd.nodeId] ?? [];
-                        const dw = analysis.sem.dw[nd.nodeId] ?? NaN;
-                        return vifs.every((x) => x < 5) && (!Number.isFinite(dw) || (dw >= 1.5 && dw <= 2.5));
-                      })}
-                  />
                 </div>
               </div>
             )}

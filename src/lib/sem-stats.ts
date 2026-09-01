@@ -750,7 +750,11 @@ export function estimateSem(
     psi[pos.get(id)!] = o.ssr / o.n;
     r2[id] = o.r2;
     dw[id] = o.dw;
-    vifs[id] = vifForPredictors(X);
+    // مانند SPSS، VIF و Tolerance باید دقیقاً روی همان مواردِ کاملِ معادلهٔ وابسته
+    // محاسبه شوند؛ حذفِ موردیِ جداگانه برای هر رگرسیون کمکی می‌تواند با وجود missing
+    // مقدار VIF را اندکی متفاوت کند.
+    const completePredictors = X.map((column) => completeIndices.map((index) => column[index]));
+    vifs[id] = vifForPredictors(completePredictors);
   }
 
   const exogNodes = ordered.filter((id) => nodes.find((n) => n.nodeId === id)!.role === "exogenous");

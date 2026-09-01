@@ -187,6 +187,9 @@ export function covarianceMatrix(cols: number[][]): number[][] {
 
 // ---------- ماهالانوبیس و مردیا ----------
 
+/** آستانهٔ دوطرفهٔ ۵٪ برای C.R. مردیا که در تفسیر بزرگ‌نمونهٔ AMOS مانند z خوانده می‌شود. */
+export const AMOS_MARDIA_CR_LIMIT = 1.96;
+
 export function mahalanobisDistances(cols: number[][]) {
   const p = cols.length;
   const n = cols[0]?.length ?? 0;
@@ -229,9 +232,22 @@ export function mardiaTest(cols: number[][]) {
   if (!m.valid) return { valid: false, kurtosis: NaN, cr: NaN, message: m.message };
   const p = cols.length;
   const n = m.d2.length;
-  // ضریب کشیدگی مردیا برابر میانگین مربع فاصله‌های ماهالانوبیس است.
-  const b2p = mean(m.d2.map((distance) => distance * distance));
-  const expected = p * (p + 2);
+
+  // سازگاری با AMOS:
+  // فاصله‌های عمومی برنامه از کوواریانس نمونه‌ای با مخرج n-1 به دست می‌آیند، در حالی که
+  // AMOS برای کشیدگی مردیا از فاصله‌های مبتنی بر کوواریانس ML با مخرج n استفاده می‌کند.
+  // بنابراین فقط برای محاسبهٔ مردیا فاصله‌ها در n/(n-1) ضرب می‌شوند؛ جدول عمومی
+  // ماهالانوبیس و p-valueهای آن بدون تغییر باقی می‌مانند.
+  const amosDistanceScale = n / (n - 1);
+  const b2p = mean(
+    m.d2.map((distance) => {
+      const amosDistance = distance * amosDistanceScale;
+      return amosDistance * amosDistance;
+    })
+  );
+
+  // AMOS به‌جای مرکز مجانبی p(p+2)، تصحیح نمونهٔ محدود زیر را به کار می‌برد.
+  const expected = p * (p + 2) * ((n - 1) / (n + 1));
   const excess = b2p - expected;
   const se = Math.sqrt((8 * p * (p + 2)) / n);
   const cr = excess / se;

@@ -41,6 +41,7 @@ import {
   kurtosis,
   mahalanobisDistances,
   mardiaTest,
+  AMOS_MARDIA_CR_LIMIT,
   pcaLoadings,
   skewness,
   correlationMatrixWithP,
@@ -1170,10 +1171,10 @@ function buildReportText(
   L.push("۳) نرمال بودن تک‌متغیری (کلاین: |کجی|<3 و |کشیدگی|<10):");
   normals.forEach((x) => L.push(`  ${x.name}: کجی=${fmt(x.skew)} | CR کجی=${fmt(x.skewCr)} | کشیدگی=${fmt(x.kurt)} | CR کشیدگی=${fmt(x.kurtCr)}`));
   L.push("");
-  L.push("۴) نرمال بودن چندمتغیری (مردیا):");
+  L.push("۴) نرمال بودن چندمتغیری (مردیا، سازگار با AMOS):");
   L.push(
     mardia.valid
-      ? `  ضریب کشیدگی مردیا=${fmt(mardia.kurtosis)} | نسبت بحرانی=${fmt(mardia.cr)} (بلانچ: قدرمطلق کمتر از 5)`
+      ? `  ضریب کشیدگی مردیا=${fmt(mardia.kurtosis)} | نسبت بحرانی=${fmt(mardia.cr)} (محاسبه و معیار AMOS: |CR| ≤ ${AMOS_MARDIA_CR_LIMIT})`
       : `  ${mardia.message}`
   );
   L.push("");
@@ -1430,11 +1431,14 @@ function buildDocxReport(
   children.push(docP("معیار کلاین (۲۰۲۳): قدرمطلق کجی < ۳ و قدرمطلق کشیدگی < ۱۰.", { size: 20, color: "666666" }));
 
   // ۴) مردیا
-  children.push(docH("۴) نرمال بودن چندمتغیری (مردیا)"));
+  children.push(docH("۴) نرمال بودن چندمتغیری (مردیا، سازگار با AMOS)"));
   children.push(
     mardia.valid
-      ? docP(`ضریب کشیدگی مردیا: ${faNum(fmt(mardia.kurtosis))} | نسبت بحرانی: ${faNum(fmt(mardia.cr))} — ${Math.abs(mardia.cr) < 5 ? "نرمال چندمتغیره برقرار است" : "تخطی از نرمال چندمتغیری"}`)
+      ? docP(`ضریب کشیدگی مردیا: ${faNum(fmt(mardia.kurtosis))} | نسبت بحرانی: ${faNum(fmt(mardia.cr))} — ${Math.abs(mardia.cr) <= AMOS_MARDIA_CR_LIMIT ? "نرمال چندمتغیره برقرار است" : "تخطی از نرمال چندمتغیری"}`)
       : docP(mardia.message)
+  );
+  children.push(
+    docP(`روش محاسبه: نرمال‌سازی فاصله‌ها با n/(n−1) و مرکز نمونهٔ محدود p(p+2)(n−1)/(n+1)، همسان با AMOS؛ معیار بزرگ‌نمونه |CR| ≤ ${AMOS_MARDIA_CR_LIMIT}.`, { size: 20, color: "666666" })
   );
 
   // ۵) همبستگی
@@ -4762,8 +4766,10 @@ function SemTool() {
                 </div>
 
                 <div>
-                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۴) نرمال بودن چندمتغیری (ضریب مردیا)</h3>
-                  <p className={tinyCls}>بر اساس بلانچ (۲۰۱۲): نسبت بحرانی ضریب کشیدگی استانداردشده مردیا کمتر از ۵.</p>
+                  <h3 className="font-extrabold text-stone-800 dark:text-stone-200">۴) نرمال بودن چندمتغیری (ضریب مردیا، سازگار با AMOS)</h3>
+                  <p className={tinyCls}>
+                    محاسبه با نرمال‌سازی فاصله‌ها در n/(n−1) و مرکز نمونهٔ محدود p(p+2)(n−1)/(n+1)، همسان با AMOS؛ C.R. در تفسیر بزرگ‌نمونه مانند z است و |CR| ≤ {AMOS_MARDIA_CR_LIMIT} قابل قبول است.
+                  </p>
                   {analysis.mardia.valid ? (
                     <div className="tool-table-wrap mt-2">
                       <table className="tool-table">
@@ -4774,7 +4780,7 @@ function SemTool() {
                           <tr>
                             <td className="number-cell">{fmt(analysis.mardia.kurtosis)}</td>
                             <td className="number-cell">{fmt(analysis.mardia.cr)}</td>
-                            <td dangerouslySetInnerHTML={{ __html: Math.abs(analysis.mardia.cr) < 5 ? badge(true, "نرمال چندمتغیره") : badge(false, "تخطی") }} />
+                            <td dangerouslySetInnerHTML={{ __html: Math.abs(analysis.mardia.cr) <= AMOS_MARDIA_CR_LIMIT ? badge(true, "نرمال چندمتغیره") : badge(false, "تخطی") }} />
                           </tr>
                         </tbody>
                       </table>
@@ -4783,8 +4789,8 @@ function SemTool() {
                     <p className={`${tinyCls} mt-2 text-red-600`}>{analysis.mardia.message}</p>
                   )}
                   <AssumptionNote
-                    condition="نسبت بحرانی ضریب کشیدگی مردیا کمتر از ۵ باشد"
-                    pass={analysis.mardia.valid && Math.abs(analysis.mardia.cr) < 5}
+                    condition={`بر اساس تفسیر بزرگ‌نمونهٔ AMOS، قدرمطلق C.R. حداکثر ${AMOS_MARDIA_CR_LIMIT} باشد`}
+                    pass={analysis.mardia.valid && Math.abs(analysis.mardia.cr) <= AMOS_MARDIA_CR_LIMIT}
                   />
                 </div>
 

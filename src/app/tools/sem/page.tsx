@@ -73,7 +73,6 @@ import {
   nodePathKey,
   indirectUnitsOfVar,
   indirectUnitKey,
-  type SemAnswerKey,
   type SemConstraintReport,
   type SemGenProgress,
   type SemGenOutput,
@@ -98,7 +97,7 @@ import ErrorBoundary from "@/components/error-boundary";
 import HelpButtons from "@/components/help-buttons";
 import AmosCovarianceGuide from "@/components/amos-covariance-guide";
 import MarkdownReport from "@/components/markdown-report";
-import PathDiagram from "@/components/path-diagram";
+import PathDiagram, { type DiagramPositions } from "@/components/path-diagram";
 import ProgressStepper, { type StepStatus } from "@/components/progress-stepper";
 import ResultModal from "@/components/result-modal";
 import ToolHeader from "@/components/tool-header";
@@ -581,6 +580,8 @@ type ProjectData = {
   columns: string[];
   rows: (number | null)[][];
   colMap: Record<number, (number | null)[]>;
+  /** چیدمان دستیِ اختیاری دیاگرام؛ پروژه‌های قدیمی بدون آن از چیدمان خودکار استفاده می‌کنند. */
+  diagramPositions?: DiagramPositions;
   alpha?: AlphaProjectData;
 };
 
@@ -953,6 +954,7 @@ function defaultProjectData(vars: VariableSpec[] = initialVars): ProjectData {
     columns: [],
     rows: [],
     colMap: {},
+    diagramPositions: {},
     alpha: defaultAlphaProjectData(vars),
   };
 }
@@ -1135,7 +1137,6 @@ function buildReportText(
   vars: VariableSpec[],
   nodes: ModelNode[],
   analysis: Analysis | null,
-  answerKey: SemAnswerKey | null,
   bootResults: BootResult[] | null,
   n: number,
   alphaReportTextRef?: string
@@ -1283,13 +1284,6 @@ function buildReportText(
     });
     L.push("  معیار پذیرش آلفای کرونباخ ≥ 0.70");
   }
-  if (answerKey) {
-    L.push("");
-    L.push("۱۲) کلید پاسخ (مقادیر هدف در برابر مقادیر واقعی):");
-    answerKey.pathTargets.forEach((pt) => {
-      L.push(`  ${nodeLabel(pt.fromNode)} ← ${nodeLabel(pt.toNode)}: هدف=${fmt(pt.target)} | واقعی=${fmt(pt.actual)}`);
-    });
-  }
   if (alphaReportTextRef) {
     L.push("");
     L.push(alphaReportTextRef);
@@ -1354,7 +1348,6 @@ function buildReportMarkdown(
   vars: VariableSpec[],
   nodes: ModelNode[],
   analysis: Analysis | null,
-  answerKey: SemAnswerKey | null,
   bootResults: BootResult[] | null,
   n: number,
   alphaReportTextRef?: string
@@ -1609,22 +1602,6 @@ function buildReportMarkdown(
     );
   }
 
-  if (answerKey) {
-    push(
-      "",
-      "## ۱۲. کلید پاسخ دادهٔ تمرینی",
-      "",
-      markdownTable(
-        ["مسیر", "مقدار هدف", "مقدار واقعی"],
-        answerKey.pathTargets.map((target) => [
-          `${nodeLabel(target.fromNode)} → ${nodeLabel(target.toNode)}`,
-          fmt(target.target),
-          fmt(target.actual),
-        ])
-      )
-    );
-  }
-
   if (alphaReportTextRef) {
     push("", "## پیوست پایایی گویه‌ها", "", "~~~text", alphaReportTextRef.replace(/~~~/g, "~ ~ ~"), "~~~");
   }
@@ -1719,7 +1696,6 @@ function buildDocxReport(
   vars: VariableSpec[],
   nodes: ModelNode[],
   analysis: Analysis | null,
-  answerKey: SemAnswerKey | null,
   bootResults: BootResult[] | null,
   n: number,
   source: "generate" | "real"
@@ -1961,22 +1937,6 @@ function buildDocxReport(
     children.push(docP("معیار پذیرش آلفای کرونباخ ≥ 0.70", { size: 20, color: "666666" }));
   }
 
-  // ۱۲) کلید پاسخ
-  if (answerKey) {
-    children.push(docH("۱۲) کلید پاسخ (مخصوص استاد)"));
-    children.push(
-      docTable(
-        ["مسیر", "ضریب هدف (β)", "ضریب واقعی (β)", "وضعیت"],
-        answerKey.pathTargets.map((pt) => [
-          `${nodeLabel(pt.fromNode)} ← ${nodeLabel(pt.toNode)}`,
-          fmt(pt.target),
-          fmt(pt.actual),
-          Math.abs(pt.actual - pt.target) < 0.15 ? "نزدیک به هدف" : "فاصله دارد",
-        ])
-      )
-    );
-  }
-
   return new Document({ sections: [{ children }] });
 }
 
@@ -2001,7 +1961,6 @@ function SemTool() {
   const [rows, setRows] = useState<(number | null)[][]>([]);
   const [colMap, setColMap] = useState<Record<number, (number | null)[]>>({});
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
-  const [answerKey, setAnswerKey] = useState<SemAnswerKey | null>(null);
   const [bootResults, setBootResults] = useState<BootResult[] | null>(null);
   const [bootBusy, setBootBusy] = useState(false);
   /** پیشرفتِ زندهٔ بوت‌استرپ: تعداد نمونه‌های انجام‌شده از کل */
@@ -2016,6 +1975,8 @@ function SemTool() {
   /** کوواریانس‌های برون‌زا جزو مدل‌اند؛ این state فقط نمایششان را در دیاگرام کنترل می‌کند. */
   const [showExogenousCovariances, setShowExogenousCovariances] = useState(true);
   const [showAmosCovarianceGuide, setShowAmosCovarianceGuide] = useState(false);
+  const [diagramEditMode, setDiagramEditMode] = useState(false);
+  const [diagramPositions, setDiagramPositions] = useState<DiagramPositions>({});
   const [activeStep, setActiveStep] = useState(0);
   const [completed, setCompleted] = useState<Record<string, boolean>>({});
   const initialAlpha = defaultAlphaProjectData(initialVars);
@@ -2268,6 +2229,8 @@ function SemTool() {
     setColumns(data.columns ?? []);
     setRows(data.rows ?? []);
     setColMap(data.colMap ?? {});
+    setDiagramPositions(data.diagramPositions ?? {});
+    setDiagramEditMode(false);
     lastAlphaSemSourceRef.current = JSON.stringify({
       source: data.source,
       vars: data.vars,
@@ -2289,7 +2252,6 @@ function SemTool() {
     setAlphaRealResult(alpha.realResult ?? null);
     setAlphaStatus({ text: "", kind: "" });
     setAnalysis(null);
-    setAnswerKey(null);
     setBootResults(null);
   }, []);
 
@@ -2325,6 +2287,7 @@ function SemTool() {
                   columns,
                   rows,
                   colMap,
+                  diagramPositions,
                   alpha: {
                     wantAlpha,
                     tab: alphaTab,
@@ -2358,6 +2321,7 @@ function SemTool() {
     columns,
     rows,
     colMap,
+    diagramPositions,
     wantAlpha,
     alphaScales,
     alphaMin,
@@ -2505,7 +2469,6 @@ function SemTool() {
     });
     setInactiveArrowIds(new Set());
     setAnalysis(null);
-    setAnswerKey(null);
     setBootResults(null);
   };
 
@@ -3012,7 +2975,6 @@ function SemTool() {
       setColumns(out.columns);
       setRows(out.rows);
       setColMap(autoMap(out.columns, vars));
-      setAnswerKey(out.answerKey);
       setGenAttempts(out.attempts);
       setGenReport(out.report);
       setGenCancelled(out.cancelled);
@@ -3124,8 +3086,7 @@ function SemTool() {
       setRows(parsed);
       setColMap(autoMap(headers, vars));
       setAnalysis(null);
-      setAnswerKey(null);
-      setBootResults(null);
+        setBootResults(null);
       setStatus({
         text: `داده واقعی وارد شد: ${parsed.length} مورد × ${headers.length} ستون. نگاشت ستون‌ها را بررسی و سپس «اجرای تحلیل» را بزنید.`,
         kind: "ok",
@@ -3187,7 +3148,7 @@ function SemTool() {
       XLSX.utils.book_append_sheet(
         wb,
         XLSX.utils.aoa_to_sheet(
-          buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length, alphaReportText())
+          buildReportText(vars, modelNodes, analysis, bootResults, rows.length, alphaReportText())
             .split("\n")
             .map((l) => [l])
         ),
@@ -3246,7 +3207,6 @@ function SemTool() {
         vars,
         modelNodes,
         analysis,
-        answerKey,
         bootResults,
         rows.length,
         source
@@ -3266,7 +3226,7 @@ function SemTool() {
 
   const exportTxt = () => {
     try {
-      const text = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length, alphaReportText());
+      const text = buildReportText(vars, modelNodes, analysis, bootResults, rows.length, alphaReportText());
       const blob = new Blob(["\uFEFF" + text], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -3286,7 +3246,6 @@ function SemTool() {
     vars,
     modelNodes,
     analysis,
-    answerKey,
     bootResults,
     rows.length,
     alphaReportText()
@@ -4209,7 +4168,7 @@ function SemTool() {
               <div>
                 <h2 className="text-lg font-extrabold text-stone-900 dark:text-stone-100">ترسیم مدل</h2>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                  هر فلش در یک خط جداگانه قابل فعال/غیرفعال کردن است. غیرفعال‌کردن فلش = صفر فرض‌شدن آن مسیر.
+                  مسیر مستقیم از چپ به راست روی محور میانی است؛ یک میانجی بالا و دو میانجی بالا/پایین قرار می‌گیرند. در صورت نیاز چیدمان را دستی جابه‌جا کنید.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -4240,7 +4199,19 @@ function SemTool() {
               <span className="text-[11px] text-violet-700 dark:text-violet-300">فقط نمایش را عوض می‌کند؛ برآورد این روابط همیشه فعال است.</span>
               <button
                 type="button"
-                className={`${btnLight} ms-auto !border-violet-200 !bg-white !text-violet-700 dark:!border-violet-800 dark:!bg-slate-900 dark:!text-violet-300`}
+                className={`${diagramEditMode ? btnPrimary : btnLight} ms-auto`}
+                onClick={() => setDiagramEditMode((editing) => !editing)}
+              >
+                {diagramEditMode ? "پایان ویرایش چیدمان" : "ویرایش دستی چیدمان"}
+              </button>
+              {Object.keys(diagramPositions).length > 0 && (
+                <button type="button" className={btnLight} onClick={() => setDiagramPositions({})}>
+                  بازگشت به چیدمان خودکار
+                </button>
+              )}
+              <button
+                type="button"
+                className={`${btnLight} !border-violet-200 !bg-white !text-violet-700 dark:!border-violet-800 dark:!bg-slate-900 dark:!text-violet-300`}
                 onClick={() => setShowAmosCovarianceGuide((visible) => !visible)}
                 aria-expanded={showAmosCovarianceGuide}
               >
@@ -4292,7 +4263,15 @@ function SemTool() {
               <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
                 <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">پیش‌نمایش مدل</p>
                 <div className="mt-2">
-                  <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} showCovariances={showExogenousCovariances} />
+                  <PathDiagram
+                    vars={modelVars}
+                    nodes={modelNodes}
+                    arrows={modelArrows}
+                    showCovariances={showExogenousCovariances}
+                    editable={diagramEditMode}
+                    positions={diagramPositions}
+                    onPositionsChange={setDiagramPositions}
+                  />
                 </div>
               </div>
             </div>
@@ -5420,7 +5399,7 @@ function SemTool() {
               <HelpButtons section="diagram" />
             </div>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                  نمایش گرافیکی مدل با ضرایب مسیر (β) و R² گره‌ها.
+                  نمایش استاندارد مدل با مسیر مستقیمِ صاف، مسیرهای میانجیِ تفکیک‌شده، ضرایب β و R²؛ چیدمان دستی نیز در همین بخش ذخیره می‌شود.
                 </p>
               </div>
               <button type="button" className={btnSecondary} onClick={() => setShowBigDiagram(true)}>
@@ -5441,7 +5420,19 @@ function SemTool() {
               <span className="text-[11px] text-violet-700 dark:text-violet-300">خاموش‌کردن فقط شکل را خلوت می‌کند و مشخصات آماری را تغییر نمی‌دهد.</span>
               <button
                 type="button"
-                className={`${btnLight} ms-auto !border-violet-200 !bg-white !text-violet-700 dark:!border-violet-800 dark:!bg-slate-900 dark:!text-violet-300`}
+                className={`${diagramEditMode ? btnPrimary : btnLight} ms-auto`}
+                onClick={() => setDiagramEditMode((editing) => !editing)}
+              >
+                {diagramEditMode ? "پایان ویرایش چیدمان" : "ویرایش دستی چیدمان"}
+              </button>
+              {Object.keys(diagramPositions).length > 0 && (
+                <button type="button" className={btnLight} onClick={() => setDiagramPositions({})}>
+                  بازگشت به چیدمان خودکار
+                </button>
+              )}
+              <button
+                type="button"
+                className={`${btnLight} !border-violet-200 !bg-white !text-violet-700 dark:!border-violet-800 dark:!bg-slate-900 dark:!text-violet-300`}
                 onClick={() => setShowAmosCovarianceGuide((visible) => !visible)}
                 aria-expanded={showAmosCovarianceGuide}
               >
@@ -5450,7 +5441,16 @@ function SemTool() {
             </div>
             {showAmosCovarianceGuide && <div className="mt-3"><AmosCovarianceGuide nodes={modelNodes} sem={analysisValid ? analysis.sem : null} /></div>}
             <div className="mt-3 rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-              <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} showCovariances={showExogenousCovariances} />
+              <PathDiagram
+                vars={modelVars}
+                nodes={modelNodes}
+                arrows={modelArrows}
+                results={analysisValid ? analysis.sem : null}
+                showCovariances={showExogenousCovariances}
+                editable={diagramEditMode}
+                positions={diagramPositions}
+                onPositionsChange={setDiagramPositions}
+              />
             </div>
           </section>
         )}
@@ -5711,33 +5711,6 @@ function SemTool() {
                   </div>
                 )}
 
-                {answerKey && (
-                  <div>
-                    <h3 className="font-extrabold text-stone-800 dark:text-stone-200">کلید پاسخ (مقادیر هدف در برابر واقعی — مخصوص استاد)</h3>
-                    <p className={`${tinyCls} mt-1`}>
-                      ضرایب β «هدف» هنگام تولید در برابر ضرایب «واقعی» برآوردشده؛ دانشجو باید به ستون واقعی برسد. این
-                      جدول فقط برای استاد است.
-                    </p>
-                    <div className="tool-table-wrap mt-2">
-                      <table className="tool-table">
-                        <thead>
-                          <tr><th>مسیر</th><th>ضریب هدف (β)</th><th>ضریب واقعی (β)</th><th>وضعیت</th></tr>
-                        </thead>
-                        <tbody>
-                          {answerKey.pathTargets.map((pt, i) => (
-                            <tr key={i}>
-                              <td>{nodeLabel(pt.fromNode)} ← {nodeLabel(pt.toNode)}</td>
-                              <td className="number-cell">{fmt(pt.target)}</td>
-                              <td className="number-cell">{fmt(pt.actual)}</td>
-                              <td dangerouslySetInnerHTML={{ __html: Math.abs(pt.actual - pt.target) < 0.15 ? badge(true, "نزدیک به هدف") : badgeWarn("فاصله دارد") }} />
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                    <p className={`${tinyCls} mt-2`}>تعداد تلاش‌های تولید: {answerKey.attempts}</p>
-                  </div>
-                )}
               </div>
             )}
           </section>
@@ -5952,7 +5925,7 @@ function SemTool() {
               <HelpButtons section="report" />
             </div>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                  پیش‌نمایش نهایی با Markdown امن، تیترهای خوانا و جدول‌های واکنش‌گرا نمایش داده می‌شود؛ DOCX، TXT و اکسل نیز حفظ شده‌اند.
+                  پیش‌نمایش نهایی با Markdown امن، تیترهای خوانا و جدول‌های واکنش‌گرا نمایش داده می‌شود؛ از راهبری سریع برای رفتن مستقیم به هر بخش استفاده کنید.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -6096,7 +6069,14 @@ function SemTool() {
               </button>
             </div>
             <ZoomableDiagram>
-              <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} showCovariances={showExogenousCovariances} />
+              <PathDiagram
+                vars={modelVars}
+                nodes={modelNodes}
+                arrows={modelArrows}
+                results={analysisValid ? analysis.sem : null}
+                showCovariances={showExogenousCovariances}
+                positions={diagramPositions}
+              />
             </ZoomableDiagram>
           </div>
         </div>

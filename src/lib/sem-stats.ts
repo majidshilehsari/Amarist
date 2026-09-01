@@ -423,6 +423,13 @@ export type SemEffect = {
   total: number;
 };
 
+/** همبستگیِ برآوردشدهٔ دو گرهٔ برون‌زا که در مدل یک کوواریانس آزاد دارند. */
+export type SemExogenousCorrelation = {
+  leftNode: number;
+  rightNode: number;
+  r: number;
+};
+
 export type SemResults = {
   ordered: number[];
   paths: SemPathResult[];
@@ -432,6 +439,8 @@ export type SemResults = {
   fit: SemFit;
   effects: SemEffect[];
   warnings: string[];
+  /** همهٔ جفت‌های برون‌زا که موتور واقعاً کوواریانسشان را آزاد و برآورد کرده است. */
+  exogenousCorrelations: SemExogenousCorrelation[];
   estimator?: "composite" | "ml";
   measurementLoadings?: MlLoadingEstimate[];
   /** بردارِ پارامترهای برآوردِ ML — برای شروعِ گرم در بوت‌استرپ (اختیاری) */
@@ -775,6 +784,17 @@ export function estimateSem(
 
   const exogNodes = ordered.filter((id) => nodes.find((n) => n.nodeId === id)!.role === "exogenous");
   const q = exogNodes.length;
+  let exogenousCorrelations: SemExogenousCorrelation[] = [];
+  for (let i = 0; i < exogNodes.length; i++) {
+    for (let j = i + 1; j < exogNodes.length; j++) {
+      const leftNode = exogNodes[i];
+      const rightNode = exogNodes[j];
+      const left = pos.get(leftNode)!;
+      const right = pos.get(rightNode)!;
+      const denominator = Math.sqrt(Math.max(1e-12, S[left][left] * S[right][right]));
+      exogenousCorrelations.push({ leftNode, rightNode, r: S[left][right] / denominator });
+    }
+  }
 
   const Psi = Array.from({ length: p }, () => Array(p).fill(0));
   exogNodes.forEach((a) => exogNodes.forEach((b) => (Psi[pos.get(a)!][pos.get(b)!] = S[pos.get(a)!][pos.get(b)!])));
@@ -916,6 +936,26 @@ export function estimateSem(
       mlLoadings = ml.loadings;
       mlParameterVector = ml.parameterVector;
       mlInverseHessian = ml.inverseHessian ?? null;
+      const mlNodeOrder = [...nodes].sort((left, right) => left.nodeId - right.nodeId);
+      const mlNodeIndex = new Map(mlNodeOrder.map((node, index) => [node.nodeId, index]));
+      exogenousCorrelations = [];
+      const mlExogenous = mlNodeOrder.filter((node) => node.role === "exogenous");
+      for (let i = 0; i < mlExogenous.length; i++) {
+        for (let j = i + 1; j < mlExogenous.length; j++) {
+          const leftNode = mlExogenous[i].nodeId;
+          const rightNode = mlExogenous[j].nodeId;
+          const left = mlNodeIndex.get(leftNode)!;
+          const right = mlNodeIndex.get(rightNode)!;
+          const denominator = Math.sqrt(
+            Math.max(1e-12, ml.latentCov[left][left] * ml.latentCov[right][right])
+          );
+          exogenousCorrelations.push({
+            leftNode,
+            rightNode,
+            r: ml.latentCov[left][right] / denominator,
+          });
+        }
+      }
       pathResults.splice(
         0,
         pathResults.length,
@@ -983,6 +1023,7 @@ export function estimateSem(
     fit,
     effects,
     warnings,
+    exogenousCorrelations,
     estimator: usedEstimator,
     measurementLoadings: mlLoadings,
     parameterVector: mlParameterVector,

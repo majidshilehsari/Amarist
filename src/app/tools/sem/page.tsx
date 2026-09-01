@@ -96,6 +96,8 @@ import type { SemGeneratorWorkerResponse } from "@/workers/sem-generator.worker"
 import SemGenerationModal, { type GenerationPhase } from "@/components/sem-generation-modal";
 import ErrorBoundary from "@/components/error-boundary";
 import HelpButtons from "@/components/help-buttons";
+import AmosCovarianceGuide from "@/components/amos-covariance-guide";
+import MarkdownReport from "@/components/markdown-report";
 import PathDiagram from "@/components/path-diagram";
 import ProgressStepper, { type StepStatus } from "@/components/progress-stepper";
 import ResultModal from "@/components/result-modal";
@@ -1126,7 +1128,7 @@ function loadInitialProjects(): Project[] {
 
 
 // ------------------------------------------------------------
-// گزارش متنی (txt / کپی)
+// گزارش متنی قدیمی (TXT / شیت گزارش Excel)
 // ------------------------------------------------------------
 
 function buildReportText(
@@ -1205,6 +1207,15 @@ function buildReportText(
       L.push(`  ${left.label} ↔ ${right.label}: r=${fmt(r)} | p=${fmtP(p)}${starP(p)} | ${p < 0.05 ? "معنادار" : "غیرمعنادار"}`);
     }
   }
+  L.push("۵-۵) روابط کوواریانس آزاد در مدل برآوردشده (برای بازسازی در AMOS):");
+  sem.exogenousCorrelations?.forEach((relation) => {
+    const left = nodes.find((node) => node.nodeId === relation.leftNode);
+    const right = nodes.find((node) => node.nodeId === relation.rightNode);
+    if (!left || !right) return;
+    L.push(`  ${left.label} ↔ ${right.label}: r استاندارد=${fmt(relation.r)} | معادل AMOS: ${amosSourceLabel(left)} ↔ ${amosSourceLabel(right)}`);
+  });
+  L.push("  این روابط جزو مشخصات واقعی مدل‌اند؛ پنهان‌کردن آن‌ها در دیاگرام، برآورد را غیرفعال نمی‌کند.");
+  L.push(`  ${amosQ1Q2MappingText(nodes)}`);
   L.push("  پیش‌فرض تولید: همهٔ جفت‌های پیش‌بینِ برون‌زا در سطح ۰٫۰۵ معنادار و VIF ماتریس حداکثر ۴ باشد.");
   L.push("  ** p < 0.01 ، * p < 0.05 (دوطرفه؛ حذف زوجی داده‌های گمشده)");
   L.push("");
@@ -1284,6 +1295,347 @@ function buildReportText(
     L.push(alphaReportTextRef);
   }
   return L.join("\n");
+}
+
+function markdownCell(value: string | number): string {
+  const escaped = String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/\r?\n/g, " ")
+    .replace(/([|`*_\[\]<>])/g, "\\$1")
+    .trim();
+  return escaped || "—";
+}
+
+function markdownTable(headers: string[], rows: (string | number)[][]): string {
+  const header = `| ${headers.map(markdownCell).join(" | ")} |`;
+  const separator = `| ${headers.map(() => "---").join(" | ")} |`;
+  const body = rows.length
+    ? rows.map((row) => `| ${headers.map((_, index) => markdownCell(row[index] ?? "—")).join(" | ")} |`)
+    : [`| ${headers.map((_, index) => index === 0 ? "موردی وجود ندارد" : "—").join(" | ")} |`];
+  return [header, separator, ...body].join("\n");
+}
+
+function markdownCorrelationTable(table: CorrelationTableData): string {
+  return markdownTable(
+    ["متغیر", ...table.labels],
+    table.labels.map((label, row) => [
+      label,
+      ...table.labels.map((_, column) => {
+        if (row === column) return "1";
+        if (row < column) return "—";
+        const value = table.r?.[row]?.[column] ?? NaN;
+        const p = table.p?.[row]?.[column] ?? 1;
+        return `${fmt(value)}${p < 0.01 ? "**" : p < 0.05 ? "*" : ""}`;
+      }),
+    ])
+  );
+}
+
+function amosSourceLabel(node: ModelNode): string {
+  const normalized = node.label.replace(/\s/g, "").toUpperCase();
+  if (normalized === "Q1") return "Q1";
+  if (normalized === "Q2S1") return "e11";
+  if (normalized === "Q2S2") return "e12";
+  return node.kind === "total" ? node.label : `منبع ورودیِ «${node.label}»`;
+}
+
+function amosQ1Q2MappingText(nodes: ModelNode[]): string {
+  const labels = new Set(
+    nodes.filter((node) => node.role === "exogenous").map((node) => node.label.replace(/\s/g, "").toUpperCase())
+  );
+  const current = ["Q1", "Q2S1", "Q2S2"].every((label) => labels.has(label));
+  return `${current ? "نگاشت دقیق مدل جاری" : "نمونهٔ معادل‌سازی"}: Q1 ↔ Q2S1 معادل Q1 ↔ e11؛ Q1 ↔ Q2S2 معادل Q1 ↔ e12؛ و Q2S1 ↔ Q2S2 معادل e11 ↔ e12 است، به شرط آنکه e11 و e12 دایره‌های ورودی همان دو متغیر در فایل AMOS باشند.`;
+}
+
+/** گزارش Markdown برای نمایش آراسته در سایت و دانلود مستقیم با پسوند md. */
+function buildReportMarkdown(
+  projectName: string,
+  source: "generate" | "real",
+  vars: VariableSpec[],
+  nodes: ModelNode[],
+  analysis: Analysis | null,
+  answerKey: SemAnswerKey | null,
+  bootResults: BootResult[] | null,
+  n: number,
+  alphaReportTextRef?: string
+): string {
+  if (!analysis) {
+    return [
+      "# گزارش آماری آماریست",
+      "",
+      `> **پروژه:** ${markdownCell(projectName || "بدون نام")}`,
+      "",
+      "هنوز تحلیلی اجرا نشده است. ابتدا از مرحلهٔ «تشخیص» تحلیل را اجرا کنید.",
+    ].join("\n");
+  }
+
+  const { sem, corr, corrAll, corrSubscales, maha, mardia, missing, normals, meas } = analysis;
+  const nodeLabel = (id: number) => nodes.find((node) => node.nodeId === id)?.label ?? `گره ${id}`;
+  const regressionDiagnostics = buildSemRegressionDiagnostics(nodes, sem);
+  const descriptiveRow = (label: string, column: number[]): (string | number)[] => {
+    const valid = column.filter(Number.isFinite);
+    return [
+      label,
+      valid.length,
+      valid.length ? fmt(mean(valid)) : "—",
+      valid.length > 1 ? fmt(sampleStd(valid)) : "—",
+      valid.length ? fmt(Math.min(...valid)) : "—",
+      valid.length ? fmt(Math.max(...valid)) : "—",
+    ];
+  };
+  const descriptiveRows: (string | number)[][] = [];
+  vars.forEach((variable) => {
+    const variableNodes = nodes.filter((node) => node.varId === variable.id);
+    if (!variable.subscales.length) {
+      const node = variableNodes[0];
+      if (node) descriptiveRows.push(descriptiveRow(variable.name, analysis.nodeCols[node.nodeId]));
+      return;
+    }
+    if (variable.hasTotal) {
+      const total = variableNodes.find((node) => node.kind === "total") ?? variableNodes[0];
+      if (total) descriptiveRows.push(descriptiveRow(`${variable.name} (نمره کل)`, analysis.nodeCols[total.nodeId]));
+      variable.subscales.forEach((subscale, index) => {
+        const column = analysis.indicatorCols[variable.id]?.[index];
+        if (column) descriptiveRows.push(descriptiveRow(`${variable.name} — ${subscale.name}`, column));
+      });
+      return;
+    }
+    variableNodes.forEach((node, index) => descriptiveRows.push(
+      descriptiveRow(`${variable.name} — ${variable.subscales[index]?.name ?? node.label}`, analysis.nodeCols[node.nodeId])
+    ));
+  });
+  const markdown: string[] = [];
+  const push = (...lines: string[]) => markdown.push(...lines);
+
+  push(
+    "# گزارش نهایی مدل معادلات ساختاری",
+    "",
+    `> **پروژه:** ${markdownCell(projectName || "بدون نام")}  `,
+    `> **منبع داده:** ${source === "generate" ? "دادهٔ تمرینی تولیدشده" : "دادهٔ واقعی کاربر"}  `,
+    `> **حجم نمونه:** ${n.toLocaleString("fa-IR")}  `,
+    `> **روش برآورد:** ${sem.estimator === "ml" ? "Maximum Likelihood هم‌زمان، هم‌ارز با AMOS" : "برآورد مرکب"}`,
+    "",
+    "---",
+    "",
+    "## مشخصات متغیرها و دامنه نمره",
+    "",
+    markdownTable(
+      ["متغیر", "واحد گزارش", "حداقل", "حداکثر", "نقش"],
+      vars.flatMap((variable) => {
+        const role = variable.role === "exogenous" ? "برون‌زا" : variable.role === "mediator" ? "میانجی" : "درون‌زا";
+        if (!variable.subscales.length) return [[variable.name, "نمره", variable.totalMin, variable.totalMax, role]];
+        const subscaleRows = variable.subscales.map((subscale) => [variable.name, subscale.name, subscale.min, subscale.max, role]);
+        return variable.hasTotal
+          ? [[variable.name, "نمره کل", variable.totalMin, variable.totalMax, role], ...subscaleRows]
+          : subscaleRows;
+      })
+    ),
+    "",
+    "## آمار توصیفی",
+    "",
+    markdownTable(["متغیر / زیرمقیاس", "n", "میانگین", "انحراف معیار", "کمینه", "بیشینه"], descriptiveRows),
+    "",
+    "## ۱. داده‌های گمشده",
+    "",
+    markdownTable(["ستون", "تعداد گمشده"], missing.map((item) => [item.col, item.count])),
+    "",
+    "## ۲. داده‌های پرت چندمتغیری",
+    "",
+    maha.valid
+      ? `> **${maha.outliers.length.toLocaleString("fa-IR")} مورد** با معیار سخت‌گیرانهٔ p < 0.05 علامت‌گذاری شد. این موارد نامزد بررسی‌اند و نباید خودکار حذف شوند.`
+      : `> محاسبه انجام نشد: ${maha.message}`,
+    "",
+    "## ۳. نرمال‌بودن تک‌متغیری",
+    "",
+    markdownTable(
+      ["متغیر / شاخص", "کجی", "C.R. کجی", "کشیدگی", "C.R. کشیدگی", "نتیجه"],
+      normals.map((item) => [
+        item.name,
+        fmt(item.skew),
+        fmt(item.skewCr),
+        fmt(item.kurt),
+        fmt(item.kurtCr),
+        Math.abs(item.skew) < 3 && Math.abs(item.kurt) < 10 ? "✅ برقرار" : "⚠️ نیازمند بررسی",
+      ])
+    ),
+    "",
+    "> معیار کلاین: |کجی| < ۳ و |کشیدگی| < ۱۰.",
+    "",
+    "## ۴. نرمال‌بودن چندمتغیری؛ مردیای سازگار با AMOS",
+    "",
+    markdownTable(
+      ["کشیدگی مردیا", "C.R.", "معیار", "نتیجه"],
+      mardia.valid
+        ? [[fmt(mardia.kurtosis, 3), fmt(mardia.cr, 3), `|C.R.| ≤ ${AMOS_MARDIA_CR_LIMIT}`, Math.abs(mardia.cr) <= AMOS_MARDIA_CR_LIMIT ? "✅ برقرار" : "⚠️ تخطی"]]
+        : [["—", "—", `|C.R.| ≤ ${AMOS_MARDIA_CR_LIMIT}`, mardia.message]]
+    ),
+    "",
+    "> فاصله‌ها با n/(n−1) هم‌مقیاس و مرکز نمونهٔ محدود p(p+2)(n−1)/(n+1) اعمال شده است.",
+    "",
+    "## ۵. همبستگی‌ها و کوواریانس‌های مدل",
+    "",
+    "### ۵-۱. همبستگی نمرات کل / گره‌های مدل",
+    "",
+    markdownCorrelationTable(corr),
+    "",
+    "### ۵-۲. همبستگی نمره کل و زیرمقیاس‌ها",
+    "",
+    markdownCorrelationTable(corrAll),
+    "",
+    "### ۵-۳. همبستگی زیرمقیاس‌ها",
+    "",
+    markdownCorrelationTable(corrSubscales),
+    "",
+    "### ۵-۴. کوواریانس‌های آزاد بین پیش‌بین‌های برون‌زا",
+    ""
+  );
+
+  const exogenousNodes = nodes.filter((node) => node.role === "exogenous");
+  const covarianceRows: (string | number)[][] = [];
+  for (let i = 0; i < exogenousNodes.length; i++) {
+    for (let j = i + 1; j < exogenousNodes.length; j++) {
+      const left = exogenousNodes[i];
+      const right = exogenousNodes[j];
+      const estimate = sem.exogenousCorrelations?.find(
+        (item) =>
+          (item.leftNode === left.nodeId && item.rightNode === right.nodeId) ||
+          (item.leftNode === right.nodeId && item.rightNode === left.nodeId)
+      )?.r;
+      covarianceRows.push([
+        `${left.label} ↔ ${right.label}`,
+        estimate != null && Number.isFinite(estimate) ? fmt(estimate, 3) : "پس از تحلیل",
+        `${left.label} ↔ ${right.label}`,
+        `${amosSourceLabel(left)} ↔ ${amosSourceLabel(right)}`,
+      ]);
+    }
+  }
+  push(
+    markdownTable(["رابطه واقعی مدل", "r برآوردی", "رسم استاندارد در AMOS", "اگر منبع ورودی دارد"], covarianceRows),
+    "",
+    `> **مهم:** آماریست همهٔ جفت‌های جدول بالا را آزاد می‌کند. اگر متغیر مشاهده‌شده در AMOS از دایرهٔ خطا/منبع وارد شده، فلش دوطرفه را به همان دایره وصل کنید. ${amosQ1Q2MappingText(nodes)}`,
+    "",
+    "## ۶. هم‌خطی و استقلال خطاها",
+    "",
+    "### ۶-۱. Tolerance و VIF هر پیش‌بین",
+    "",
+    markdownTable(
+      ["متغیر وابسته", "پیش‌بین", "Tolerance", "VIF", "نتیجه"],
+      regressionDiagnostics.collinearity.map((row) => [row.dependentLabel, row.predictorLabel, fmt(row.tolerance), fmt(row.vif), row.pass ? "✅ برقرار" : "⚠️ برقرار نیست"])
+    ),
+    "",
+    "### ۶-۲. دوربین–واتسون هر معادله",
+    "",
+    markdownTable(
+      ["متغیر وابسته", "دوربین–واتسون", "دامنه قابل قبول", "نتیجه"],
+      regressionDiagnostics.independence.map((row) => [row.dependentLabel, Number.isFinite(row.durbinWatson) ? fmt(row.durbinWatson) : "تعریف‌نشده", "۱٫۵ تا ۲٫۵", row.pass ? "✅ برقرار" : "⚠️ برقرار نیست"])
+    ),
+    "",
+    "## ۷. ضرایب مسیر",
+    "",
+    markdownTable(
+      ["مسیر", "B", "SE", "C.R. / t", "p", "β", "نتیجه"],
+      sem.paths.map((path) => [
+        `${nodeLabel(path.from)} → ${nodeLabel(path.to)}`,
+        fmt(path.b),
+        fmt(path.se),
+        fmt(path.t),
+        `${fmtP(path.p)}${starP(path.p)}`,
+        fmt(path.std),
+        path.p < 0.05 ? "✅ معنادار" : "غیرمعنادار",
+      ])
+    ),
+    "",
+    "## ۸. اثرهای مستقیم، غیرمستقیم و کل",
+    ""
+  );
+
+  const effectRows: (string | number)[][] = [];
+  if (bootResults?.length) {
+    bootResults.forEach((result) => effectRows.push([
+      bootPathLabelOf(nodes, vars, result),
+      result.viaVar === null ? fmt(result.direct) : "—",
+      fmt(result.indirect),
+      `${fmt(result.lo)} تا ${fmt(result.hi)}`,
+      `${fmtP(result.p)}${starP(result.p)}`,
+      result.viaVar === null ? fmt(result.total) : "—",
+      result.p < 0.05 ? "✅ معنادار" : "غیرمعنادار",
+    ]));
+  } else {
+    sem.effects.forEach((effect) => effectRows.push([
+      `${varNameOf(vars, effect.fromVar)} → ${varNameOf(vars, effect.toVar)}`,
+      fmt(effect.direct),
+      fmt(effect.indirect),
+      "بوت‌استرپ اجرا نشده",
+      "—",
+      fmt(effect.total),
+      "—",
+    ]));
+  }
+  push(
+    markdownTable(["اثر", "مستقیم", "غیرمستقیم", "CI95%", "p", "کل", "نتیجه"], effectRows),
+    "",
+    "## ۹. ضریب تعیین متغیرهای درون‌زا",
+    "",
+    markdownTable(
+      ["متغیر", "R²", "درصد واریانس تبیین‌شده"],
+      nodes.filter((node) => node.role !== "exogenous").map((node) => [
+        node.label,
+        fmt(sem.r2[node.nodeId] ?? 0),
+        `${fmt((sem.r2[node.nodeId] ?? 0) * 100)}٪`,
+      ])
+    ),
+    "",
+    "## ۱۰. شاخص‌های برازش مدل",
+    "",
+    sem.fit.valid
+      ? markdownTable(["شاخص", "مقدار", "معیار", "تفسیر"], fitReportRows(sem.fit).map((row) => [row.index, row.value, row.criterion, row.interpretation]))
+      : `> ${sem.fit.message ?? "برازش قابل محاسبه نیست."}`
+  );
+
+  if (meas.length) {
+    push(
+      "",
+      "## ۱۱. مدل اندازه‌گیری",
+      "",
+      markdownTable(
+        ["سازه", "آلفای کرونباخ", "شاخص", "بار عاملی استاندارد"],
+        meas.flatMap((measurement) => measurement.subNames.map((name, index) => [
+          measurement.name,
+          index === 0 ? fmt(measurement.alpha) : "—",
+          name,
+          fmt(measurement.loadings[index]),
+        ]))
+      )
+    );
+  }
+
+  if (answerKey) {
+    push(
+      "",
+      "## ۱۲. کلید پاسخ دادهٔ تمرینی",
+      "",
+      markdownTable(
+        ["مسیر", "مقدار هدف", "مقدار واقعی"],
+        answerKey.pathTargets.map((target) => [
+          `${nodeLabel(target.fromNode)} → ${nodeLabel(target.toNode)}`,
+          fmt(target.target),
+          fmt(target.actual),
+        ])
+      )
+    );
+  }
+
+  if (alphaReportTextRef) {
+    push("", "## پیوست پایایی گویه‌ها", "", "~~~text", alphaReportTextRef.replace(/~~~/g, "~ ~ ~"), "~~~");
+  }
+
+  push(
+    "",
+    "---",
+    "",
+    "_این گزارش به‌صورت خودکار توسط آماریست تولید شده است. تفسیر نهایی باید با مبانی نظری پژوهش همراه شود._"
+  );
+  return markdown.join("\n");
 }
 
 // ------------------------------------------------------------
@@ -1476,6 +1828,20 @@ function buildDocxReport(
   }
   children.push(docH("۵-۴) معناداری همبستگیِ پیش‌بین‌های برون‌زا"));
   children.push(docTable(["جفت پیش‌بین", "r", "p", "نتیجه"], exogenousCorrelationRows));
+  children.push(docH("۵-۵) کوواریانس‌های آزادِ مدل و معادل AMOS"));
+  children.push(docTable(
+    ["رابطهٔ واقعی مدل", "r استانداردشده", "معادل رسم در AMOS"],
+    (sem.exogenousCorrelations ?? []).map((relation) => {
+      const left = nodes.find((node) => node.nodeId === relation.leftNode);
+      const right = nodes.find((node) => node.nodeId === relation.rightNode);
+      return [
+        `${left?.label ?? relation.leftNode} ↔ ${right?.label ?? relation.rightNode}`,
+        fmt(relation.r),
+        left && right ? `${amosSourceLabel(left)} ↔ ${amosSourceLabel(right)}` : "—",
+      ];
+    })
+  ));
+  children.push(docP(`این روابط در آماریست آزاد و برآورد می‌شوند. اگر متغیر مشاهده‌شده در AMOS منبع ورودی/خطا دارد، فلش دوطرفه را به همان دایره وصل کنید. ${amosQ1Q2MappingText(nodes)}`, { size: 20, color: "666666" }));
   children.push(docP("پیش‌فرض تولید: همهٔ جفت‌های پیش‌بینِ برون‌زا در سطح ۰٫۰۵ معنادار و VIF ماتریس حداکثر ۴ باشد.", { size: 20, color: "666666" }));
   children.push(docP("** p < 0.01 ، * p < 0.05 (دوطرفه؛ حذف زوجی داده‌های گمشده)", { size: 20, color: "666666" }));
 
@@ -1647,6 +2013,9 @@ function SemTool() {
   const [status, setStatus] = useState<{ text: string; kind: "" | "ok" | "err" }>({ text: "", kind: "" });
   const [modal, setModal] = useState<ModalState>(null);
   const [showBigDiagram, setShowBigDiagram] = useState(false);
+  /** کوواریانس‌های برون‌زا جزو مدل‌اند؛ این state فقط نمایششان را در دیاگرام کنترل می‌کند. */
+  const [showExogenousCovariances, setShowExogenousCovariances] = useState(true);
+  const [showAmosCovarianceGuide, setShowAmosCovarianceGuide] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
   const [completed, setCompleted] = useState<Record<string, boolean>>({});
   const initialAlpha = defaultAlphaProjectData(initialVars);
@@ -2547,7 +2916,8 @@ function SemTool() {
           };
         });
         const meas = vars
-          .filter((v) => (indicatorCols[v.id]?.length ?? 0) >= 2)
+          // مقیاس غیرجمع‌پذیر (مانند ERQ) سازه/آلفای کل ندارد؛ هر زیرمقیاس مستقل می‌ماند.
+          .filter((v) => v.hasTotal && (indicatorCols[v.id]?.length ?? 0) >= 2)
           .map((v) => ({
             varId: v.id,
             name: v.name,
@@ -2910,20 +3280,48 @@ function SemTool() {
     }
   };
 
+  const reportMarkdown = () => buildReportMarkdown(
+    currentProject?.name ?? "پروژه",
+    source,
+    vars,
+    modelNodes,
+    analysis,
+    answerKey,
+    bootResults,
+    rows.length,
+    alphaReportText()
+  );
+
+  const exportMarkdown = () => {
+    try {
+      const markdown = reportMarkdown();
+      const blob = new Blob(["\uFEFF" + markdown], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "amarist-sem-report.md";
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setStatus({ text: "گزارش Markdown دانلود شد.", kind: "ok" });
+    } catch (err) {
+      setStatus({ text: (err as Error).message, kind: "err" });
+    }
+  };
+
   const copyReport = async () => {
     try {
-      const text = buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length, alphaReportText());
+      const markdown = reportMarkdown();
       if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(text);
+        await navigator.clipboard.writeText(markdown);
       } else {
         const ta = document.createElement("textarea");
-        ta.value = text;
+        ta.value = markdown;
         document.body.appendChild(ta);
         ta.select();
         document.execCommand("copy");
         document.body.removeChild(ta);
       }
-      setStatus({ text: "کل گزارش کپی شد.", kind: "ok" });
+      setStatus({ text: "گزارش Markdown کپی شد.", kind: "ok" });
     } catch (err) {
       setStatus({ text: (err as Error).message, kind: "err" });
     }
@@ -3829,6 +4227,28 @@ function SemTool() {
               </div>
             )}
 
+            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-violet-200 bg-violet-50/70 p-3 dark:border-violet-800 dark:bg-violet-950/25">
+              <label className="flex cursor-pointer items-center gap-2 text-[12px] font-black text-violet-900 dark:text-violet-100">
+                <input
+                  type="checkbox"
+                  checked={showExogenousCovariances}
+                  onChange={(event) => setShowExogenousCovariances(event.target.checked)}
+                  className="h-4 w-4 accent-violet-600"
+                />
+                نمایش کوواریانس‌های پیش‌بین‌های برون‌زا ـ مطابق AMOS
+              </label>
+              <span className="text-[11px] text-violet-700 dark:text-violet-300">فقط نمایش را عوض می‌کند؛ برآورد این روابط همیشه فعال است.</span>
+              <button
+                type="button"
+                className={`${btnLight} ms-auto !border-violet-200 !bg-white !text-violet-700 dark:!border-violet-800 dark:!bg-slate-900 dark:!text-violet-300`}
+                onClick={() => setShowAmosCovarianceGuide((visible) => !visible)}
+                aria-expanded={showAmosCovarianceGuide}
+              >
+                {showAmosCovarianceGuide ? "بستن راهنمای AMOS" : "چطور همین مدل را در AMOS بسازم؟"}
+              </button>
+            </div>
+            {showAmosCovarianceGuide && <div className="mt-3"><AmosCovarianceGuide nodes={modelNodes} sem={analysisValid ? analysis.sem : null} /></div>}
+
             <div className="mt-4 space-y-4">
               <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
                 <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">
@@ -3872,7 +4292,7 @@ function SemTool() {
               <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
                 <p className="text-[12px] font-bold text-stone-600 dark:text-stone-300">پیش‌نمایش مدل</p>
                 <div className="mt-2">
-                  <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} />
+                  <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} showCovariances={showExogenousCovariances} />
                 </div>
               </div>
             </div>
@@ -5008,8 +5428,29 @@ function SemTool() {
                 مشاهده بزرگ
               </button>
             </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-violet-200 bg-violet-50/70 p-3 dark:border-violet-800 dark:bg-violet-950/25">
+              <label className="flex cursor-pointer items-center gap-2 text-[12px] font-black text-violet-900 dark:text-violet-100">
+                <input
+                  type="checkbox"
+                  checked={showExogenousCovariances}
+                  onChange={(event) => setShowExogenousCovariances(event.target.checked)}
+                  className="h-4 w-4 accent-violet-600"
+                />
+                نمایش کوواریانس‌های پیش‌بین‌های برون‌زا ـ مطابق AMOS
+              </label>
+              <span className="text-[11px] text-violet-700 dark:text-violet-300">خاموش‌کردن فقط شکل را خلوت می‌کند و مشخصات آماری را تغییر نمی‌دهد.</span>
+              <button
+                type="button"
+                className={`${btnLight} ms-auto !border-violet-200 !bg-white !text-violet-700 dark:!border-violet-800 dark:!bg-slate-900 dark:!text-violet-300`}
+                onClick={() => setShowAmosCovarianceGuide((visible) => !visible)}
+                aria-expanded={showAmosCovarianceGuide}
+              >
+                {showAmosCovarianceGuide ? "بستن راهنمای AMOS" : "راهنمای بازسازی در AMOS"}
+              </button>
+            </div>
+            {showAmosCovarianceGuide && <div className="mt-3"><AmosCovarianceGuide nodes={modelNodes} sem={analysisValid ? analysis.sem : null} /></div>}
             <div className="mt-3 rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-              <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} />
+              <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} showCovariances={showExogenousCovariances} />
             </div>
           </section>
         )}
@@ -5511,32 +5952,31 @@ function SemTool() {
               <HelpButtons section="report" />
             </div>
                 <p className="mt-1 text-[13px] leading-6 text-stone-500 dark:text-stone-400">
-                  گزارش کامل تحلیل به‌صورت متن آماده. می‌توانید کپی کنید یا docx / txt دانلود کنید.
+                  پیش‌نمایش نهایی با Markdown امن، تیترهای خوانا و جدول‌های واکنش‌گرا نمایش داده می‌شود؛ DOCX، TXT و اکسل نیز حفظ شده‌اند.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button type="button" className={btnPrimary} onClick={exportDocx}>
+                <button type="button" className={btnPrimary} onClick={exportMarkdown}>
+                  <Download className="h-4 w-4" />
+                  دانلود Markdown
+                </button>
+                <button type="button" className={btnSecondary} onClick={exportDocx}>
                   <FileText className="h-4 w-4" />
-                  دانلود گزارش docx
+                  دانلود DOCX
                 </button>
                 <button type="button" className={btnLight} onClick={exportTxt}>
                   <FileText className="h-4 w-4" />
-                  گزارش txt
+                  گزارش TXT
                 </button>
                 <button type="button" className={btnLight} onClick={copyReport}>
                   <Copy className="h-4 w-4" />
-                  کپی گزارش
+                  کپی Markdown
                 </button>
               </div>
             </div>
 
-            <div className="mt-4 rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
-              <pre
-                dir="rtl"
-                className="max-h-[520px] overflow-auto whitespace-pre-wrap text-[12.5px] leading-7 text-stone-700 dark:text-stone-300"
-              >
-                {buildReportText(vars, modelNodes, analysis, answerKey, bootResults, rows.length, alphaReportText())}
-              </pre>
+            <div className="mt-4 max-h-[72vh] overflow-auto rounded-2xl border border-stone-200 bg-stone-50 p-2 shadow-inner dark:border-stone-700 dark:bg-slate-950">
+              <MarkdownReport markdown={reportMarkdown()} />
             </div>
           </section>
         )}
@@ -5597,16 +6037,20 @@ function SemTool() {
               <div className="rounded-2xl border border-stone-200 bg-white p-4 dark:border-stone-700 dark:bg-slate-800">
                 <p className="text-sm font-extrabold text-stone-800 dark:text-stone-200">خروجی‌های نهایی</p>
                 <p className={`${tinyCls} mt-1`}>
-                  اکسل کامل (داده، نمرات کل، گزارش)، گزارش docx و txt، و قالب داده برای پر کردن مجدد.
+                  اکسل کامل (داده، نمرات کل، گزارش)، گزارش‌های Markdown، DOCX و TXT، و قالب داده برای پر کردن مجدد.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button type="button" className={btnPrimary} onClick={exportExcel}>
                     <Download className="h-4 w-4" />
                     دانلود اکسل کامل
                   </button>
+                  <button type="button" className={btnLight} onClick={exportMarkdown}>
+                    <Download className="h-4 w-4" />
+                    گزارش Markdown
+                  </button>
                   <button type="button" className={btnLight} onClick={exportDocx}>
                     <FileText className="h-4 w-4" />
-                    گزارش docx
+                    گزارش DOCX
                   </button>
                   <button type="button" className={btnLight} onClick={downloadTemplate}>
                     <FileSpreadsheet className="h-4 w-4" />
@@ -5652,7 +6096,7 @@ function SemTool() {
               </button>
             </div>
             <ZoomableDiagram>
-              <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} />
+              <PathDiagram vars={modelVars} nodes={modelNodes} arrows={modelArrows} results={analysisValid ? analysis.sem : null} showCovariances={showExogenousCovariances} />
             </ZoomableDiagram>
           </div>
         </div>

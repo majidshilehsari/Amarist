@@ -1,5 +1,6 @@
 "use client";
 
+import { useId } from "react";
 import type { VariableSpec } from "@/lib/sem-generator";
 import type { ModelArrow, ModelNode, Role, SemResults } from "@/lib/sem-stats";
 
@@ -24,12 +25,19 @@ export default function PathDiagram({
   nodes,
   arrows,
   results,
+  showCovariances = true,
 }: {
   vars: VariableSpec[];
   nodes: ModelNode[];
   arrows: ModelArrow[];
   results?: SemResults | null;
+  /** نمایش بصریِ کوواریانس‌هایی که موتور بین همهٔ گره‌های برون‌زا آزاد می‌کند. */
+  showCovariances?: boolean;
 }) {
+  const markerPrefix = useId().replace(/:/g, "");
+  const arrowMarkerId = `${markerPrefix}-arrow`;
+  const subArrowMarkerId = `${markerPrefix}-arrow-sub`;
+  const covarianceMarkerId = `${markerPrefix}-covariance-arrow`;
   const nodeW = 190;
   const nodeH = 54;
   const colGap = 440;
@@ -147,8 +155,17 @@ export default function PathDiagram({
     }
   }
 
+  const exogenousNodes = nodes.filter((node) => node.role === "exogenous");
+  const covariancePairs: { left: ModelNode; right: ModelNode; index: number }[] = [];
+  for (let i = 0; i < exogenousNodes.length; i++) {
+    for (let j = i + 1; j < exogenousNodes.length; j++) {
+      covariancePairs.push({ left: exogenousNodes[i], right: exogenousNodes[j], index: covariancePairs.length });
+    }
+  }
+
   // ---------- bounding box واقعی همه عناصر ----------
-  const pad = 100;
+  // قوس‌های کوواریانس در سمت آزادِ گره‌های برون‌زا رسم می‌شوند؛ padding با تعداد جفت‌ها رشد می‌کند.
+  const pad = showCovariances ? Math.max(100, 74 + covariancePairs.length * 15) : 100;
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
@@ -174,6 +191,12 @@ export default function PathDiagram({
   const betaOf = (from: number, to: number) =>
     results?.paths.find((p) => p.from === from && p.to === to)?.std;
   const r2Of = (id: number) => results?.r2[id];
+  const correlationOf = (leftNode: number, rightNode: number) =>
+    results?.exogenousCorrelations?.find(
+      (item) =>
+        (item.leftNode === leftNode && item.rightNode === rightNode) ||
+        (item.leftNode === rightNode && item.rightNode === leftNode)
+    )?.r;
 
   return (
     <div dir="ltr" className="w-full overflow-auto">
@@ -186,13 +209,64 @@ export default function PathDiagram({
       >
         <g transform={`translate(${offX}, ${offY})`}>
           <defs>
-            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <marker id={arrowMarkerId} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
             </marker>
-            <marker id="arrow-sub" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <marker id={subArrowMarkerId} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b" />
+            </marker>
+            <marker id={covarianceMarkerId} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c3aed" />
             </marker>
           </defs>
+
+          {/* کوواریانس‌های آزاد بین همهٔ گره‌های برون‌زا */}
+          {showCovariances && covariancePairs.map(({ left, right, index }) => {
+            const from = nodePos.get(left.nodeId);
+            const to = nodePos.get(right.nodeId);
+            if (!from || !to) return null;
+            const horizontal = Math.abs(from.cx - to.cx) > Math.abs(from.cy - to.cy) * 1.2;
+            let x1: number;
+            let y1: number;
+            let x2: number;
+            let y2: number;
+            let controlX: number;
+            let controlY: number;
+            if (horizontal) {
+              x1 = from.cx;
+              y1 = from.cy - from.h / 2;
+              x2 = to.cx;
+              y2 = to.cy - to.h / 2;
+              controlX = (x1 + x2) / 2;
+              controlY = Math.min(y1, y2) - 46 - index * 12;
+            } else {
+              x1 = from.cx - from.w / 2;
+              y1 = from.cy;
+              x2 = to.cx - to.w / 2;
+              y2 = to.cy;
+              controlX = Math.min(x1, x2) - 52 - index * 14;
+              controlY = (y1 + y2) / 2;
+            }
+            const labelX = (x1 + 2 * controlX + x2) / 4;
+            const labelY = (y1 + 2 * controlY + y2) / 4;
+            const r = correlationOf(left.nodeId, right.nodeId);
+            return (
+              <g key={`cov-${left.nodeId}-${right.nodeId}`}>
+                <path
+                  d={`M ${x1} ${y1} Q ${controlX} ${controlY} ${x2} ${y2}`}
+                  fill="none"
+                  stroke="#7c3aed"
+                  strokeWidth={1.9}
+                  markerStart={`url(#${covarianceMarkerId})`}
+                  markerEnd={`url(#${covarianceMarkerId})`}
+                />
+                <rect x={labelX - 27} y={labelY - 11} width={54} height={20} rx={6} fill="#f5f3ff" stroke="#c4b5fd" />
+                <text x={labelX} y={labelY + 3} textAnchor="middle" fontSize={10} fontWeight={800} fill="#6d28d9">
+                  {r != null && Number.isFinite(r) ? `r=${r.toFixed(2)}` : "cov"}
+                </text>
+              </g>
+            );
+          })}
 
           {/* فلش‌های مدل بین گره‌ها */}
           {active.map((a, i) => {
@@ -221,10 +295,10 @@ export default function PathDiagram({
                     fill="none"
                     stroke="#64748b"
                     strokeWidth={1.8}
-                    markerEnd="url(#arrow)"
+                    markerEnd={`url(#${arrowMarkerId})`}
                   />
                 ) : (
-                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#64748b" strokeWidth={1.8} markerEnd="url(#arrow)" />
+                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#64748b" strokeWidth={1.8} markerEnd={`url(#${arrowMarkerId})`} />
                 )}
                 {beta != null && Number.isFinite(beta) && (
                   <g>
@@ -270,7 +344,7 @@ export default function PathDiagram({
                         y2={sp.cy - subH / 2}
                         stroke="#64748b"
                         strokeWidth={1.7}
-                        markerEnd="url(#arrow-sub)"
+                        markerEnd={`url(#${subArrowMarkerId})`}
                       />
                       <rect x={sp.cx - subW / 2} y={sp.cy - subH / 2} width={subW} height={subH} rx={6} fill={subFill} stroke={subStroke} strokeWidth={1} />
                       <text x={sp.cx} y={sp.cy + 3.5} textAnchor="middle" fontSize={9} fontWeight={600} fill="#475569">
@@ -301,9 +375,10 @@ export default function PathDiagram({
           })}
         </g>
       </svg>
-      <p className="mt-2 text-center text-[11px] text-stone-400 dark:text-stone-500">
+      <p className="mt-2 text-center text-[11px] leading-6 text-stone-400 dark:text-stone-500">
         بیضی = متغیر پنهان (مکنون) جمع‌پذیر با نمره کل · مستطیل = متغیر مشاهده‌شده یا زیرمقیاس مستقل (غیرجمع‌پذیر) ·
         رنگ‌ها: برون‌زا (آبی) / میانجی (نارنجی) / درون‌زا (سبز) · R² زیر نام گره‌ها
+        {showCovariances && covariancePairs.length > 0 ? " · فلش دوطرفهٔ بنفش = کوواریانس آزادِ برون‌زا" : ""}
       </p>
     </div>
   );
